@@ -175,6 +175,11 @@ spec:
     fsGroup: {{ $v.runAsUser | default 10001 }}
     seccompProfile:
       type: RuntimeDefault
+  {{- with (include "platform-storage.syncInitContainers" . | trim) }}
+  initContainers:
+    {{- /* object storage sync mounts: initial pull, then native sidecars (restartPolicy: Always) */}}
+    {{- . | nindent 4 }}
+  {{- end }}
   containers:
     - name: nginx
       image: {{ include "frontend.image" . }}
@@ -201,7 +206,7 @@ spec:
       securityContext:
         {{- include "frontend.containerSecurityContext" . | nindent 8 }}
       resources:
-        {{- toYaml $v.resources | nindent 8 }}
+        {{- include "platform-storage.appResources" . | nindent 8 }}
       volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -216,6 +221,9 @@ spec:
           mountPath: /usr/share/nginx/html/config.js
           subPath: config.js
           readOnly: true
+        {{- with (include "platform-storage.volumeMounts" . | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- with $v.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -240,16 +248,20 @@ spec:
       resources:
         {{- toYaml $v.serviceMonitor.exporter.resources | nindent 8 }}
     {{- end }}
+    {{- with (include "platform-storage.syncSidecars" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
   volumes:
-    - name: tmp
-      emptyDir:
-        sizeLimit: 256Mi
+    {{- include "platform-storage.tmpVolume" . | nindent 4 }}
     - name: nginx-conf
       configMap:
         name: {{ include "frontend.fullname" . }}-nginx
     - name: runtime-config
       configMap:
         name: {{ include "frontend.fullname" . }}-runtime-config
+    {{- with (include "platform-storage.volumes" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
     {{- with $v.extraVolumes }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

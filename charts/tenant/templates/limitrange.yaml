@@ -10,7 +10,7 @@ metadata:
 spec:
   limits:
     - type: Container
-      {{- if or $l.defaultCpu $l.defaultMemory }}
+      {{- if or $l.defaultCpu $l.defaultMemory $l.defaultEphemeralStorage }}
       default:
         {{- with $l.defaultCpu }}
         cpu: {{ . | quote }}
@@ -18,17 +18,26 @@ spec:
         {{- with $l.defaultMemory }}
         memory: {{ . | quote }}
         {{- end }}
+        {{- with $l.defaultEphemeralStorage }}
+        ephemeral-storage: {{ . | quote }}
+        {{- end }}
       {{- end }}
       defaultRequest:
         cpu: {{ $l.defaultRequestCpu | quote }}
         memory: {{ $l.defaultRequestMemory | quote }}
-      {{- if or $l.maxCpu $l.maxMemory }}
+        {{- with $l.defaultRequestEphemeralStorage }}
+        ephemeral-storage: {{ . | quote }}
+        {{- end }}
+      {{- if or $l.maxCpu $l.maxMemory $l.maxEphemeralStorage }}
       max:
         {{- with $l.maxCpu }}
         cpu: {{ . | quote }}
         {{- end }}
         {{- with $l.maxMemory }}
         memory: {{ . | quote }}
+        {{- end }}
+        {{- with $l.maxEphemeralStorage }}
+        ephemeral-storage: {{ . | quote }}
         {{- end }}
       {{- end }}
     {{- with $l.maxStorage }}

@@ -101,4 +101,27 @@ spec:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 {{- end }}
+{{- if .Values.data.objectStorage.enabled }}
+---
+# Object storage: MinIO S3 API (Service port 443 -> MinIO pod port 9000).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-minio
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.minio.namespace }}
+      ports:
+        {{- range $np.minio.ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+{{- end }}
 {{- end }}

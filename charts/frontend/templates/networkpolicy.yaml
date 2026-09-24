@@ -43,6 +43,10 @@ spec:
                 operator: In
                 values: {{ toJson . }}
     {{- end }}
+    {{- with (include "platform-storage.netpolEgress" . | trim) }}
+    # object storage sync containers: MinIO S3 API (Service port 443 -> pod port 9000)
+    {{- . | nindent 4 }}
+    {{- end }}
     {{- with $np.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

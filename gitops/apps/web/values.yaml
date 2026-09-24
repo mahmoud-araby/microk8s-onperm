@@ -49,6 +49,24 @@ resources:
   limits:
     memory: 128Mi
 
+# Static assets from MinIO (optional, disabled). Sync mode = no FUSE, no privileges: an init container
+# (minio/mc) mirrors <tenant>-files/web/media/ into an emptyDir before nginx starts, a native sidecar re-syncs
+# every 5 minutes; nginx serves it read-only under /media/. Requires objectStorage in the tenant's tenant.yaml
+# (Secret tenant-s3-credentials + internal-ca-bundle). Content changes without a new image, so keep file names
+# fingerprinted or rely on cache.staticMaxAge.
+objectStorage:
+  enabled: false
+  mounts: []
+  #  - name: media
+  #    mode: sync
+  #    mountPath: /usr/share/nginx/html/media
+  #    readOnly: true
+  #    prefix: web/media/
+  #    direction: pull
+  #    interval: 300
+  #    remove: true
+  #    volume: {type: emptyDir, sizeLimit: 2Gi}
+
 autoscaling:
   hpa:
     enabled: true

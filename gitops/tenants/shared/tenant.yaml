@@ -11,10 +11,13 @@ quota:
   cpu: "200"
   memory: 400Gi
   pods: "2000"
-  pvcs: "20"
-  storage: 500Gi
+  # catalog: one 5Gi generic ephemeral volume (local-nvme) per replica, up to 150 replicas + canary surge.
+  pvcs: "220"
+  storage: 1500Gi
   loadBalancers: "0"
   limitsMemory: 800Gi
+  requestsEphemeralStorage: 2500Gi
+  limitsEphemeralStorage: 10Ti
 
 values:
   tenant:
@@ -59,6 +62,14 @@ values:
         - {name: orders-events, partitions: 48, replicas: 3}
         - {name: payments-events, partitions: 24, replicas: 3}
         - {name: inventory-events, partitions: 24, replicas: 3}
+    # Pool identity "shared" (buckets shared-*, Vault secret/tenants/shared/storage) used by every pooled release;
+    # pooled tenants (e.g. initech) get their own tenant-<t>-s3-credentials when they enable objectStorage.
+    objectStorage:
+      enabled: true
+      buckets: [files]
+      quota: 2TiB
+      volumes:
+        - {name: product-images, bucket: shared-files, prefix: images/, size: 100Gi, readOnly: true}
   externalSecrets:
     secrets:
       - {name: shared-common-secrets, path: common}

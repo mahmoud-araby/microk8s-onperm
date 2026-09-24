@@ -215,6 +215,20 @@
             "integer",
             "number"
           ]
+        },
+        "requestsEphemeralStorage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "limitsEphemeralStorage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
         }
       }
     },
@@ -264,6 +278,27 @@
           ]
         },
         "maxStorage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "defaultEphemeralStorage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "defaultRequestEphemeralStorage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "maxEphemeralStorage": {
           "type": [
             "string",
             "integer",
@@ -421,6 +456,20 @@
               "type": "object",
               "additionalProperties": {
                 "type": "string"
+              }
+            }
+          }
+        },
+        "minio": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer"
               }
             }
           }
@@ -718,6 +767,214 @@
                 "controllerMutationRate": {
                   "type": "number",
                   "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "objectStorage": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "vaultPath": {
+              "type": "string"
+            },
+            "accessKeyProperty": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secretKeyProperty": {
+              "type": "string",
+              "minLength": 1
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^https?://"
+            },
+            "region": {
+              "type": "string"
+            },
+            "secretName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "buckets": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+                    "maxLength": 63
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "name"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+                        "maxLength": 63
+                      },
+                      "versioning": {
+                        "type": "boolean"
+                      },
+                      "quota": {
+                        "type": "string"
+                      },
+                      "objectLock": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "versioning": {
+              "type": "boolean"
+            },
+            "quota": {
+              "type": "string"
+            },
+            "policyScope": {
+              "type": "string",
+              "enum": [
+                "prefix",
+                "buckets"
+              ]
+            },
+            "volumes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                    "maxLength": 63
+                  },
+                  "bucket": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+                    "maxLength": 63
+                  },
+                  "prefix": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number"
+                    ]
+                  },
+                  "readOnly": {
+                    "type": "boolean"
+                  },
+                  "options": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "csi": {
+              "type": "object",
+              "properties": {
+                "driver": {
+                  "type": "string"
+                },
+                "mounter": {
+                  "type": "string",
+                  "enum": [
+                    "geesefs",
+                    "s3fs",
+                    "rclone"
+                  ]
+                },
+                "options": {
+                  "type": "string"
+                },
+                "readOnlyOptions": {
+                  "type": "string"
+                },
+                "endpoint": {
+                  "type": "string"
+                },
+                "reclaimPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "Retain",
+                    "Delete"
+                  ]
+                }
+              }
+            },
+            "caBundle": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "secretName": {
+                  "type": "string"
+                },
+                "vaultKey": {
+                  "type": "string"
+                },
+                "property": {
+                  "type": "string"
+                }
+              }
+            },
+            "provisioner": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "namespace": {
+                  "type": "string"
+                },
+                "credentialsSecret": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rootUserKey": {
+                  "type": "string"
+                },
+                "rootPasswordKey": {
+                  "type": "string"
+                },
+                "caSecret": {
+                  "type": "string"
+                },
+                "caKey": {
+                  "type": "string"
+                },
+                "image": {
+                  "type": "object",
+                  "required": [
+                    "repository",
+                    "tag"
+                  ]
+                },
+                "resources": {
+                  "type": "object"
+                },
+                "nodeSelector": {
+                  "type": "object"
+                },
+                "tolerations": {
+                  "type": "array"
                 }
               }
             }

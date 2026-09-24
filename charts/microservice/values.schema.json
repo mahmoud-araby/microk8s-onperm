@@ -235,6 +235,157 @@
     "podLabels": {"type": "object"},
     "nodeSelector": {"type": "object"},
     "tolerations": {"type": "array"},
-    "affinity": {"type": "object"}
+    "affinity": {"type": "object"},
+    "ephemeral": {
+      "type": "object",
+      "properties": {
+        "tmp": {
+          "type": "object",
+          "properties": {
+            "medium": {"type": "string", "enum": ["", "Memory", "memory"]},
+            "sizeLimit": {"type": ["string", "integer"]}
+          }
+        },
+        "defaultStorageClass": {"type": "string"},
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "mountPath"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 60},
+              "mountPath": {"type": "string", "pattern": "^/"},
+              "type": {"type": "string", "enum": ["emptyDir", "memory", "generic", "csi"]},
+              "medium": {"type": "string"},
+              "sizeLimit": {"type": ["string", "integer"]},
+              "size": {"type": ["string", "integer"]},
+              "storageClass": {"type": "string"},
+              "accessModes": {"type": "array", "items": {"type": "string"}},
+              "readOnly": {"type": "boolean"},
+              "subPath": {"type": "string"},
+              "csi": {
+                "type": "object",
+                "required": ["driver"],
+                "properties": {
+                  "driver": {"type": "string"},
+                  "readOnly": {"type": "boolean"},
+                  "fsType": {"type": "string"},
+                  "volumeAttributes": {"type": "object"},
+                  "nodePublishSecretRef": {"type": "object"}
+                }
+              }
+            }
+          }
+        },
+        "resources": {"type": "object"}
+      }
+    },
+    "objectStorage": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "endpoint": {"type": "string", "pattern": "^https?://"},
+        "region": {"type": "string"},
+        "bucket": {"type": "string"},
+        "forcePathStyle": {"type": "boolean"},
+        "credentials": {
+          "type": "object",
+          "properties": {
+            "secretName": {"type": "string", "minLength": 1},
+            "accessKeyKey": {"type": "string"},
+            "secretKeyKey": {"type": "string"}
+          }
+        },
+        "awsEnvAliases": {"type": "boolean"},
+
+        "ca": {
+          "type": "object",
+          "properties": {
+            "secretName": {"type": "string"},
+            "configMapName": {"type": "string"},
+            "key": {"type": "string"},
+            "mountPath": {"type": "string", "pattern": "^/"}
+          }
+        },
+        "waitForMinio": {"type": "boolean"},
+        "networkPolicy": {
+          "type": "object",
+          "properties": {"namespace": {"type": "string"}, "ports": {"type": "array", "items": {"type": "integer"}}}
+        },
+        "sync": {
+          "type": "object",
+          "properties": {
+            "tool": {"type": "string", "enum": ["mc", "rclone"]},
+            "sidecar": {"type": "string", "enum": ["native", "plain"]},
+            "timeoutSeconds": {"type": "integer", "minimum": 1},
+            "runAsUser": {"type": "integer", "minimum": 1},
+            "images": {
+              "type": "object",
+              "properties": {
+                "mc": {
+                  "type": "object",
+                  "required": ["repository", "tag"],
+                  "properties": {
+                    "registry": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "tag": {"type": ["string", "number"]}
+                  }
+                },
+                "rclone": {
+                  "type": "object",
+                  "required": ["repository", "tag"],
+                  "properties": {
+                    "registry": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "tag": {"type": ["string", "number"]}
+                  }
+                }
+              }
+            },
+            "resources": {"type": "object"}
+          }
+        },
+        "mounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "mountPath"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 60},
+              "enabled": {"type": "boolean"},
+              "mountPath": {"type": "string", "pattern": "^/"},
+              "readOnly": {"type": "boolean"},
+              "mode": {"type": "string", "enum": ["csi", "sync"]},
+              "claimName": {"type": "string"},
+              "subPath": {"type": "string"},
+              "create": {"type": "boolean"},
+              "keep": {"type": "boolean"},
+              "size": {"type": ["string", "integer"]},
+              "storageClass": {"type": "string"},
+              "accessModes": {"type": "array", "items": {"type": "string"}},
+              "bucket": {"type": "string"},
+              "prefix": {"type": "string"},
+              "direction": {"type": "string", "enum": ["pull", "push", "bidirectional"]},
+              "interval": {"type": "integer", "minimum": 0},
+              "tool": {"type": "string", "enum": ["mc", "rclone"]},
+              "sidecar": {"type": "string", "enum": ["native", "plain"]},
+              "remove": {"type": "boolean"},
+              "extraArgs": {"type": "array", "items": {"type": "string"}},
+              "resources": {"type": "object"},
+              "volume": {
+                "type": "object",
+                "properties": {
+                  "type": {"type": "string", "enum": ["emptyDir", "memory", "generic"]},
+                  "medium": {"type": "string"},
+                  "sizeLimit": {"type": ["string", "integer"]},
+                  "size": {"type": ["string", "integer"]},
+                  "storageClass": {"type": "string"}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

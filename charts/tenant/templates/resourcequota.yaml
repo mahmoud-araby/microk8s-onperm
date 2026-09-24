@@ -18,6 +18,12 @@ spec:
     {{- with $q.limitsMemory }}
     limits.memory: {{ . | quote }}
     {{- end }}
+    {{- with $q.requestsEphemeralStorage }}
+    requests.ephemeral-storage: {{ . | quote }}
+    {{- end }}
+    {{- with $q.limitsEphemeralStorage }}
+    limits.ephemeral-storage: {{ . | quote }}
+    {{- end }}
     pods: {{ $q.pods | quote }}
     persistentvolumeclaims: {{ $q.pvcs | quote }}
     requests.storage: {{ $q.storage | quote }}

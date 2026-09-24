@@ -34,6 +34,8 @@ config:
   BULKHEAD_MAX_CONCURRENCY: "15"
   KAFKA_ENABLED: "true"
   KAFKA_INVENTORY_TOPIC: "{{ .Values.dependencies.kafka.topicPrefix }}inventory-events"
+  PRODUCT_IMAGES_DIR: /data/images
+  CACHE_DIR: /var/cache/catalog
 
 resources:
   requests:
@@ -41,6 +43,29 @@ resources:
     memory: 384Mi
   limits:
     memory: 768Mi
+
+# Local scratch: rendered thumbnails / search index cache on the node's NVMe. Generic ephemeral volume = one
+# PVC "<pod>-catalog-cache" (local-nvme, WaitForFirstConsumer) created and deleted with each pod; counts
+# against the tenant's PVC and requests.storage quota (gitops/tenants/<t>/tenant.yaml), not ephemeral-storage.
+ephemeral:
+  volumes:
+    - name: catalog-cache
+      mountPath: /var/cache/catalog
+      type: generic
+      storageClass: local-nvme
+      size: 5Gi
+
+# MinIO: S3_* env (bucket <tenant>-files, Secret tenant-s3-credentials) + the tenant's static bucket mount
+# "product-images" (charts/tenant data.objectStorage.volumes: <tenant>-files/images/, read-only) at
+# /data/images. Every tenant that deploys catalog must declare that volume (acme, globex, shared do).
+objectStorage:
+  enabled: true
+  mounts:
+    - name: product-images
+      mode: csi
+      claimName: product-images
+      mountPath: /data/images
+      readOnly: true
 
 tuning:
   python:

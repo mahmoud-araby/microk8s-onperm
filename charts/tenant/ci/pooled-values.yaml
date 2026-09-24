@@ -5,6 +5,12 @@ data:
   redis: {db: 0, keyPrefix: "initech:"}
   rabbitmq: {enabled: false}
   kafka: {enabled: false}
+  # Pooled tenant: Secret and claims are prefixed "tenant-initech-" in shared-services.
+  objectStorage:
+    enabled: true
+    buckets: [files]
+    volumes:
+      - {name: reports, prefix: reports/, size: 5Gi}
 externalSecrets: {secrets: []}
 kong: {consumer: {rateLimit: {minute: 6000, hour: 200000}}}
 keycloak: {realm: initech}

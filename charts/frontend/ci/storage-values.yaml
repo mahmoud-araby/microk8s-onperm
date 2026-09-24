@@ -1,0 +1,28 @@
+# Ephemeral storage + object storage sync/csi mounts on the frontend.
+name: web
+tenant: acme
+hosts: [acme.app.example.com]
+rollout:
+  enabled: false
+ephemeral:
+  volumes:
+    - name: nginx-cache
+      mountPath: /var/cache/nginx
+      type: generic
+      size: 2Gi
+objectStorage:
+  enabled: true
+  mounts:
+    - name: media
+      mode: sync
+      mountPath: /usr/share/nginx/html/media
+      readOnly: true
+      prefix: web/media/
+      interval: 300
+      remove: true
+      volume: {type: emptyDir, sizeLimit: 2Gi}
+    - name: downloads
+      mode: csi
+      claimName: product-images
+      mountPath: /usr/share/nginx/html/downloads
+      readOnly: true

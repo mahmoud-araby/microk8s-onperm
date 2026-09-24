@@ -65,6 +65,11 @@ quota:
   limitsMemory: ""
   # -- (extra) limits.cpu hard cap ("" = not enforced; the platform does not set CPU limits by default).
   limitsCpu: ""
+  # -- (extra) Sum of container ephemeral-storage requests / limits ("" = not enforced). Node-local disk used by
+  #    writable layers, logs and disk-backed emptyDirs (generic ephemeral volumes count as PVCs/requests.storage).
+  #    Once limits are enforced every container needs one: the LimitRange default below fills it in.
+  requestsEphemeralStorage: 400Gi
+  limitsEphemeralStorage: 1600Gi
   # -- (extra) NodePort services are never allowed for tenants.
   nodePorts: "0"
   # -- (extra) Object count limits (count/<resource>).
@@ -90,9 +95,14 @@ limitRange:
   defaultMemory: 512Mi
   defaultRequestCpu: 100m
   defaultRequestMemory: 128Mi
+  # -- (extra) ephemeral-storage defaults for containers without an explicit value (istio-proxy, startup
+  #    containers, ...). The kubelet evicts a pod whose container exceeds its ephemeral-storage limit.
+  defaultEphemeralStorage: 1Gi
+  defaultRequestEphemeralStorage: 64Mi
   # -- (extra) Hard per-container maximums.
   maxCpu: "8"
   maxMemory: 16Gi
+  maxEphemeralStorage: 20Gi
   # -- (extra) Max PVC size.
   maxStorage: 100Gi
 
@@ -153,6 +163,11 @@ networkPolicy:
   egressNamespaces: [data-postgres, data-redis, data-rabbitmq, data-kafka, integration, observability, istio-system, istio-egress]
   # -- (extra) Additional egress namespaces (e.g. keycloak, logging for the Elastic APM agent).
   extraEgressNamespaces: []
+  # -- (extra) Egress to MinIO (policy "allow-egress-to-minio") when data.objectStorage.enabled. Ports: Service
+  #    port 443 and the MinIO pod port 9000 (NetworkPolicies match the destination pod port).
+  minio:
+    namespace: minio
+    ports: [443, 9000]
   # -- (extra) Raw extra egress rules (NetworkPolicyEgressRule), e.g. ipBlock for hybrid on-prem systems.
   extraEgress: []
   # -- (extra) Where kube-dns / CoreDNS runs.
@@ -270,6 +285,87 @@ data:
       consumerByteRate: 20971520
       requestPercentage: 25
       controllerMutationRate: 10
+
+  # -- (extra) Object storage in the in-cluster MinIO tenant "minio" (docs/storage.md). Per tenant: buckets
+  #    "<tenant>-<name>", MinIO user = S3_ACCESS_KEY from Vault (convention: "<tenant>") with policy "<tenant>-rw"
+  #    limited to arn:aws:s3:::<tenant>-*, Secret "tenant-s3-credentials" (pooled tenants:
+  #    "tenant-<tenant>-s3-credentials" in shared-services) and static bucket mounts (PV + PVC).
+  objectStorage:
+    enabled: false
+    # -- Vault KV v2 path (mount "secret") with keys S3_ACCESS_KEY / S3_SECRET_KEY. Default tenants/<tenant>/storage.
+    vaultPath: ""
+    # -- Vault properties holding the credentials.
+    accessKeyProperty: S3_ACCESS_KEY
+    secretKeyProperty: S3_SECRET_KEY
+    endpoint: https://minio.minio.svc.cluster.local
+    region: us-east-1
+    # -- Secret name in the tenant namespace (pooled tenants get the "tenant-<name>-" prefix). Keys: S3_ACCESS_KEY,
+    #    S3_SECRET_KEY, S3_ENDPOINT, S3_REGION (apps) + accessKeyID, secretAccessKey, endpoint, region (csi-s3).
+    secretName: tenant-s3-credentials
+    # -- Buckets (name without the tenant prefix). Entries: "files" or {name, versioning, quota, objectLock}.
+    #    quota = hard size quota ("mc quota set --size", e.g. 100GiB); "" = none.
+    buckets: [files]
+    versioning: false
+    quota: ""
+    # -- Resources of policy "<tenant>-rw": prefix = arn:aws:s3:::<tenant>-* (also covers buckets created later
+    #    by hand); buckets = only the buckets listed here and in volumes. Use "buckets" when another tenant id starts
+    #    with "<tenant>-" (e.g. "acme" and "acme-labs"), otherwise the prefix grants cross-tenant access.
+    policyScope: prefix
+    # -- Static bucket mounts: {name, bucket, prefix, size, readOnly, options}. Renders PersistentVolume
+    #    "<tenant>-<name>" (csi-s3, volumeHandle "<bucket>/<prefix>") pre-bound to PVC "<name>" in the tenant
+    #    namespace (storageClassName "" + volumeName: no dynamic provisioning). bucket defaults to "<tenant>-files";
+    #    names without the "<tenant>-" prefix get it added. Mount it with charts/microservice objectStorage.mounts
+    #    (mode csi, claimName <name>).
+    volumes: []
+    #  - name: product-images
+    #    bucket: acme-files
+    #    prefix: images/
+    #    size: 50Gi
+    #    readOnly: true
+    # -- CSI S3 driver (github.com/yandex-cloud/k8s-csi-s3) settings used by the static PVs.
+    csi:
+      driver: ru.yandex.s3.csi
+      mounter: geesefs
+      # -- geesefs options (volumeAttributes.options). readOnlyOptions are appended for readOnly volumes.
+      #    --no-systemd is REQUIRED on this platform: in systemd mode GeeseFS runs in the host namespaces, where
+      #    *.svc.cluster.local does not resolve and the internal CA is not trusted (docs/storage.md).
+      #    Access is governed by --dir-mode/--file-mode (CSIDriver fsGroupPolicy None, GeeseFS keeps no owners).
+      options: "--no-systemd --memory-limit 512 --dir-mode 0777 --file-mode 0666"
+      readOnlyOptions: "-o ro"
+      # -- Endpoint written to the Secret's "endpoint" key for the driver (default: endpoint above).
+      endpoint: ""
+      reclaimPolicy: Retain
+    # -- Public CA certificate for TLS verification of MinIO, published as Secret <secretName> (key ca.crt) in the
+    #    tenant namespace (landing zones only) from Vault via the ClusterSecretStore. charts/microservice and
+    #    charts/frontend mount it by default (objectStorage.ca.secretName: internal-ca-bundle).
+    caBundle:
+      enabled: true
+      secretName: internal-ca-bundle
+      vaultKey: platform/internal-ca-public
+      property: ca.crt
+    # -- MinIO provisioning (buckets, versioning, quota, user, policy) by an Argo CD Sync hook Job in the MinIO
+    #    namespace, using `mc` with Secret <credentialsSecret> provided by the storage component (not by this chart).
+    provisioner:
+      enabled: true
+      namespace: minio
+      credentialsSecret: minio-provisioner-credentials
+      rootUserKey: MINIO_ROOT_USER
+      rootPasswordKey: MINIO_ROOT_PASSWORD
+      # -- CA bundle (Secret in the MinIO namespace) used by mc to verify the endpoint; "" = image trust store.
+      #    minio-tls = cert-manager Certificate of the MinIO tenant (key ca.crt = internal CA).
+      caSecret: minio-tls
+      caKey: ca.crt
+      image:
+        # mc built from source by CI (community MinIO ships source only, docs/storage.md); Kyverno
+        # restrict-image-registries only admits harbor.ops.example.local images in tenant namespaces.
+        registry: harbor.ops.example.local
+        repository: platform/mc
+        tag: RELEASE.2025-08-13T08-35-41Z
+      resources:
+        requests: {cpu: 10m, memory: 32Mi, ephemeral-storage: 16Mi}
+        limits: {memory: 128Mi, ephemeral-storage: 64Mi}
+      nodeSelector: {}
+      tolerations: []
 
 # -- Vault-backed secrets for the tenant (landing zone only for the SecretStore).
 externalSecrets:

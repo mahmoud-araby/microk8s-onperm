@@ -27,6 +27,7 @@ Keys marked `(extra)` in `values.yaml` are chart additions. They do not change t
 | `PrometheusRule` | `prometheusRule.enabled` | error rate, p95, restarts, circuit breaker ejections, autoscaler at max, rollout degraded |
 | `NetworkPolicy` | `networkPolicy.enabled` | ingress: same ns, kong, istio-internal, istio-system, monitoring (+ allowed namespaces); egress: DNS, same ns, data-*, observability, istio-system, istio-egress, integration |
 | `ServiceAccount` | `serviceAccount.create` | `automountServiceAccountToken: false` |
+| `PersistentVolumeClaim` `<fullname>-<mount>` | `objectStorage.mounts[]` with `mode: csi` + `create: true` | StorageClass `minio-s3` (RWX), `helm.sh/resource-policy: keep` + Argo CD `Prune=false,Delete=false` (deleting it deletes the data) |
 | test `Pod` | `helm test` | calls `/health/ready` through the mesh, then stops its sidecar |
 
 ## Pod anatomy
@@ -37,8 +38,11 @@ Pod orders-v1-7c9d8f6b5-x2k4q
 ├─ init: otel-agent            copies the OTel agent (java: javaagent.jar, dotnet: CLR profiler) into an emptyDir
 ├─ init: wait-for-postgres     ┐ "startup containers": busybox `nc -z` loop with timeout (startup.timeoutSeconds)
 ├─ init: wait-for-redis        │ one per enabled dependency
-├─ init: wait-for-kafka        ┘
-├─ init: migrations            optional, same image, same env/secrets
+├─ init: wait-for-kafka        │
+├─ init: wait-for-minio        ┘ objectStorage.enabled (TCP check of objectStorage.endpoint)
+├─ init: s3-sync-<mount>       objectStorage sync mounts: initial pull of bucket/prefix into the mount volume
+├─ init: s3-resync-<mount>     native sidecar (restartPolicy: Always) re-syncing every `interval` seconds
+├─ init: migrations            optional, same image, same env/secrets, same volumes
 ├─ init: <initContainers>      user supplied
 ├─ container: <service.name>   :8080, startup → liveness → readiness probes, preStop sleep 5s, grace 30s
 └─ containers: <sidecars>      user supplied
@@ -273,6 +277,98 @@ Prometheus (RPS per pod through Istio):
   certificate limit.
 * Rate-limit Redis password: set `kong.rateLimit.redis.passwordSecret` (needs KIC ≥ 3.1 `configPatches`).
 
+## Ephemeral storage
+
+Pod-lifetime storage, gone when the pod is deleted (see [docs/storage.md](../../docs/storage.md) for when to use
+block, file or object storage instead).
+
+| Values | Renders | Counts against | Notes |
+|--------|---------|----------------|-------|
+| `ephemeral.tmp` `{medium: "", sizeLimit: 512Mi}` | `/tmp` emptyDir (always present: read-only root filesystem) | node disk → ephemeral-storage | `medium: Memory` = tmpfs: faster, counts against the container **memory** limit |
+| `ephemeral.volumes[]` `type: emptyDir` | emptyDir (`sizeLimit`, `medium`) | ephemeral-storage | node root disk (`/var/snap/microk8s/common/var/lib/kubelet`) |
+| `type: memory` | emptyDir `medium: Memory` (`sizeLimit` required) | memory | e.g. `/dev/shm` for Chromium/PyTorch |
+| `type: generic` | generic ephemeral volume (`ephemeral.volumeClaimTemplate`), PVC `<pod>-<name>` | PVC count + `requests.storage` quota | `storageClass` default `local-nvme` (dedicated NVMe, WaitForFirstConsumer); large caches, spill files |
+| `type: csi` | CSI inline ephemeral volume (`csi:` passthrough) | driver-specific | only for drivers with `volumeLifecycleModes: [Ephemeral]` (e.g. secrets-store). **Not** csi-s3 (Persistent only) |
+| `ephemeral.resources` | `requests/limits.ephemeral-storage` merged under `resources` of the app and migrations containers (default 1Gi / 4Gi; an explicit `resources.*.ephemeral-storage` wins) | tenant quota `requests/limits.ephemeral-storage` | the request is used by the scheduler |
+
+Eviction: the kubelet evicts the **pod** when a container's writable layer + logs + disk-backed emptyDirs exceed
+the sum of its `ephemeral-storage` limits, or when one emptyDir exceeds its `sizeLimit` (checked every ~10 s, so
+short spikes can pass). Evicted pods are replaced by the ReplicaSet; the event reason is `Evicted` with
+"ephemeral local storage usage exceeds the total limit". Memory-backed volumes are OOM-killed instead. Under
+node disk pressure pods using more than their request are evicted first. Generic ephemeral volumes are never
+counted in ephemeral-storage (they are PVCs); with `local-nvme` their size is not enforced (local-path), so
+keep an application-side cap.
+
+```yaml
+ephemeral:
+  tmp: {medium: Memory, sizeLimit: 256Mi}
+  volumes:
+    - {name: cache, mountPath: /var/cache/app, type: generic, size: 5Gi}          # local-nvme
+    - {name: scratch, mountPath: /scratch, type: emptyDir, sizeLimit: 2Gi}
+    - {name: shm, mountPath: /dev/shm, type: memory, sizeLimit: 256Mi}
+    - name: certs
+      mountPath: /mnt/secrets
+      readOnly: true
+      type: csi
+      csi: {driver: secrets-store.csi.k8s.io, readOnly: true, volumeAttributes: {secretProviderClass: app}}
+  resources:
+    requests: {ephemeral-storage: 2Gi}
+    limits: {ephemeral-storage: 8Gi}
+```
+
+## Object storage (MinIO)
+
+Tenant buckets, credentials and static bucket volumes are provisioned by `charts/tenant`
+(`data.objectStorage`); this chart consumes them. Three ways to use MinIO:
+
+| | 1. SDK (env) | 2. CSI mount (`mode: csi`) | 3. Sync mount (`mode: sync`) |
+|-|--------------|-----------------------------|------------------------------|
+| How | app uses an S3 SDK with `S3_*` env | bucket/prefix mounted as a directory by csi-s3 (GeeseFS FUSE in the CSI node plugin) | init container mirrors bucket/prefix into a local volume; optional sidecar re-syncs |
+| Semantics | full S3 (versioning, presigned URLs, multipart) | POSIX-ish, eventual consistency, no locks/atomic rename, RWX across pods | local files (fast reads), stale up to `interval`, writes are local until pushed |
+| Privileges | none | none in the pod (FUSE runs in the privileged node plugin) → PSA `restricted` OK | none: non-root, read-only root fs, no FUSE |
+| Best for | new code, uploads/downloads, large objects | legacy code expecting files, shared read-mostly assets | templates, models, static assets read at start; small outputs pushed back |
+| Not for | – | databases, heavy small-file writes, anything needing fsync durability | large or fast-changing data sets, multi-writer data |
+
+Enabling `objectStorage` always injects `S3_ENDPOINT` (`https://minio.minio.svc.cluster.local`), `S3_REGION`
+(`us-east-1`), `S3_BUCKET` (`<tenant or shared>-files`), `S3_FORCE_PATH_STYLE=true`, `S3_ACCESS_KEY` /
+`S3_SECRET_KEY` (Secret `tenant-s3-credentials`, key names configurable under `objectStorage.credentials`),
+`S3_CA_FILE` (internal CA from Secret `internal-ca-bundle`, mounted at `/etc/minio-ca`), optional `AWS_*` aliases
+(`awsEnvAliases: true`, incl. `AWS_ENDPOINT_URL_S3` and `AWS_CA_BUNDLE`), a `wait-for-minio` startup container and a
+NetworkPolicy egress rule to namespace `minio` on ports 443 and 9000 (NetworkPolicies match the MinIO **pod** port).
+Pooled releases in `shared-services` use the pool identity `shared` (buckets `shared-*`).
+
+```yaml
+objectStorage:
+  enabled: true
+  mounts:
+    # 2a. static bucket mount created by charts/tenant (data.objectStorage.volumes[name=product-images])
+    - {name: product-images, mode: csi, mountPath: /data/images, readOnly: true}
+    # 2b. chart-created dynamic claim on StorageClass minio-s3 (prefix platform-pvc/<pv>/, platform credentials)
+    - {name: uploads, mode: csi, create: true, size: 20Gi, mountPath: /data/uploads}
+    # 3a. read-only sync: initial pull + native sidecar pulling every 5 min, deletions mirrored
+    - {name: templates, mode: sync, mountPath: /app/templates, readOnly: true, prefix: templates/, interval: 300, remove: true}
+    # 3b. push-back: local writes uploaded every 60 s and once more on shutdown (SIGTERM)
+    - {name: reports, mode: sync, direction: push, mountPath: /data/reports, prefix: reports/, interval: 60,
+       volume: {type: generic, size: 10Gi}}
+```
+
+Sync mounts: `tool: mc` (default, `harbor.ops.example.local/platform/mc`) or `rclone`; credentials come from the Secret
+as env (`mc alias set` at runtime, never in args), the CA is copied into mc's `certs/CAs`; containers run as UID 10001
+with a read-only root filesystem and a small `/tmp/s3sync` emptyDir. `sidecar: native` (default) is an init
+container with `restartPolicy: Always` (starts before the app, stops after it; Kubernetes ≥ 1.29); `plain` adds a
+regular container. Sidecars write a heartbeat checked by liveness/readiness probes (Kyverno requires probes).
+
+Warnings:
+- `direction: bidirectional` = push then pull every interval, **no conflict resolution** (last writer wins, deletions
+  are not propagated, concurrent replicas overwrite each other). Prefer one writer per prefix, or the SDK.
+- `remove: true` deletes files on the target that are missing on the source (`mc mirror --remove` / `rclone sync`).
+- `direction: pull` + `readOnly: false` lets the app modify local copies that the next pull overwrites.
+- Each replica keeps its own copy (memory/disk per replica); size `volume` accordingly.
+- csi-s3 ignores `readOnly` itself; the chart mounts read-only in the container, and `charts/tenant` adds `-o ro` for
+  read-only static volumes. Grant least privilege on the MinIO side for true read-only access.
+- Dynamic `create: true` claims live in the platform bucket `platform-pvc` with the csi-s3 platform identity, not in
+  the tenant's buckets (docs/storage.md); use tenant static volumes for tenant-owned data.
+
 ## Monitoring
 
 `ServiceMonitor` scrapes `http://<pod>:8080/metrics` through the headless `<fullname>-metrics` Service.
@@ -286,4 +382,6 @@ Prometheus must then mount Istio workload certificates at `/etc/prom-certs` (the
 ```bash
 helm lint charts/microservice --strict
 for f in charts/microservice/ci/*.yaml; do helm template t charts/microservice -f "$f" >/dev/null || exit 1; done
+# templates/_storage.tpl is shared with charts/frontend - keep both copies identical:
+diff charts/microservice/templates/_storage.tpl charts/frontend/templates/_storage.tpl
 ```

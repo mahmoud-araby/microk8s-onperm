@@ -1,0 +1,2 @@
+{{- /* Chart-created object storage claims (objectStorage.mounts[] with mode csi + create: true). */}}
+{{- include "platform-storage.pvcs" . }}

@@ -56,6 +56,15 @@ data:
   KAFKA_CONSUMER_GROUP_PREFIX: {{ printf "%s." $name | quote }}
   KAFKA_SASL_MECHANISM: {{ ternary "SCRAM-SHA-512" "" (eq $d.kafka.authentication "scram-sha-512") | quote }}
   {{- end }}
+  {{- if $d.objectStorage.enabled }}
+  # --- Object storage (MinIO; credentials in Secret {{ include "tenant.s3SecretName" . }}) ---
+  S3_ENDPOINT: {{ $d.objectStorage.endpoint | quote }}
+  S3_REGION: {{ $d.objectStorage.region | quote }}
+  S3_BUCKET_PREFIX: {{ printf "%s-" $name | quote }}
+  {{- $bn := list }}
+  {{- range (include "tenant.s3Buckets" . | fromYaml).items }}{{ $bn = append $bn .name }}{{ end }}
+  S3_BUCKETS: {{ join "," $bn | quote }}
+  {{- end }}
   # --- Integration / telemetry / identity ---
   MICRO_INTEGRATOR_URL: {{ $e.microIntegrator.http | quote }}
   MICRO_INTEGRATOR_URL_TLS: {{ $e.microIntegrator.https | quote }}

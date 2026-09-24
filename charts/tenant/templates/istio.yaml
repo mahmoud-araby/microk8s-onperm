@@ -25,7 +25,9 @@ spec:
   egress:
     - hosts:
         - "./*"
-        {{- range (concat .Values.istio.sidecar.egressHosts .Values.istio.sidecar.extraEgressHosts | uniq) }}
+        {{- $minioHosts := list }}
+        {{- if .Values.data.objectStorage.enabled }}{{ $minioHosts = list (printf "%s/*" .Values.networkPolicy.minio.namespace) }}{{ end }}
+        {{- range (concat .Values.istio.sidecar.egressHosts .Values.istio.sidecar.extraEgressHosts $minioHosts | uniq) }}
         - {{ . | quote }}
         {{- end }}
   outboundTrafficPolicy:

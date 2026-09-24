@@ -296,5 +296,71 @@ priorityClassName: ""
 extraVolumes: []
 extraVolumeMounts: []
 
+# -- (extra) Ephemeral (pod-lifetime) storage - same shape as charts/microservice (README "Ephemeral storage").
+ephemeral:
+  # -- /tmp (nginx client body / proxy temp files). medium: "" = node disk, Memory = tmpfs (counts as memory).
+  tmp:
+    medium: ""
+    sizeLimit: 256Mi
+  defaultStorageClass: local-nvme
+  # -- Extra scratch volumes for the nginx container: {name, mountPath, type: emptyDir|memory|generic|csi, ...}.
+  volumes: []
+  # -- ephemeral-storage requests/limits merged under `resources` of the nginx container.
+  resources:
+    requests:
+      ephemeral-storage: 256Mi
+    limits:
+      ephemeral-storage: 1Gi
+
+# -- (extra) Object storage (MinIO) - serve files from a bucket (e.g. media, downloads, per-tenant assets)
+#    without baking them into the image. Same shape as charts/microservice objectStorage, but no S3_* env is
+#    injected into nginx (it only serves files). Typical: `mode: sync` (initial pull + periodic re-sync) mounted
+#    read-only under /usr/share/nginx/html/<dir>; `mode: csi` mounts a claim from charts/tenant.
+objectStorage:
+  enabled: false
+  endpoint: https://minio.minio.svc.cluster.local
+  region: us-east-1
+  # -- Default bucket of sync mounts: "<tenant or shared>-files".
+  bucket: ""
+  credentials:
+    secretName: tenant-s3-credentials
+    accessKeyKey: S3_ACCESS_KEY
+    secretKeyKey: S3_SECRET_KEY
+  ca:
+    secretName: internal-ca-bundle
+    configMapName: ""
+    key: ca.crt
+    mountPath: /etc/minio-ca
+  networkPolicy:
+    namespace: minio
+    ports: [443, 9000]
+  sync:
+    tool: mc
+    sidecar: native
+    timeoutSeconds: 300
+    runAsUser: 10001
+    images:
+      mc:
+        # mc built from source by CI (community MinIO ships source only, docs/storage.md); Kyverno
+        # restrict-image-registries only admits harbor.ops.example.local images in tenant namespaces.
+        registry: harbor.ops.example.local
+        repository: platform/mc
+        tag: RELEASE.2025-08-13T08-35-41Z
+      rclone:
+        registry: harbor.ops.example.local
+        repository: dockerhub/rclone/rclone
+        tag: "1.75.1"
+    resources:
+      requests: {cpu: 10m, memory: 64Mi, ephemeral-storage: 64Mi}
+      limits: {memory: 256Mi, ephemeral-storage: 256Mi}
+  mounts: []
+  #  - name: media
+  #    mode: sync
+  #    mountPath: /usr/share/nginx/html/media
+  #    readOnly: true
+  #    prefix: web/media/
+  #    interval: 300
+  #    volume: {type: emptyDir, sizeLimit: 2Gi}
+
 tests:
   enabled: true

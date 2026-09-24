@@ -252,6 +252,12 @@ seccompProfile:
   host: {{ (splitList ":" $bs) | first }}
   port: {{ (splitList ":" $bs) | last }}
 {{- end }}
+{{- if and (include "platform-storage.s3Enabled" .) (ne .Values.objectStorage.waitForMinio false) }}
+{{- $s3 := include "platform-storage.endpoint" . | fromYaml }}
+- name: minio
+  host: {{ $s3.host }}
+  port: {{ $s3.port }}
+{{- end }}
 {{- end -}}
 
 {{/* =====================================================================
@@ -486,6 +492,8 @@ seccompProfile:
 - name: KAFKA_CLIENT_ID
   value: "$(K8S_POD_NAME)"
 {{- end }}
+{{- /* ---------------- Object storage (MinIO) ---------------- */}}
+{{- include "platform-storage.s3Env" . }}
 {{- end -}}
 
 {{/* Final env list: standard env minus names overridden by .Values.env, then .Values.env. */}}
@@ -557,7 +565,8 @@ spec:
   {{- end }}
   securityContext:
     {{- include "microservice.podSecurityContext" . | nindent 4 }}
-  {{- $hasInit := or $agent (and $v.startup.waitForDependencies (include "microservice.dependencyEndpoints" . | trim)) $v.startup.migrations.enabled $v.initContainers }}
+  {{- $syncInit := include "platform-storage.syncInitContainers" . | trim }}
+  {{- $hasInit := or $agent (and $v.startup.waitForDependencies (include "microservice.dependencyEndpoints" . | trim)) $v.startup.migrations.enabled $v.initContainers $syncInit }}
   {{- if $hasInit }}
   initContainers:
     {{- if $agent }}
@@ -597,6 +606,10 @@ spec:
         {{- toYaml $v.startup.resources | nindent 8 }}
     {{- end }}
     {{- end }}
+    {{- with $syncInit }}
+    {{- /* object storage sync mounts: initial pull, then native sidecars (restartPolicy: Always) */}}
+    {{- . | nindent 4 }}
+    {{- end }}
     {{- if $v.startup.migrations.enabled }}
     - name: migrations
       image: {{ include "microservice.image" . }}
@@ -609,7 +622,7 @@ spec:
       securityContext:
         {{- include "microservice.containerSecurityContext" (dict "uid" $uidStartup) | nindent 8 }}
       resources:
-        {{- toYaml $v.resources | nindent 8 }}
+        {{- include "platform-storage.appResources" . | nindent 8 }}
       volumeMounts:
         {{- include "microservice.volumeMounts" . | nindent 8 }}
     {{- end }}
@@ -645,16 +658,17 @@ spec:
       securityContext:
         {{- include "microservice.containerSecurityContext" (dict "uid" 10001) | nindent 8 }}
       resources:
-        {{- toYaml $v.resources | nindent 8 }}
+        {{- include "platform-storage.appResources" . | nindent 8 }}
       volumeMounts:
         {{- include "microservice.volumeMounts" . | nindent 8 }}
+    {{- with (include "platform-storage.syncSidecars" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
     {{- with $v.sidecars }}
     {{- tpl (toYaml .) $ | nindent 4 }}
     {{- end }}
   volumes:
-    - name: tmp
-      emptyDir:
-        sizeLimit: 512Mi
+    {{- include "platform-storage.tmpVolume" . | nindent 4 }}
     {{- if eq $v.language "python" }}
     - name: prometheus-multiproc
       emptyDir:
@@ -664,6 +678,9 @@ spec:
     - name: {{ $ld.agent.volume }}
       emptyDir:
         sizeLimit: 512Mi
+    {{- end }}
+    {{- with (include "platform-storage.volumes" . | trim) }}
+    {{- . | nindent 4 }}
     {{- end }}
     {{- with $v.extraVolumes }}
     {{- tpl (toYaml .) $ | nindent 4 }}
@@ -736,6 +753,9 @@ envFrom:
 - name: {{ $ld.agent.volume }}
   mountPath: {{ $ld.agent.mountPath }}
   readOnly: true
+{{- end }}
+{{- with (include "platform-storage.volumeMounts" . | trim) }}
+{{ . }}
 {{- end }}
 {{- with .Values.extraVolumeMounts }}
 {{ tpl (toYaml .) $ }}

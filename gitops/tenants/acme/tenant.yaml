@@ -16,10 +16,15 @@ quota:
   cpu: "40"
   memory: 80Gi
   pods: "300"
-  pvcs: "20"
-  storage: 500Gi
+  # catalog mounts a 5Gi generic ephemeral volume (local-nvme) per replica (gitops/apps/catalog/values.yaml):
+  # up to 80 replicas + canary surge -> PVC count and requests.storage sized for it.
+  pvcs: "120"
+  storage: 900Gi
   loadBalancers: "0"
   limitsMemory: 160Gi
+  # Sum of container ephemeral-storage requests/limits (app containers default to 1Gi/4Gi).
+  requestsEphemeralStorage: 400Gi
+  limitsEphemeralStorage: 1600Gi
 
 values:
   limitRange:
@@ -54,6 +59,17 @@ values:
         - {name: orders-events, partitions: 24, replicas: 3}
         - {name: payments-events, partitions: 12, replicas: 3}
         - {name: inventory-events, partitions: 12, replicas: 3}
+    # MinIO: buckets acme-files / acme-exports, user "acme" + policy acme-rw (arn:aws:s3:::acme-*), Secret
+    # tenant-s3-credentials from Vault secret/tenants/acme/storage (S3_ACCESS_KEY=acme, S3_SECRET_KEY).
+    objectStorage:
+      enabled: true
+      buckets:
+        - files
+        - {name: exports, versioning: true, quota: 200GiB}
+      quota: 1TiB
+      volumes:
+        # PV acme-product-images -> PVC product-images (mounted read-only by catalog at /data/images).
+        - {name: product-images, bucket: acme-files, prefix: images/, size: 100Gi, readOnly: true}
   externalSecrets:
     enabled: true
   kong:

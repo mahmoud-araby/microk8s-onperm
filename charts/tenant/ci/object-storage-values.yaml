@@ -1,0 +1,21 @@
+# Dedicated tenant with object storage: buckets (versioning/quota/object lock), static bucket mounts, quotas
+# incl. ephemeral-storage.
+tenant: {name: acme, displayName: ACME Corp, tier: dedicated, environment: production}
+quota: {cpu: "40", memory: 80Gi, pods: "300", pvcs: "120", storage: 900Gi, loadBalancers: "0", requestsEphemeralStorage: 300Gi, limitsEphemeralStorage: 1200Gi}
+limitRange: {defaultEphemeralStorage: 2Gi, defaultRequestEphemeralStorage: 128Mi, maxEphemeralStorage: 10Gi}
+rbac: {adminGroups: [acme-admins], developerGroups: [acme-devs], viewerGroups: [acme-viewers]}
+data:
+  postgres: {enabled: false}
+  rabbitmq: {enabled: false}
+  kafka: {enabled: false}
+  objectStorage:
+    enabled: true
+    quota: 500GiB
+    buckets:
+      - files
+      - {name: exports, versioning: true, quota: 100GiB}
+      - {name: acme-audit, objectLock: true, versioning: true}
+    volumes:
+      - {name: product-images, bucket: acme-files, prefix: images/, size: 50Gi, readOnly: true}
+      - {name: shared-uploads, bucket: exports, size: 20Gi}
+keycloak: {realm: acme}

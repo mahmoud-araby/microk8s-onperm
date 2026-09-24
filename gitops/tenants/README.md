@@ -96,6 +96,9 @@ prefixed `tenant-<name>-` to avoid collisions.
    - Vault: `secret/tenants/newco/<service>` (`DB_PASSWORD`, `RABBITMQ_PASSWORD`, `RABBITMQ_URI` for payments,
      `KAFKA_PASSWORD`, `REDIS_PASSWORD`), `secret/tenants/newco/common`, `secret/tenants/newco/keycloak`
      (`realm_public_key`), Vault Kubernetes-auth role `tenant-newco` (see charts/tenant/README.md).
+   - Object storage (`values.data.objectStorage.enabled`, required when the tenant deploys catalog, which mounts the
+     static volume `product-images`): Vault `secret/tenants/newco/storage` (`S3_ACCESS_KEY=newco`,
+     `S3_SECRET_KEY=<random>`). Buckets, MinIO user and policy are created by the tenant Application.
    - DNS: `newco.api.example.com` and `newco.app.example.com` -> Kong public VIP (dedicated tier).
 4. Optionally render ConfigMaps: `make configmaps ENV=production`.
 5. Open a PR. After merge, `tenant-newco` (wave 10) creates the landing zone, databases, vhost, topics and
@@ -132,4 +135,7 @@ Three levels, from coarse to fine:
 4. Delete the tenant directory; merge. Argo CD deletes `tenant-<name>` including the namespace, the vhost,
    Kafka topics/users and the Kong consumer. CNPG databases use `databaseReclaimPolicy: retain`: drop them
    manually after the retention period (`DROP DATABASE <tenant>_<db>; DROP ROLE <tenant>_<db>;`).
+   MinIO buckets `<tenant>-*` and the MinIO user/policy are kept as well (static PVs are deleted with the
+   Application, their bucket data is untouched); after the retention period: `mc rb --force minio/<tenant>-<bucket>`,
+   `mc admin user rm minio <tenant>`, `mc admin policy rm minio <tenant>-rw`.
 5. Remove `secret/tenants/<name>`, the Vault role, the Keycloak realm and DNS records.

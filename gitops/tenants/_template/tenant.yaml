@@ -22,10 +22,14 @@ quota:
   cpu: "16"
   memory: 32Gi
   pods: "150"
+  # Generic ephemeral volumes (e.g. catalog's 5Gi cache per replica) count here too.
   pvcs: "10"
   storage: 100Gi
   loadBalancers: "0"
   limitsMemory: 64Gi
+  # Sum of container ephemeral-storage requests/limits (app containers default to 1Gi/4Gi).
+  requestsEphemeralStorage: 200Gi
+  limitsEphemeralStorage: 800Gi
 
 values:
   rbac:
@@ -58,6 +62,15 @@ values:
         - {name: orders-events, partitions: 6, replicas: 3}
         - {name: payments-events, partitions: 6, replicas: 3}
         - {name: inventory-events, partitions: 6, replicas: 3}
+    # MinIO object storage (docs/storage.md). Seed Vault secret/tenants/CHANGE-ME/storage first
+    # (S3_ACCESS_KEY=CHANGE-ME, S3_SECRET_KEY=<random>). Required when a service mounts product-images
+    # (gitops/apps/catalog/values.yaml).
+    objectStorage:
+      enabled: false
+      buckets: [files]
+      quota: 200GiB
+      volumes: []
+      #  - {name: product-images, bucket: CHANGE-ME-files, prefix: images/, size: 50Gi, readOnly: true}
   externalSecrets:
     enabled: true
   kong:

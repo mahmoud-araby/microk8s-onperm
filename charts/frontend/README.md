@@ -22,6 +22,7 @@ contract in [`docs/chart-interfaces.md`](../../docs/chart-interfaces.md). Keys m
 | `AnalysisTemplate` | canary success rate and p95 from Istio metrics |
 | `Ingress` (class `kong`) + `KongPlugin`s | all `hosts`, TLS through cert-manager (`tls.issuer`), rate limiting (`limit_by: ip`, Redis), correlation id, prometheus |
 | `HorizontalPodAutoscaler` or KEDA `ScaledObject`, `PodDisruptionBudget`, `NetworkPolicy`, `PrometheusRule` | same shape as the microservice chart |
+| init `s3-sync-<mount>` / sidecar `s3-resync-<mount>`, `PersistentVolumeClaim` `<fullname>-<mount>` | `objectStorage.mounts[]` (sync / csi + `create`) - see below |
 
 ## nginx behaviour
 
@@ -110,6 +111,37 @@ tls: {enabled: true, issuer: letsencrypt-prod}
 
 See [`ci/`](ci/) for complete files (shared, tenant with KEDA and the internal gateway, plain Deployment
 without mesh).
+
+## Ephemeral and object storage
+
+`ephemeral` and `objectStorage` have the same shape as in `charts/microservice` (shared template
+`templates/_storage.tpl`; see the [microservice README](../microservice/README.md#ephemeral-storage) for the option
+tables, eviction behaviour and security notes). Defaults here: `/tmp` 256Mi, `ephemeral-storage` 256Mi request /
+1Gi limit on the nginx container. nginx gets no `S3_*` env and no `wait-for-minio` container: object storage is
+only used to **serve files from a bucket** without rebuilding the image.
+
+```yaml
+ephemeral:
+  volumes:
+    - {name: nginx-cache, mountPath: /var/cache/nginx, type: generic, size: 2Gi}   # local-nvme
+objectStorage:
+  enabled: true              # Secret tenant-s3-credentials + internal-ca-bundle from charts/tenant
+  mounts:
+    # media library from <tenant>-files/web/media/: pulled before nginx starts, re-synced every 5 min
+    - name: media
+      mode: sync
+      mountPath: /usr/share/nginx/html/media
+      readOnly: true
+      prefix: web/media/
+      interval: 300
+      remove: true
+      volume: {type: emptyDir, sizeLimit: 2Gi}
+    # or a static bucket volume of the tenant, mounted via csi-s3
+    - {name: downloads, mode: csi, claimName: product-images, mountPath: /usr/share/nginx/html/downloads, readOnly: true}
+```
+
+Files served from a sync mount use `cache.staticMaxAge` unless their names match `cache.immutablePathRegex`; keep
+bucket object names fingerprinted when they are cached as immutable. Every replica holds its own copy.
 
 ## Monitoring
 

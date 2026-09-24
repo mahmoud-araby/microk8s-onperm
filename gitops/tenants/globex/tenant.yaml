@@ -11,10 +11,13 @@ quota:
   cpu: "24"
   memory: 48Gi
   pods: "200"
-  pvcs: "10"
-  storage: 200Gi
+  # catalog v2: one 5Gi generic ephemeral volume (local-nvme) per replica, up to 80 replicas + canary surge.
+  pvcs: "110"
+  storage: 700Gi
   loadBalancers: "0"
   limitsMemory: 96Gi
+  requestsEphemeralStorage: 300Gi
+  limitsEphemeralStorage: 1200Gi
 
 values:
   rbac:
@@ -42,6 +45,12 @@ values:
         - {name: orders-events, partitions: 12, replicas: 3}
         - {name: payments-events, partitions: 6, replicas: 3}
         - {name: inventory-events, partitions: 6, replicas: 3}
+    objectStorage:
+      enabled: true
+      buckets: [files]
+      quota: 500GiB
+      volumes:
+        - {name: product-images, bucket: globex-files, prefix: images/, size: 50Gi, readOnly: true}
   kong:
     consumer:
       rateLimit:

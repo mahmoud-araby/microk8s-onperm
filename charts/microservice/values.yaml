@@ -178,6 +178,119 @@ sidecars: []
 extraVolumes: []
 extraVolumeMounts: []
 
+# -- (extra) Ephemeral (pod-lifetime) storage. See README "Ephemeral storage" and docs/storage.md.
+ephemeral:
+  # -- The /tmp volume every pod gets (read-only root filesystem). medium: "" = node disk (counts against
+  #    ephemeral-storage), Memory = tmpfs (counts against the container memory limit).
+  tmp:
+    medium: ""
+    sizeLimit: 512Mi
+  # -- StorageClass for `type: generic` volumes (local-path on the node's NVMe, WaitForFirstConsumer).
+  defaultStorageClass: local-nvme
+  # -- Extra scratch volumes mounted into the app (and migrations) container. Entries:
+  #    {name, mountPath, type: emptyDir|memory|generic|csi, readOnly, subPath,
+  #     emptyDir/memory: sizeLimit (+ medium for emptyDir),
+  #     generic: size, storageClass (default local-nvme), accessModes (default [ReadWriteOnce]),
+  #     csi: {driver, volumeAttributes, nodePublishSecretRef, readOnly, fsType}}   # CSI inline ephemeral
+  #    generic = generic ephemeral volume: a PVC "<pod>-<name>" created with the pod and deleted with it
+  #    (counts against the namespace PVC / requests.storage quota, not against ephemeral-storage).
+  volumes: []
+  #  - name: cache
+  #    mountPath: /var/cache/app
+  #    type: generic
+  #    size: 5Gi
+  #  - name: scratch
+  #    mountPath: /scratch
+  #    type: emptyDir
+  #    sizeLimit: 2Gi
+  #  - name: shm
+  #    mountPath: /dev/shm
+  #    type: memory
+  #    sizeLimit: 256Mi
+  # -- ephemeral-storage requests/limits merged under `resources` of the app and migrations containers
+  #    (an explicit resources.requests/limits.ephemeral-storage wins). The kubelet evicts the pod when the
+  #    container's writable layer + logs + disk-backed emptyDirs exceed the limit, or an emptyDir exceeds its
+  #    sizeLimit. The request is used by the scheduler (node allocatable ephemeral-storage).
+  resources:
+    requests:
+      ephemeral-storage: 1Gi
+    limits:
+      ephemeral-storage: 4Gi
+
+# -- (extra) Object storage (in-cluster MinIO tenant "minio"). See README "Object storage" and docs/storage.md.
+objectStorage:
+  # -- Inject S3_* env, a wait-for-minio startup container and NetworkPolicy egress to the minio namespace.
+  enabled: false
+  endpoint: https://minio.minio.svc.cluster.local
+  region: us-east-1
+  # -- S3_BUCKET. Default "<tenant or shared>-files" (buckets are provisioned by charts/tenant).
+  bucket: ""
+  forcePathStyle: true
+  # -- Secret with the tenant's S3 identity (charts/tenant ExternalSecret from Vault tenants/<tenant>/storage).
+  credentials:
+    secretName: tenant-s3-credentials
+    accessKeyKey: S3_ACCESS_KEY
+    secretKeyKey: S3_SECRET_KEY
+  # -- Also inject AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_DEFAULT_REGION, AWS_ENDPOINT_URL_S3,
+  #    AWS_S3_FORCE_PATH_STYLE (and AWS_CA_BUNDLE) for SDKs that read the standard AWS variables.
+  awsEnvAliases: false
+  # -- CA bundle used to verify the MinIO certificate (Secret or ConfigMap in the release namespace; set both
+  #    names to "" to rely on the image's trust store). Mounted at mountPath and exported as S3_CA_FILE.
+  ca:
+    secretName: internal-ca-bundle
+    configMapName: ""
+    key: ca.crt
+    mountPath: /etc/minio-ca
+  # -- Add the "wait-for-minio" startup container (TCP check of the endpoint).
+  waitForMinio: true
+  networkPolicy:
+    namespace: minio
+    # -- Service port 443 and MinIO pod port 9000 (NetworkPolicies match the destination pod port).
+    ports: [443, 9000]
+  # -- Defaults for `mode: sync` mounts.
+  sync:
+    # -- mc | rclone
+    tool: mc
+    # -- native = init container with restartPolicy Always (k8s >= 1.29, starts before the app, stops after it);
+    #    plain = regular sidecar container.
+    sidecar: native
+    timeoutSeconds: 300
+    runAsUser: 10001
+    images:
+      mc:
+        # mc built from source by CI (community MinIO ships source only, docs/storage.md); Kyverno
+        # restrict-image-registries only admits harbor.ops.example.local images in tenant namespaces.
+        registry: harbor.ops.example.local
+        repository: platform/mc
+        tag: RELEASE.2025-08-13T08-35-41Z
+      rclone:
+        registry: harbor.ops.example.local
+        repository: dockerhub/rclone/rclone
+        tag: "1.75.1"
+    resources:
+      requests: {cpu: 10m, memory: 64Mi, ephemeral-storage: 64Mi}
+      limits: {memory: 256Mi, ephemeral-storage: 256Mi}
+  # -- Buckets mounted as directories. Entries:
+  #    {name, mountPath, readOnly, mode: csi|sync, enabled (default true)}
+  #    csi:  claimName (default <name>: a claim created by charts/tenant data.objectStorage.volumes), subPath,
+  #          or create: true -> chart-created PVC "<fullname>-<name>" {size, storageClass (minio-s3),
+  #          accessModes ([ReadWriteMany]), keep (true: never pruned by Argo CD/Helm)}.
+  #          FUSE runs in the CSI node plugin -> works under PSA restricted.
+  #    sync: bucket (default objectStorage.bucket), prefix, direction pull|push|bidirectional, interval (s,
+  #          0 = initial pull only), tool, sidecar, remove (mirror deletions), extraArgs, resources,
+  #          volume {type: emptyDir|memory|generic, sizeLimit, size, storageClass}. No FUSE, no privileges.
+  mounts: []
+  #  - name: product-images
+  #    mode: csi
+  #    mountPath: /data/images
+  #    readOnly: true
+  #  - name: templates
+  #    mode: sync
+  #    mountPath: /app/templates
+  #    readOnly: true
+  #    prefix: templates/
+  #    interval: 300
+
 resources:
   requests:
     cpu: 250m

@@ -1,0 +1,77 @@
+# Ephemeral storage + object storage (MinIO): SDK env, CSI mount (tenant claim + chart-created claim),
+# sync mounts (mc pull + native re-sync sidecar, rclone bidirectional plain sidecar).
+service:
+  name: catalog
+  version: v1
+language: python
+tenant: acme
+image:
+  repository: platform/catalog
+  tag: "3.2.0"
+rollout:
+  enabled: false
+dependencies:
+  postgres: {enabled: true}
+ephemeral:
+  tmp:
+    medium: Memory
+    sizeLimit: 256Mi
+  volumes:
+    - name: cache
+      mountPath: /var/cache/catalog
+      type: generic
+      size: 5Gi
+    - name: scratch
+      mountPath: /scratch
+      type: emptyDir
+      sizeLimit: 2Gi
+    - name: shm
+      mountPath: /dev/shm
+      type: memory
+      sizeLimit: 128Mi
+    - name: secrets-store
+      mountPath: /mnt/secrets
+      readOnly: true
+      type: csi
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: catalog
+resources:
+  requests:
+    ephemeral-storage: 2Gi
+objectStorage:
+  enabled: true
+  awsEnvAliases: true
+  mounts:
+    - name: product-images
+      mode: csi
+      mountPath: /data/images
+      readOnly: true
+    - name: uploads
+      mode: csi
+      create: true
+      size: 20Gi
+      mountPath: /data/uploads
+    - name: templates
+      mode: sync
+      mountPath: /app/templates
+      readOnly: true
+      prefix: templates/
+      interval: 300
+      remove: true
+    - name: exports
+      mode: sync
+      tool: rclone
+      sidecar: plain
+      bucket: acme-exports
+      direction: bidirectional
+      mountPath: /data/exports
+      volume:
+        type: generic
+        size: 2Gi
+    - name: disabled
+      enabled: false
+      mode: csi
+      mountPath: /nope

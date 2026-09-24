@@ -1,0 +1,319 @@
+{{- if .Values.data.objectStorage.enabled }}
+{{- $o := .Values.data.objectStorage }}
+{{- $name := include "tenant.name" . }}
+{{- $ns := include "tenant.namespace" . }}
+{{- $es := .Values.externalSecrets }}
+{{- $useStore := and (include "tenant.landingZone" .) $es.secretStore.enabled }}
+{{- $vaultPath := $o.vaultPath | default (printf "tenants/%s/storage" $name) }}
+{{- $secretName := include "tenant.s3SecretName" . }}
+{{- $csiEndpoint := $o.csi.endpoint | default $o.endpoint }}
+{{- $buckets := (include "tenant.s3Buckets" . | fromYaml).items }}
+{{- $prov := $o.provisioner }}
+{{- $resources := list (printf "arn:aws:s3:::%s-*" $name) }}
+{{- if eq $o.policyScope "buckets" }}
+{{- $resources = list }}
+{{- range $buckets }}{{ $resources = append $resources (printf "arn:aws:s3:::%s" .name) }}{{ end }}
+{{- range $o.volumes }}{{ $resources = append $resources (printf "arn:aws:s3:::%s" (include "tenant.s3Bucket" (dict "root" $ "name" (.bucket | default "files")))) }}{{ end }}
+{{- $resources = $resources | uniq }}
+{{- end }}
+{{- $objResources := list }}
+{{- range $resources }}{{ $objResources = append $objResources (printf "%s/*" .) }}{{ end }}
+# S3 identity of the tenant (Vault {{ $vaultPath }}) in the formats of both consumers:
+#   S3_* keys -> charts/microservice objectStorage (env) and the sync containers;
+#   accessKeyID / secretAccessKey / endpoint / region -> csi-s3 node stage/publish secret of the static PVs.
+apiVersion: {{ $es.apiVersion }}
+kind: ExternalSecret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ $es.refreshInterval }}
+  secretStoreRef:
+    {{- if $useStore }}
+    kind: SecretStore
+    name: {{ $es.secretStore.name }}
+    {{- else }}
+    kind: ClusterSecretStore
+    name: {{ $es.clusterSecretStore }}
+    {{- end }}
+  target:
+    name: {{ $secretName }}
+    creationPolicy: Owner
+    deletionPolicy: Retain
+    template:
+      metadata:
+        labels:
+          platform.example.com/tenant: {{ $name }}
+      data:
+        S3_ACCESS_KEY: "{{ "{{" }} .accessKey {{ "}}" }}"
+        S3_SECRET_KEY: "{{ "{{" }} .secretKey {{ "}}" }}"
+        S3_ENDPOINT: {{ $o.endpoint | quote }}
+        S3_REGION: {{ $o.region | quote }}
+        accessKeyID: "{{ "{{" }} .accessKey {{ "}}" }}"
+        secretAccessKey: "{{ "{{" }} .secretKey {{ "}}" }}"
+        endpoint: {{ $csiEndpoint | quote }}
+        region: {{ $o.region | quote }}
+  data:
+    - secretKey: accessKey
+      remoteRef:
+        key: {{ $vaultPath }}
+        property: {{ $o.accessKeyProperty }}
+    - secretKey: secretKey
+      remoteRef:
+        key: {{ $vaultPath }}
+        property: {{ $o.secretKeyProperty }}
+{{- if and $o.caBundle.enabled (include "tenant.landingZone" .) }}
+---
+# Public certificate of the CA that signed the MinIO certificate (mounted by the workload charts as S3_CA_FILE).
+apiVersion: {{ $es.apiVersion }}
+kind: ExternalSecret
+metadata:
+  name: {{ $o.caBundle.secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ $es.refreshInterval }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $es.clusterSecretStore }}
+  target:
+    name: {{ $o.caBundle.secretName }}
+    creationPolicy: Owner
+  data:
+    - secretKey: ca.crt
+      remoteRef:
+        key: {{ $o.caBundle.vaultKey }}
+        property: {{ $o.caBundle.property }}
+{{- end }}
+{{- range $o.volumes }}
+{{- $v := . }}
+{{- $vname := required "data.objectStorage.volumes[].name is required" $v.name }}
+{{- $bucket := include "tenant.s3Bucket" (dict "root" $ "name" ($v.bucket | default "files")) }}
+{{- $prefix := ($v.prefix | default "") | trimPrefix "/" | trimSuffix "/" }}
+{{- $pvName := printf "%s-%s" $name $vname }}
+{{- $claim := printf "%s%s" (include "tenant.objectPrefix" $) $vname }}
+{{- $size := $v.size | default "10Gi" }}
+{{- $modes := ternary (list "ReadOnlyMany") (list "ReadWriteMany") (eq $v.readOnly true) }}
+{{- $opts := $v.options | default $o.csi.options }}
+{{- if and $v.readOnly $o.csi.readOnlyOptions }}{{ $opts = printf "%s %s" $opts $o.csi.readOnlyOptions | trim }}{{ end }}
+---
+# Static bucket mount {{ $bucket }}{{ if $prefix }}/{{ $prefix }}{{ end }} -> PVC {{ $ns }}/{{ $claim }}. csi-s3 never creates or
+# deletes a statically provisioned bucket/prefix; reclaimPolicy {{ $o.csi.reclaimPolicy }}.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ $pvName }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+    platform.example.com/bucket: {{ $bucket }}
+spec:
+  storageClassName: ""
+  capacity:
+    storage: {{ $size }}
+  accessModes: {{ toJson $modes }}
+  persistentVolumeReclaimPolicy: {{ $o.csi.reclaimPolicy }}
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    namespace: {{ $ns }}
+    name: {{ $claim }}
+  csi:
+    driver: {{ $o.csi.driver }}
+    # "<bucket>" or "<bucket>/<prefix>" (split at the first "/").
+    volumeHandle: {{ trimSuffix "/" (printf "%s/%s" $bucket $prefix) }}
+    {{- if $v.readOnly }}
+    readOnly: true
+    {{- end }}
+    volumeAttributes:
+      mounter: {{ $o.csi.mounter }}
+      options: {{ $opts | quote }}
+    # The driver mounts in NodeStageVolume (and re-mounts in NodePublishVolume) with these credentials.
+    nodeStageSecretRef:
+      name: {{ $secretName }}
+      namespace: {{ $ns }}
+    nodePublishSecretRef:
+      name: {{ $secretName }}
+      namespace: {{ $ns }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+    platform.example.com/bucket: {{ $bucket }}
+spec:
+  # "" + volumeName: bind to the PV above only, never trigger dynamic provisioning.
+  storageClassName: ""
+  volumeName: {{ $pvName }}
+  accessModes: {{ toJson $modes }}
+  resources:
+    requests:
+      storage: {{ $size }}
+{{- end }}
+{{- if $prov.enabled }}
+---
+# Tenant credentials in the MinIO namespace for the provisioning Job (same Vault path).
+apiVersion: {{ $es.apiVersion }}
+kind: ExternalSecret
+metadata:
+  name: tenant-{{ $name }}-s3-user
+  namespace: {{ $prov.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  refreshInterval: {{ $es.refreshInterval }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $es.clusterSecretStore }}
+  target:
+    name: tenant-{{ $name }}-s3-user
+    creationPolicy: Owner
+  data:
+    - secretKey: S3_ACCESS_KEY
+      remoteRef:
+        key: {{ $vaultPath }}
+        property: {{ $o.accessKeyProperty }}
+    - secretKey: S3_SECRET_KEY
+      remoteRef:
+        key: {{ $vaultPath }}
+        property: {{ $o.secretKeyProperty }}
+---
+# Idempotent MinIO provisioning: buckets (+ versioning, quota), policy {{ $name }}-rw ({{ join ", " $resources }}),
+# user = S3_ACCESS_KEY with that policy. Runs on every sync (and therefore re-applies password rotations).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-provision-{{ $name }}
+  namespace: {{ $prov.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        platform.example.com/tenant: {{ $name }}
+        app.kubernetes.io/name: minio-tenant-provisioner
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $prov.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $prov.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mc
+          image: {{ include "tenant.image" (dict "image" $prov.image) }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- include "tenant.containerSecurityContext" $ | nindent 12 }}
+          resources:
+            {{- toYaml $prov.resources | nindent 12 }}
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: MINIO_ENDPOINT, value: {{ $o.endpoint | quote }}}
+            - {name: TENANT, value: {{ $name | quote }}}
+            - name: MINIO_ROOT_USER
+              valueFrom: {secretKeyRef: {name: {{ $prov.credentialsSecret }}, key: {{ $prov.rootUserKey }}}}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $prov.credentialsSecret }}, key: {{ $prov.rootPasswordKey }}}}
+            - name: S3_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: tenant-{{ $name }}-s3-user, key: S3_ACCESS_KEY}}
+            - name: S3_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: tenant-{{ $name }}-s3-user, key: S3_SECRET_KEY}}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              MC="mc --config-dir /tmp/.mc --quiet --no-color"
+              mkdir -p /tmp/.mc/certs/CAs
+              {{- if $prov.caSecret }}
+              cp /etc/minio-ca/{{ $prov.caKey }} /tmp/.mc/certs/CAs/minio-ca.crt
+              {{- end }}
+              n=0
+              until $MC alias set minio "$MINIO_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" --api S3v4 --path on >/dev/null && $MC admin info minio >/dev/null; do
+                n=$((n+5)); [ "$n" -ge 300 ] && { echo "MinIO not reachable at $MINIO_ENDPOINT"; exit 1; }
+                sleep 5
+              done
+              if [ "$S3_ACCESS_KEY" != "$TENANT" ]; then
+                echo "note: S3_ACCESS_KEY in Vault is not the tenant id; MinIO user is named after the access key"
+              fi
+              {{- range $buckets }}
+              echo "bucket {{ .name }}"
+              $MC mb --ignore-existing {{ if .objectLock }}--with-lock {{ end }}"minio/{{ .name }}"
+              {{- if .versioning }}
+              $MC version enable "minio/{{ .name }}"
+              {{- end }}
+              {{- if .quota }}
+              $MC quota set "minio/{{ .name }}" --size {{ .quota | quote }}
+              {{- else }}
+              $MC quota clear "minio/{{ .name }}" >/dev/null 2>&1 || true
+              {{- end }}
+              {{- end }}
+              cat > /tmp/policy.json <<'JSON'
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetBucketLocation", "s3:ListBucket", "s3:ListBucketMultipartUploads", "s3:ListBucketVersions", "s3:GetBucketVersioning"],
+                    "Resource": {{ toJson $resources }}
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectTagging", "s3:PutObject", "s3:PutObjectTagging", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+                    "Resource": {{ toJson $objResources }}
+                  }
+                ]
+              }
+              JSON
+              echo "policy {{ $name }}-rw"
+              $MC admin policy create minio "{{ $name }}-rw" /tmp/policy.json
+              echo "user $S3_ACCESS_KEY"
+              $MC admin user add minio "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null
+              if ! out=$($MC admin policy attach minio "{{ $name }}-rw" --user "$S3_ACCESS_KEY" 2>&1); then
+                echo "$out" | grep -qi "already" || { echo "$out"; exit 1; }
+              fi
+              echo done
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if $prov.caSecret }}
+            - {name: minio-ca, mountPath: /etc/minio-ca, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+        {{- if $prov.caSecret }}
+        - name: minio-ca
+          secret:
+            secretName: {{ $prov.caSecret }}
+            items:
+              - {key: {{ $prov.caKey }}, path: {{ $prov.caKey }}}
+        {{- end }}
+{{- end }}
+{{- end }}
