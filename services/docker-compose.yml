@@ -100,7 +100,7 @@ services:
     ports: ["4317:4317", "4318:4318"]
 
   payment-provider:               # WireMock stand-in for the external PSP (reached via Istio egress in clusters)
-    image: wiremock/wiremock:3.9.1
+    image: wiremock/wiremock:3.13.2-3
     command: ["--global-response-templating", "--disable-banner"]
     volumes:
       - ./dev/payment-provider/mappings:/home/wiremock/mappings:ro
