@@ -1,0 +1,22 @@
+// {{ ansible_managed }}
+// role: hardening - security updates only, never an automatic reboot unless enabled
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}ESMApps:${distro_codename}-apps-security";
+        "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+Unattended-Upgrade::Package-Blacklist {
+{% for pkg in hardening_unattended_upgrades_blacklist %}
+        "{{ pkg }}";
+{% endfor %}
+};
+
+Unattended-Upgrade::DevRelease "false";
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "{{ 'true' if hardening_unattended_upgrades_reboot | bool else 'false' }}";
+Unattended-Upgrade::Automatic-Reboot-Time "{{ hardening_unattended_upgrades_reboot_time }}";
+Unattended-Upgrade::SyslogEnable "true";

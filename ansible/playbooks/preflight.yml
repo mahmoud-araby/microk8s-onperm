@@ -1,0 +1,223 @@
+---
+# Preflight: verify every node and the controller BEFORE anything is changed.
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/preflight.yml
+# preflight_strict=false turns sizing failures into warnings (labs / staging).
+- name: Preflight - cluster nodes
+  hosts: microk8s_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: false
+  vars:
+    _preflight_ports: [16443, 10250, 10255, 10257, 10259, 25000, 19001, 12379]
+  tasks:
+    - name: Operating system is Ubuntu 22.04 / 24.04 LTS
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] in ['22.04', '24.04']
+          - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+          - ansible_facts['kernel'] is version('5.15', '>=')
+        fail_msg: >-
+          Unsupported platform {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          / {{ ansible_facts['architecture'] }} / kernel {{ ansible_facts['kernel'] }}
+      tags: [preflight, os]
+
+    - name: Inventory name is a valid Kubernetes node name
+      ansible.builtin.assert:
+        that: inventory_hostname is match('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$')
+        fail_msg: "{{ inventory_hostname }} is not a valid lowercase DNS-1123 label"
+        quiet: true
+      tags: [preflight, naming]
+
+    - name: CPU, memory and root disk meet the pool minimum
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['processor_vcpus'] | int >= preflight_min_vcpus | int
+          - ansible_facts['memtotal_mb'] | int >= (preflight_min_memory_gb | int * 1024 * 0.93) | int
+          - (_root.size_total / 1024 / 1024 / 1024) | int >= preflight_min_root_disk_gb | int
+        fail_msg: >-
+          {{ inventory_hostname }}: {{ ansible_facts['processor_vcpus'] }} vCPU / {{ ansible_facts['memtotal_mb'] }} MiB /
+          {{ (_root.size_total / 1024 / 1024 / 1024) | int }} GiB root; pool minimum is {{ preflight_min_vcpus }} vCPU /
+          {{ preflight_min_memory_gb }} GiB / {{ preflight_min_root_disk_gb }} GiB
+      vars:
+        _root: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | first }}"
+      ignore_errors: "{{ not (preflight_strict | default(true) | bool) }}"
+      tags: [preflight, sizing]
+
+    - name: Dedicated Longhorn disk exists and is not mounted elsewhere
+      ansible.builtin.stat:
+        path: "{{ longhorn_disk_device }}"
+      register: _pf_lh_disk
+      when: longhorn_disk_device is defined
+      tags: [preflight, storage]
+
+    - name: Assert Longhorn disk
+      ansible.builtin.assert:
+        that:
+          - _pf_lh_disk.stat.exists
+          - _pf_lh_disk.stat.isblk
+          - ansible_facts['mounts'] | selectattr('device', 'equalto', longhorn_disk_device) | rejectattr('mount', 'equalto', '/var/lib/longhorn') | list | length == 0
+        fail_msg: "{{ longhorn_disk_device }} missing, not a block device, or mounted somewhere other than /var/lib/longhorn"
+        quiet: true
+      when: longhorn_disk_device is defined
+      tags: [preflight, storage]
+
+    - name: Check whether MicroK8s is already installed
+      ansible.builtin.stat:
+        path: /snap/bin/microk8s
+      register: _pf_microk8s
+      tags: [preflight, ports]
+
+    - name: List listening TCP ports
+      ansible.builtin.command: ss -Hltn
+      register: _pf_ss
+      changed_when: false
+      when: not _pf_microk8s.stat.exists
+      tags: [preflight, ports]
+
+    - name: Required Kubernetes ports are free (fresh nodes)
+      ansible.builtin.assert:
+        that: _pf_ss.stdout is not search(':' ~ item ~ '\s')
+        fail_msg: "Port {{ item }} is already in use on {{ inventory_hostname }}"
+        quiet: true
+      loop: "{{ _preflight_ports }}"
+      when: not _pf_microk8s.stat.exists
+      tags: [preflight, ports]
+
+    - name: Nodes resolve and reach the first control-plane node (join port 25000 / SSH)
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[groups['microk8s_masters'][0]]['ansible_host'] }}"
+        port: 22
+        timeout: 5
+      when: inventory_hostname != groups['microk8s_masters'][0]
+      tags: [preflight, network]
+
+    - name: Snap store / proxy reachable
+      ansible.builtin.uri:
+        url: https://api.snapcraft.io/api/v1/snaps/info/microk8s
+        headers:
+          Snap-Device-Series: "16"
+        status_code: [200, 401, 404]
+        timeout: 10
+        use_proxy: "{{ proxy_enabled | default(false) | bool }}"
+      environment: "{{ {'https_proxy': proxy_https} if (proxy_enabled | default(false) | bool) else {} }}"
+      register: _pf_snapstore
+      failed_when: false
+      tags: [preflight, network]
+
+    - name: Warn when the snap store is unreachable
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ inventory_hostname }} cannot reach api.snapcraft.io ({{ _pf_snapstore.msg | default('') }}).
+          Configure proxy_* or a Snap Store Proxy before installing MicroK8s.
+      when: _pf_snapstore.status | default(0) not in [200, 401, 404]
+      tags: [preflight, network]
+
+    - name: Swap status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} has {{ ansible_facts['swaptotal_mb'] }} MiB swap - the common role disables it."
+      when: ansible_facts['swaptotal_mb'] | int > 0
+      tags: [preflight, swap]
+
+- name: Preflight - topology and controller
+  hosts: controller
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Control plane has an odd number (>= 3) of dqlite voters
+      ansible.builtin.assert:
+        that:
+          - groups['microk8s_masters'] | length >= 3
+          - groups['microk8s_masters'] | length is odd
+        fail_msg: "microk8s_masters must contain 3, 5 or 7 hosts (found {{ groups['microk8s_masters'] | length }})"
+      tags: [preflight, topology]
+
+    - name: Every worker pool has at least one node
+      ansible.builtin.assert:
+        that: groups[item] | default([]) | length > 0
+        fail_msg: "Worker pool '{{ item }}' is empty"
+        quiet: true
+      loop: [edge, platform, data, apps, observability]
+      tags: [preflight, topology]
+
+    - name: Data-replicating pools have >= 3 nodes (quorum for Postgres / Kafka / RabbitMQ / Redis Sentinel)
+      ansible.builtin.assert:
+        that: groups['data'] | length >= 3
+        fail_msg: "The data pool needs at least 3 nodes"
+      ignore_errors: "{{ not (preflight_strict | default(true) | bool) }}"
+      tags: [preflight, topology]
+
+    - name: Node IPs are unique
+      ansible.builtin.assert:
+        that: _ips | unique | length == _ips | length
+        fail_msg: "Duplicate ansible_host values: {{ _ips }}"
+      vars:
+        _ips: "{{ groups['microk8s_cluster'] | map('extract', hostvars, 'ansible_host') | list }}"
+      tags: [preflight, network]
+
+    - name: MetalLB ranges do not overlap each other
+      ansible.builtin.assert:
+        that: not (_ranges[item.0] | ip_ranges_overlap(_ranges[item.1]))
+        fail_msg: "MetalLB ranges overlap: {{ _ranges[item.0] }} / {{ _ranges[item.1] }}"
+        quiet: true
+      loop: "{{ range(_ranges | length) | product(range(_ranges | length)) | list }}"
+      when: item.0 < item.1
+      vars:
+        _ranges: "{{ metallb_pools | default({}) | dict2items | map(attribute='value.addresses') | flatten }}"
+      tags: [preflight, metallb]
+
+    - name: MetalLB ranges do not contain node IPs or the API VIP
+      ansible.builtin.assert:
+        that: not (item.0 | ip_in_range(item.1))
+        fail_msg: "{{ item.0 }} lies inside MetalLB range {{ item.1 }}"
+        quiet: true
+      loop: "{{ _addrs | product(_ranges) | list }}"
+      vars:
+        _ranges: "{{ metallb_pools | default({}) | dict2items | map(attribute='value.addresses') | flatten }}"
+        _addrs: >-
+          {{ groups['microk8s_cluster'] | map('extract', hostvars, 'ansible_host') | list
+             + ([microk8s_api_vip] if (microk8s_api_vip_enabled | default(false) | bool) else []) }}
+      tags: [preflight, metallb]
+
+    - name: Registry CA certificate is valid (when provided)
+      community.crypto.x509_certificate_info:
+        path: "{{ registry_ca_cert_file }}"
+        valid_at:
+          one_month: "+30d"
+      register: _pf_ca
+      when:
+        - registry_ca_cert_file | default('') | length > 0
+        - registry_ca_cert_file is file
+      tags: [preflight, registry]
+
+    - name: Registry CA is a CA and valid for at least 30 days
+      ansible.builtin.assert:
+        that:
+          - _pf_ca.basic_constraints is defined
+          - "'CA:TRUE' in (_pf_ca.basic_constraints | default([]))"
+          - _pf_ca.valid_at.one_month
+        fail_msg: "{{ registry_ca_cert_file }} is not a CA certificate or expires within 30 days"
+      when: _pf_ca is not skipped and _pf_ca is defined and _pf_ca.valid_at is defined
+      tags: [preflight, registry]
+
+    - name: Controller has helm (Argo CD bootstrap)
+      ansible.builtin.command: helm version --short
+      register: _pf_helm
+      changed_when: false
+      failed_when: false
+      tags: [preflight, controller]
+
+    - name: Controller has the python kubernetes client
+      ansible.builtin.command: "{{ ansible_playbook_python }} -c 'import kubernetes; print(kubernetes.__version__)'"
+      register: _pf_k8s_py
+      changed_when: false
+      failed_when: false
+      tags: [preflight, controller]
+
+    - name: Report controller tooling
+      ansible.builtin.debug:
+        msg:
+          - "helm: {{ _pf_helm.stdout | default('MISSING - needed by playbooks/bootstrap-gitops.yml') if _pf_helm.rc == 0 else 'MISSING - needed by playbooks/bootstrap-gitops.yml' }}"
+          - "python kubernetes: {{ _pf_k8s_py.stdout if _pf_k8s_py.rc == 0 else 'MISSING - pip install kubernetes' }}"
+      tags: [preflight, controller]

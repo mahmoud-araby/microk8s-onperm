@@ -1,0 +1,10 @@
+---
+# Minimal MicroK8s addons (dns, rbac, ha-cluster, metrics-server, helm3), HA CoreDNS,
+# and the admin kubeconfig written to inventories/<env>/.kubeconfig on the controller.
+- name: MicroK8s addons
+  hosts: microk8s_masters[0]
+  become: true
+  gather_facts: false
+  roles:
+    - role: microk8s_addons
+      tags: [addons]

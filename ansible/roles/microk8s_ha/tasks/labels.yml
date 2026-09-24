@@ -1,0 +1,68 @@
+---
+# kubectl runs on the first master (workers have no admin kubeconfig).
+- name: Compute desired labels
+  ansible.builtin.set_fact:
+    _ha_labels: >-
+      {{ microk8s_node_labels
+         | combine(microk8s_node_labels_extra)
+         | combine({microk8s_ha_zone_label: topology_zone} if topology_zone is defined else {}) }}
+
+- name: Read the node object
+  ansible.builtin.command: "{{ microk8s_bin }} kubectl get node {{ microk8s_node_name }} -o json"
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  register: _ha_node
+  changed_when: false
+
+- name: Extract current labels and taints
+  ansible.builtin.set_fact:
+    _ha_current_labels: "{{ (_ha_node.stdout | from_json).metadata.labels | default({}) }}"
+    _ha_current_taints: "{{ (_ha_node.stdout | from_json).spec.taints | default([]) }}"
+
+- name: Apply node labels
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl label node {{ microk8s_node_name }}
+    {{ item.key }}={{ item.value }} --overwrite
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  loop: "{{ _ha_labels | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  when: item.key not in _ha_current_labels or (_ha_current_labels[item.key] | string) != (item.value | string)
+  changed_when: true
+
+- name: Remove unwanted node labels
+  ansible.builtin.command: "{{ microk8s_bin }} kubectl label node {{ microk8s_node_name }} {{ item }}-"
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  loop: "{{ microk8s_node_labels_absent }}"
+  when: item in _ha_current_labels
+  changed_when: true
+
+- name: Apply node taints
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl taint node {{ microk8s_node_name }}
+    {{ item.key }}{{ ('=' ~ item.value) if (item.value | default('') | length > 0) else '' }}:{{ item.effect }} --overwrite
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  loop: "{{ microk8s_node_taints }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value | default('') }}:{{ item.effect }}"
+  when: >-
+    _ha_current_taints
+    | selectattr('key', 'equalto', item.key)
+    | selectattr('effect', 'equalto', item.effect)
+    | map(attribute='value', default='')
+    | select('equalto', item.value | default(''))
+    | list | length == 0
+  changed_when: true
+
+- name: Remove unwanted node taints
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl taint node {{ microk8s_node_name }} {{ item.key }}:{{ item.effect }}-
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  loop: "{{ microk8s_node_taints_absent }}"
+  loop_control:
+    label: "{{ item.key }}:{{ item.effect }}"
+  when: >-
+    _ha_current_taints
+    | selectattr('key', 'equalto', item.key)
+    | selectattr('effect', 'equalto', item.effect)
+    | list | length > 0
+  changed_when: true

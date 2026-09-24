@@ -1,0 +1,72 @@
+---
+# ===========================================================================
+# role: microk8s - install and configure the MicroK8s snap on every node
+# ===========================================================================
+
+# PINNED snap channel (e.g. 1.32/stable). Changing it on an installed node is refused
+# unless done through playbooks/upgrade.yml (which sets microk8s_allow_channel_change).
+microk8s_channel: 1.32/stable
+microk8s_allow_channel_change: false
+# Hold snap auto-refresh for microk8s (upgrades are rolling + drained via upgrade.yml)
+microk8s_hold_refresh: true
+
+microk8s_bin: /snap/bin/microk8s
+microk8s_snap_data: /var/snap/microk8s/current
+microk8s_snap_common: /var/snap/microk8s/common
+
+# Kubernetes node name (= inventory hostname, the common role sets the OS hostname)
+microk8s_node_name: "{{ inventory_hostname | lower }}"
+# Address other nodes use to reach this node (join, dqlite, kubelet)
+microk8s_advertise_address: "{{ ansible_host }}"
+# master | worker (group_vars set it; derived from group membership otherwise)
+microk8s_role: "{{ 'master' if inventory_hostname in groups.get('microk8s_masters', []) else 'worker' }}"
+
+# --- Launch configuration (honoured only on the FIRST install of a node) ----------
+microk8s_launch_config_enabled: false
+microk8s_pod_cidr: 10.1.0.0/16
+# MUST contain 10.152.183.10 (ClusterIP the MicroK8s dns addon assigns to CoreDNS),
+# e.g. 10.152.0.0/16. The role asserts this.
+microk8s_service_cidr: 10.152.183.0/24
+# Extra SANs for the API server certificate (VIP + DNS name are appended automatically)
+microk8s_extra_sans: []
+
+# --- API endpoint / VIP ---------------------------------------------------------
+microk8s_api_vip_enabled: false
+microk8s_api_vip: ""
+microk8s_api_dns_name: ""
+
+# --- kubelet ----------------------------------------------------------------------
+# Role defaults < microk8s_kubelet_args (environment) < microk8s_kubelet_args_pool (pool)
+microk8s_kubelet_args_default:
+  --max-pods: "110"
+  --serialize-image-pulls: "false"
+  --container-log-max-size: 50Mi
+  --container-log-max-files: "5"
+microk8s_kubelet_args: {}
+microk8s_kubelet_args_pool: {}
+# Arguments to remove from the kubelet args file
+microk8s_kubelet_args_absent: []
+
+# --- containerd -------------------------------------------------------------------
+microk8s_containerd_ulimits:
+  - ulimit -n 1048576 || true
+  - ulimit -l unlimited || true
+microk8s_containerd_proxy_enabled: "{{ proxy_enabled | default(false) }}"
+
+# --- Registry mirrors (Harbor) ---------------------------------------------------
+microk8s_registry_harbor_host: "{{ registry_harbor_host | default('harbor.ops.example.local') }}"
+microk8s_registry_mirrors: "{{ registry_mirrors | default([]) }}"
+microk8s_registry_fallback_to_upstream: "{{ registry_mirror_fallback_to_upstream | default(true) }}"
+microk8s_registry_ca_cert_file: "{{ registry_ca_cert_file | default('') }}"
+microk8s_registry_ca_cert_required: "{{ registry_ca_cert_required | default(false) }}"
+
+# --- Users ------------------------------------------------------------------------
+# OS users added to the `microk8s` group (can run microk8s without sudo)
+microk8s_admin_users: []
+# Create `kubectl` / `helm` snap aliases for microk8s.kubectl / microk8s.helm3
+microk8s_snap_aliases: true
+
+# --- Readiness --------------------------------------------------------------------
+microk8s_ready_timeout: 600
+# Restart kubelite/containerd one node at a time when args change
+microk8s_restart_throttle: 1

@@ -1,0 +1,3 @@
+---
+# No handlers: every change is applied synchronously through the Vault CLI in the pod.
+[]

@@ -1,0 +1,40 @@
+---
+- name: Locate the root application manifest
+  ansible.builtin.stat:
+    path: "{{ argocd_root_app_path }}"
+  register: _argocd_root_app
+
+- name: Fail when gitops/bootstrap/root-app.yaml is missing
+  ansible.builtin.assert:
+    that: _argocd_root_app.stat.exists
+    fail_msg: "{{ argocd_root_app_path }} not found - the gitops/ tree must be checked out next to ansible/."
+    quiet: true
+
+- name: Apply the root app-of-apps
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    namespace: "{{ argocd_namespace }}"
+    src: "{{ argocd_root_app_path }}"
+  register: _argocd_root_apply
+
+- name: Wait for the root application to be registered
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ argocd_namespace }}"
+  register: _argocd_apps
+  until: _argocd_apps.resources | length > 0
+  retries: 30
+  delay: 10
+
+- name: Show GitOps hand-over
+  ansible.builtin.debug:
+    msg:
+      - "Argo CD {{ argocd_chart_version }} installed in namespace {{ argocd_namespace }}."
+      - "Root application applied from {{ argocd_root_app_path | realpath }}."
+      - "Applications: {{ _argocd_apps.resources | map(attribute='metadata.name') | list }}"
+      - "UI (after the Istio internal gateway syncs): https://{{ argocd_hostname }}"
+      - "Initial admin password: kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"

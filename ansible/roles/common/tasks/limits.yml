@@ -1,0 +1,64 @@
+---
+- name: Configure PAM limits
+  ansible.builtin.template:
+    src: limits.conf.j2
+    dest: /etc/security/limits.d/90-platform.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create systemd manager drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure systemd default limits
+  ansible.builtin.copy:
+    dest: /etc/systemd/system.conf.d/90-platform-limits.conf
+    content: |
+      # Managed by Ansible (role: common)
+      [Manager]
+      DefaultLimitNOFILE={{ common_nofile_limit }}
+      DefaultLimitNPROC={{ common_nproc_limit }}
+      {% if common_memlock_unlimited | bool %}
+      DefaultLimitMEMLOCK=infinity
+      {% endif %}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reexec systemd
+
+- name: Install unit that disables transparent huge pages
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/disable-thp.service
+    content: |
+      # Managed by Ansible (role: common)
+      [Unit]
+      Description=Disable Transparent Huge Pages (databases / brokers / Elasticsearch)
+      DefaultDependencies=no
+      After=sysinit.target local-fs.target
+      Before=snap.microk8s.daemon-containerd.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled && echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=basic.target
+    owner: root
+    group: root
+    mode: "0644"
+  when: common_disable_thp | bool
+  register: _common_thp_unit
+
+- name: Enable and start disable-thp.service
+  ansible.builtin.systemd_service:
+    name: disable-thp.service
+    enabled: true
+    state: started
+    daemon_reload: "{{ _common_thp_unit is changed }}"
+  when: common_disable_thp | bool

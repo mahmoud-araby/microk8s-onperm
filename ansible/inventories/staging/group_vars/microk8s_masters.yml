@@ -1,0 +1,16 @@
+---
+# STAGING: same labels/taints as production (docs/conventions.md), reduced sizing.
+# Control plane (dqlite voters).
+microk8s_role: master
+microk8s_node_labels:
+  node-role.kubernetes.io/control-plane: ""
+# Dedicated control plane: only DaemonSets / critical addons with a matching toleration run here.
+microk8s_node_taints: "{{ [{'key': 'node-role.kubernetes.io/control-plane', 'value': '', 'effect': 'NoSchedule'}] if (microk8s_dedicated_masters | bool) else [] }}"
+microk8s_kubelet_args_pool:
+  --max-pods: "110"
+
+preflight_min_vcpus: 4
+preflight_min_memory_gb: 16
+preflight_min_root_disk_gb: 80
+
+common_sysctl_pool: {}

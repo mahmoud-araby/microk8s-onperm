@@ -1,0 +1,67 @@
+---
+- name: Read status of the first Vault pod
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ vault_init_namespace }}"
+    pod: "{{ _vault_pods[0] }}"
+    container: "{{ vault_init_container }}"
+    command: "{{ _vault_env }} vault status -format=json"
+  register: _vault_status0
+  changed_when: false
+  # rc 0 = unsealed, 2 = sealed; anything else is an error
+  failed_when: _vault_status0.rc | default(1) not in [0, 2]
+
+- name: Parse status
+  ansible.builtin.set_fact:
+    _vault_initialized: "{{ (_vault_status0.stdout | from_json).initialized | bool }}"
+
+- name: Initialise Vault
+  when: not (_vault_initialized | bool)
+  block:
+    - name: Run vault operator init
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig_path }}"
+        namespace: "{{ vault_init_namespace }}"
+        pod: "{{ _vault_pods[0] }}"
+        container: "{{ vault_init_container }}"
+        command: >-
+          {{ _vault_env }} vault operator init -format=json
+          -key-shares={{ vault_init_key_shares }} -key-threshold={{ vault_init_key_threshold }}
+      register: _vault_init_out
+      changed_when: true
+      no_log: "{{ vault_init_no_log }}"
+
+    - name: Keep the new unseal keys and root token for this run
+      ansible.builtin.set_fact:
+        vault_init_unseal_keys: "{{ (_vault_init_out.stdout | from_json).unseal_keys_b64 }}"
+        vault_init_root_token: "{{ (_vault_init_out.stdout | from_json).root_token }}"
+      no_log: "{{ vault_init_no_log }}"
+
+    - name: Save init output on the controller (mode 0600)
+      ansible.builtin.copy:
+        dest: "{{ vault_init_output_file }}"
+        content: |
+          # Vault init output for {{ platform_environment | default('') }} - move these values into
+          # group_vars/all/vault.yml (ansible-vault encrypted) and store a copy offline.
+          {{ {'vault_unseal_keys': vault_init_unseal_keys, 'vault_root_token': vault_init_root_token} | to_nice_yaml }}
+        mode: "0600"
+      no_log: "{{ vault_init_no_log }}"
+
+    - name: Encrypt the init output with ansible-vault
+      ansible.builtin.command:
+        cmd: >-
+          ansible-vault encrypt {{ vault_init_output_file | quote }}
+          --encrypt-vault-id {{ vault_init_vault_id | quote }}
+      when: vault_init_encrypt_output | bool
+      changed_when: true
+
+- name: Require unseal keys and a root token
+  ansible.builtin.assert:
+    that:
+      - vault_init_unseal_keys | length >= vault_init_key_threshold
+      - vault_init_root_token | length > 0
+    fail_msg: >-
+      Vault is initialised but vault_unseal_keys / vault_root_token are not available.
+      Add them to inventories/<env>/group_vars/all/vault.yml (ansible-vault).
+    quiet: true
+  no_log: "{{ vault_init_no_log }}"

@@ -1,0 +1,24 @@
+---
+- name: Find the newest local archives
+  ansible.builtin.find:
+    paths: "{{ backup_dir }}"
+    patterns: ["dqlite-*", "pki-*"]
+    age: -1d
+  register: _backup_files
+
+- name: Create controller destination
+  ansible.builtin.file:
+    path: "{{ backup_fetch_dest }}/{{ inventory_hostname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Fetch archives
+  ansible.builtin.fetch:
+    src: "{{ item.path }}"
+    dest: "{{ backup_fetch_dest }}/{{ inventory_hostname }}/"
+    flat: true
+  loop: "{{ _backup_files.files | sort(attribute='mtime', reverse=true) | list }}"
+  loop_control:
+    label: "{{ item.path | basename }}"

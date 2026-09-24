@@ -1,0 +1,39 @@
+# {{ ansible_managed }}
+# role: microk8s_ha - floating VIP {{ microk8s_api_vip }} for the Kubernetes API (:16443)
+{% set masters = groups['microk8s_masters'] %}
+{% set my_ip = microk8s_advertise_address | default(ansible_host) %}
+global_defs {
+    router_id {{ inventory_hostname }}
+    enable_script_security
+    script_user root
+}
+
+vrrp_script chk_apiserver {
+    script "/etc/keepalived/check_apiserver.sh"
+    interval 3
+    timeout 4
+    fall 3
+    rise 2
+    weight -50
+}
+
+vrrp_instance VI_K8S_API {
+    state BACKUP
+    interface {{ microk8s_api_vip_interface }}
+    virtual_router_id {{ microk8s_api_vip_router_id }}
+    priority {{ 150 - (masters.index(inventory_hostname) * 10) }}
+    advert_int 1
+    nopreempt
+    unicast_src_ip {{ my_ip }}
+    unicast_peer {
+{% for host in masters if host != inventory_hostname %}
+        {{ hostvars[host]['microk8s_advertise_address'] | default(hostvars[host]['ansible_host']) }}
+{% endfor %}
+    }
+    virtual_ipaddress {
+        {{ microk8s_api_vip }}/{{ microk8s_api_vip_prefix }} dev {{ microk8s_api_vip_interface }}
+    }
+    track_script {
+        chk_apiserver
+    }
+}

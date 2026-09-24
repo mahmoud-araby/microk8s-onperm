@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: microk8s
+  namespace: platform
+  author: Platform Engineering
+  description: Install MicroK8s from a pinned snap channel and configure kubelet, containerd, Harbor registry mirrors and API SANs
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [kubernetes, microk8s, containerd, snap]
+dependencies: []

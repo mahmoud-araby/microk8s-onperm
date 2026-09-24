@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# role: common - limits for high-connection workloads
+*       soft    nofile      {{ common_nofile_limit }}
+*       hard    nofile      {{ common_nofile_limit }}
+root    soft    nofile      {{ common_nofile_limit }}
+root    hard    nofile      {{ common_nofile_limit }}
+*       soft    nproc       {{ common_nproc_limit }}
+*       hard    nproc       {{ common_nproc_limit }}
+{% if common_memlock_unlimited | bool %}
+*       soft    memlock     unlimited
+*       hard    memlock     unlimited
+{% endif %}
+*       hard    core        0

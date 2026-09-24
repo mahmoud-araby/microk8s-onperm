@@ -1,0 +1,60 @@
+---
+- name: Look up the tenant namespace
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Namespace
+    name: "{{ _k8s_cm_tenant.namespace }}"
+  register: _k8s_cm_ns
+
+- name: Require the tenant namespace (created by charts/tenant via Argo CD)
+  ansible.builtin.assert:
+    that: _k8s_cm_ns.resources | length > 0
+    fail_msg: "Namespace {{ _k8s_cm_tenant.namespace }} does not exist yet - sync the tenant first."
+    quiet: true
+  when: k8s_configmaps_require_namespace | bool
+
+- name: Apply ConfigMaps
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    definition: "{{ _cm }}"
+  loop: "{{ _k8s_cm_objects }}"
+  loop_control:
+    loop_var: _cm
+    label: "{{ _cm.metadata.namespace }}/{{ _cm.metadata.name }}"
+  register: _k8s_cm_applied
+
+- name: Roll workloads whose configuration changed
+  ansible.builtin.include_tasks: rollout.yml
+  loop: >-
+    {{ _k8s_cm_applied.results | selectattr('changed') | map(attribute='_cm')
+       | selectattr('metadata.labels', 'contains', 'app.kubernetes.io/instance') | list }}
+  loop_control:
+    loop_var: _k8s_cm_changed
+    label: "{{ _k8s_cm_changed.metadata.name }}"
+  when: k8s_configmaps_restart_workloads | bool
+
+- name: Find previously generated ConfigMaps
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: ConfigMap
+    namespace: "{{ _k8s_cm_tenant.namespace }}"
+    label_selectors:
+      - platform.example.com/generated-by=k8s-configmaps
+  register: _k8s_cm_existing
+  when: k8s_configmaps_prune | bool
+
+- name: Prune ConfigMaps that are no longer generated
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: absent
+    kind: ConfigMap
+    namespace: "{{ _k8s_cm_tenant.namespace }}"
+    name: "{{ _stale }}"
+  loop: >-
+    {{ _k8s_cm_existing.resources | default([]) | map(attribute='metadata.name')
+       | difference(_k8s_cm_objects | map(attribute='metadata.name')) | list }}
+  loop_control:
+    loop_var: _stale
+  when: k8s_configmaps_prune | bool

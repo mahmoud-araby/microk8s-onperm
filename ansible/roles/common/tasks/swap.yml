@@ -1,0 +1,16 @@
+---
+- name: Turn off active swap
+  ansible.builtin.command: swapoff -a
+  when: (ansible_facts['swaptotal_mb'] | int) > 0
+  changed_when: true
+
+- name: Comment out swap entries in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(\s*[^#\s]+\s+\S+\s+swap\s+.*)$'
+    replace: '# \1  # disabled by ansible (kubernetes)'
+
+- name: Mask swap.target so systemd never activates swap again
+  ansible.builtin.systemd_service:
+    name: swap.target
+    masked: true

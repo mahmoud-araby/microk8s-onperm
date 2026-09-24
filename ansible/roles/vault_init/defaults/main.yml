@@ -1,0 +1,68 @@
+---
+# ===========================================================================
+# role: vault_init - OPTIONAL one-time initialisation / unseal / configuration of the
+# HashiCorp Vault deployed by Argo CD (gitops/platform/core/vault, namespace vault).
+#
+# Guarded: nothing happens unless vault_init_enabled=true (e.g. -e vault_init_enabled=true).
+# Runs on the controller through the Kubernetes API (kubernetes.core.k8s_exec into vault-N).
+# ===========================================================================
+
+vault_init_enabled: false
+kubeconfig_path: "{{ inventory_dir }}/.kubeconfig"
+
+vault_init_namespace: vault
+vault_init_pod_label_selector: app.kubernetes.io/name=vault,component=server
+vault_init_container: vault
+# Commands run inside the Vault pod against its own listener. The listener is TLS
+# (gitops/platform/core/vault: tlsDisable=false) and its certificate has no 127.0.0.1 SAN,
+# so verification is skipped for this loopback-only connection.
+vault_init_addr: https://127.0.0.1:8200
+vault_init_skip_verify: true
+
+# Shamir parameters
+vault_init_key_shares: 5
+vault_init_key_threshold: 3
+
+# The init output (unseal keys + root token) is written here on the controller and
+# immediately encrypted with ansible-vault (uses the vault identity configured for
+# ansible, e.g. ANSIBLE_VAULT_IDENTITY_LIST / --vault-id). NEVER commit it unencrypted.
+vault_init_output_file: "{{ inventory_dir }}/vault-init-{{ platform_environment | default('env') }}.yml"
+vault_init_encrypt_output: true
+vault_init_vault_id: "{{ platform_environment | default('default') }}"
+
+# Keys/token for subsequent runs (from the encrypted group_vars/all/vault.yml)
+vault_init_unseal_keys: "{{ vault_unseal_keys | default([]) }}"
+vault_init_root_token: "{{ vault_root_token | default('') }}"
+
+# Join followers to the raft leader when the Helm values do not use retry_join
+vault_init_raft_manual_join: false
+vault_init_raft_leader_addr: "http://vault-0.vault-internal:8200"
+
+# --- Configuration ------------------------------------------------------------------
+vault_init_configure: true
+# KV v2 mount used by the External Secrets ClusterSecretStore "vault-backend" (docs/conventions.md)
+vault_init_kv_path: secret
+vault_init_audit_stdout: true
+
+vault_init_k8s_auth_path: kubernetes
+vault_init_k8s_host: https://kubernetes.default.svc:443
+
+# ClusterSecretStore vault-backend: platform-wide read access
+vault_init_eso_role: external-secrets
+vault_init_eso_service_account: external-secrets
+vault_init_eso_namespace: external-secrets
+vault_init_eso_token_ttl: 1h
+
+# Per-tenant SecretStore "vault-tenant" (charts/tenant/README.md "Vault layout"):
+#   role tenant-<name>, bound to SA vault-tenant-auth in tenant-<name>, read secret/data/tenants/<name>/*
+# Pooled tenants (tier shared) live in shared-services with the object prefix tenant-<name>-;
+# the pool itself ("shared") owns shared-services without a prefix.
+vault_init_tenants: "{{ platform_tenants | default([]) }}"
+vault_init_pooled_tenants: "{{ platform_pooled_tenants | default([]) }}"
+vault_init_pool_tenants: [shared]
+vault_init_tenant_service_account: vault-tenant-auth
+vault_init_shared_namespace: shared-services
+vault_init_tenant_token_ttl: 1h
+
+# Show secrets in logs (never in production)
+vault_init_no_log: true

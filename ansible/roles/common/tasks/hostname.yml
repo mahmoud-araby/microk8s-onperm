@@ -1,0 +1,37 @@
+---
+- name: Set hostname to the inventory name (= Kubernetes node name)
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+    use: systemd
+  when: common_set_hostname | bool
+
+- name: Check for cloud-init
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg.d
+  register: _common_cloud_init
+
+- name: Keep cloud-init from resetting the hostname
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-preserve-hostname.cfg
+    content: |
+      # Managed by Ansible (role: common)
+      preserve_hostname: true
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - common_set_hostname | bool
+    - _common_cloud_init.stat.exists
+
+- name: Manage cluster node entries in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED - microk8s cluster nodes"
+    block: |
+      {% for host in groups['microk8s_cluster'] | sort %}
+      {{ hostvars[host]['microk8s_advertise_address'] | default(hostvars[host]['ansible_host']) }} {{ host }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+  when: common_manage_etc_hosts | bool

@@ -1,0 +1,15 @@
+---
+# Application pool: tenant + shared .NET / Java / Python microservices and frontends.
+# 12+ nodes, 16 vCPU / 64 GiB (scale horizontally; add nodes with playbooks/add-node.yml).
+workload_tier: apps
+microk8s_node_labels:
+  workload-tier: apps
+  node-role.kubernetes.io/apps: ""
+microk8s_node_taints: []
+microk8s_kubelet_args_pool:
+  --max-pods: "250"
+common_sysctl_pool: {}
+
+preflight_min_vcpus: 16
+preflight_min_memory_gb: 64
+preflight_min_root_disk_gb: 200

@@ -1,0 +1,31 @@
+---
+- name: Check that the kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: _vault_kubeconfig
+
+- name: Fail without kubeconfig
+  ansible.builtin.assert:
+    that: _vault_kubeconfig.stat.exists
+    fail_msg: "{{ kubeconfig_path }} not found - run playbooks/addons.yml first."
+    quiet: true
+
+- name: Wait for Vault server pods (Argo CD must have synced gitops/platform/core/vault)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Pod
+    namespace: "{{ vault_init_namespace }}"
+    label_selectors: "{{ vault_init_pod_label_selector.split(',') }}"
+  register: _vault_pod_list
+  until: >-
+    _vault_pod_list.resources | length > 0
+    and (_vault_pod_list.resources | selectattr('status.phase', 'equalto', 'Running') | list | length)
+        == (_vault_pod_list.resources | length)
+  retries: 60
+  delay: 10
+
+- name: Record Vault pods (vault-0 first = initialisation / raft leader candidate)
+  ansible.builtin.set_fact:
+    _vault_pods: "{{ _vault_pod_list.resources | map(attribute='metadata.name') | sort | list }}"
+    _vault_env: >-
+      env VAULT_ADDR={{ vault_init_addr }}{{ ' VAULT_SKIP_VERIFY=true' if vault_init_skip_verify | bool else '' }}

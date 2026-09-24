@@ -1,0 +1,23 @@
+---
+# Service catalogue defaults for "payments" (Java / Spring Boot) - gitops/apps/payments (language: java).
+config:
+  database:
+    enabled: true
+    name: payments
+    poolMax: 30
+  rabbitmq:
+    enabled: true
+    prefetch: 20
+  kafka:
+    enabled: true
+    topics:
+      events: payments-events
+  http:
+    timeoutSeconds: 15
+  features:
+    refundsAsync: false
+  custom:
+    platform:
+      payments:
+        settlement-cutoff-utc: "22:00"
+        max-retry-attempts: 5

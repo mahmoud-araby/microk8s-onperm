@@ -1,0 +1,51 @@
+## {{ ansible_managed }}
+## role: hardening - CIS-inspired audit rules + MicroK8s specific watches
+
+## Identity / privilege changes
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/sudoers -p wa -k scope
+-w /etc/sudoers.d/ -p wa -k scope
+
+## Login / session
+-w /var/log/lastlog -p wa -k logins
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+
+## Time changes
+-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
+-w /etc/localtime -p wa -k time-change
+
+## Network environment
+-a always,exit -F arch=b64 -S sethostname,setdomainname -k system-locale
+-w /etc/hosts -p wa -k system-locale
+-w /etc/netplan/ -p wa -k system-locale
+
+## Kernel modules
+-w /sbin/insmod -p x -k modules
+-w /sbin/rmmod -p x -k modules
+-w /sbin/modprobe -p x -k modules
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules
+
+## Kernel parameters
+-w /etc/sysctl.conf -p wa -k sysctl
+-w /etc/sysctl.d/ -p wa -k sysctl
+
+{% if _hardening_microk8s_present | default(false) %}
+## MicroK8s: cluster credentials, certificates and component arguments
+## (added on the first run after MicroK8s is installed - auditctl rejects missing paths)
+-w /var/snap/microk8s/current/certs/ -p wa -k microk8s-certs
+-w /var/snap/microk8s/current/credentials/ -p rwa -k microk8s-credentials
+-w /var/snap/microk8s/current/args/ -p wa -k microk8s-args
+-w /snap/bin/microk8s -p x -k microk8s-cli
+{% endif %}
+
+## Privileged commands
+-a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=unset -k privileged
+-a always,exit -F path=/usr/bin/su -F perm=x -F auid>=1000 -F auid!=unset -k privileged
+
+{% for rule in hardening_auditd_extra_rules %}
+{{ rule }}
+{% endfor %}

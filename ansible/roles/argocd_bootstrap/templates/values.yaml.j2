@@ -1,0 +1,157 @@
+---
+# {{ ansible_managed }}
+# argo/argo-cd chart values rendered by the argocd_bootstrap role.
+# ServiceMonitors are NOT enabled here: the Prometheus Operator CRDs do not exist yet at
+# bootstrap time. Once kube-prometheus-stack is synced, enable them from GitOps.
+{% set ha = argocd_ha_enabled | bool %}
+global:
+  domain: {{ argocd_hostname }}
+  logging:
+    format: {{ argocd_log_format }}
+    level: {{ argocd_log_level }}
+  nodeSelector: {{ argocd_node_selector | to_json }}
+  tolerations: {{ argocd_tolerations | to_json }}
+  affinity:
+    podAntiAffinity: {{ 'hard' if ha else 'soft' }}
+  networkPolicy:
+    create: false
+
+crds:
+  install: true
+  keep: true
+
+configs:
+  params:
+    # TLS is terminated by the Istio internal gateway (argocd.ops.example.local)
+    server.insecure: true
+    controller.status.processors: {{ 50 if ha else 20 }}
+    controller.operation.processors: {{ 25 if ha else 10 }}
+    controller.repo.server.timeout.seconds: 180
+    controller.sharding.algorithm: consistent-hashing
+    reposerver.parallelism.limit: {{ 10 if ha else 4 }}
+    applicationsetcontroller.policy: create-update
+  cm:
+    url: https://{{ argocd_hostname }}
+    admin.enabled: true
+    application.resourceTrackingMethod: annotation
+    timeout.reconciliation: 180s
+    exec.enabled: false
+    kustomize.buildOptions: --enable-helm
+    # "ConfigMap Ansible" (apply mode) stamps this annotation on pod templates to roll
+    # workloads when their rendered ConfigMap changes - never treat it as drift.
+    resource.customizations.ignoreDifferences.all: |
+      jqPathExpressions:
+        - '.spec.template.metadata.annotations."platform.example.com/config-checksum"'
+{% if argocd_oidc_enabled | bool %}
+    oidc.config: |
+      name: Keycloak
+      issuer: {{ argocd_oidc_issuer }}
+      clientID: {{ argocd_oidc_client_id }}
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]
+      requestedIDTokenClaims: {"groups": {"essential": true}}
+{% endif %}
+  rbac:
+    policy.default: role:readonly
+    scopes: "[groups, email]"
+    policy.csv: |
+{% for group in argocd_rbac_admin_groups %}
+      g, {{ group }}, role:admin
+{% endfor %}
+{% for group in argocd_rbac_readonly_groups %}
+      g, {{ group }}, role:readonly
+{% endfor %}
+  secret:
+    createSecret: true
+{% if argocd_admin_password_bcrypt | length > 0 %}
+    argocdServerAdminPassword: {{ argocd_admin_password_bcrypt | to_json }}
+{% endif %}
+{% if argocd_oidc_enabled | bool and argocd_oidc_client_secret | length > 0 %}
+    extra:
+      oidc.keycloak.clientSecret: {{ argocd_oidc_client_secret | to_json }}
+{% endif %}
+
+controller:
+  replicas: {{ argocd_controller_replicas if ha else 1 }}
+  resources:
+    requests: {cpu: "1", memory: 2Gi}
+    limits: {memory: 6Gi}
+  metrics:
+    enabled: true
+  pdb:
+    enabled: {{ ha | lower }}
+    minAvailable: 1
+
+server:
+  autoscaling:
+    enabled: {{ ha | lower }}
+    minReplicas: {{ argocd_server_min_replicas }}
+    maxReplicas: {{ argocd_server_max_replicas }}
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  replicas: {{ argocd_server_min_replicas }}
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  metrics:
+    enabled: true
+  pdb:
+    enabled: {{ ha | lower }}
+    minAvailable: 1
+  ingress:
+    enabled: false          # exposed through the Istio internal gateway (GitOps)
+
+repoServer:
+  autoscaling:
+    enabled: {{ ha | lower }}
+    minReplicas: {{ argocd_repo_server_min_replicas }}
+    maxReplicas: {{ argocd_repo_server_max_replicas }}
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  replicas: {{ argocd_repo_server_min_replicas }}
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {memory: 2Gi}
+  metrics:
+    enabled: true
+  pdb:
+    enabled: {{ ha | lower }}
+    minAvailable: 1
+
+applicationSet:
+  replicas: {{ argocd_applicationset_replicas if ha else 1 }}
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  metrics:
+    enabled: true
+  pdb:
+    enabled: {{ ha | lower }}
+    minAvailable: 1
+
+notifications:
+  enabled: true
+  metrics:
+    enabled: true
+
+# SSO is done directly against Keycloak (oidc.config) - no Dex.
+dex:
+  enabled: false
+
+redis:
+  enabled: {{ (not ha) | lower }}
+
+redis-ha:
+  enabled: {{ ha | lower }}
+{% if ha %}
+  hardAntiAffinity: true
+  nodeSelector: {{ argocd_node_selector | to_json }}
+  haproxy:
+    replicas: 3
+    hardAntiAffinity: true
+    nodeSelector: {{ argocd_node_selector | to_json }}
+    metrics:
+      enabled: true
+  exporter:
+    enabled: false
+{% endif %}

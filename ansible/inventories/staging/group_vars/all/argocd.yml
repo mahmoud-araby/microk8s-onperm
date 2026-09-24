@@ -1,0 +1,35 @@
+---
+# ---------------------------------------------------------------------------
+# Argo CD bootstrap - STAGING (role: argocd_bootstrap)
+# Ansible installs Argo CD exactly once; from then on everything (including new
+# platform components) is reconciled by Argo CD from gitops/bootstrap/root-app.yaml.
+# ---------------------------------------------------------------------------
+
+# PINNED chart version (argo/argo-cd, Argo CD v3.x). Bump deliberately, test in staging first.
+argocd_chart_version: "10.9.2"
+argocd_chart_repo_url: https://argoproj.github.io/argo-helm
+# For air-gapped installs use the Harbor OCI/Helm proxy instead, e.g.:
+# argocd_chart_repo_url: "https://{{ registry_harbor_host }}/chartrepo/argo"
+
+# HA topology: redis-ha (3 nodes, hard anti-affinity), sharded application controller,
+# autoscaled API server / repo server / ApplicationSet controller.
+argocd_ha_enabled: false
+argocd_controller_replicas: 1
+argocd_server_min_replicas: 1
+argocd_server_max_replicas: 3
+argocd_repo_server_min_replicas: 1
+argocd_repo_server_max_replicas: 3
+argocd_applicationset_replicas: 1
+
+# Argo CD components run on the platform pool
+argocd_node_selector:
+  workload-tier: platform
+
+# SSO through Keycloak (realm "platform"); client secret comes from vault.yml
+argocd_oidc_enabled: true
+argocd_oidc_issuer: "https://keycloak.{{ platform_ops_domain }}/realms/platform"
+argocd_oidc_client_id: argocd
+argocd_rbac_admin_groups:
+  - platform-admins
+argocd_rbac_readonly_groups:
+  - platform-viewers

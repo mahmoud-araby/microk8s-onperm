@@ -1,0 +1,41 @@
+---
+# Run once after every node has joined (playbooks/cluster.yml calls it via tasks_from).
+- name: Read cluster HA status
+  ansible.builtin.command: "{{ microk8s_bin }} status --format yaml"
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  run_once: true
+  register: _ha_status
+  changed_when: false
+
+- name: Parse HA status
+  ansible.builtin.set_fact:
+    _ha_status_doc: "{{ _ha_status.stdout | from_yaml }}"
+  run_once: true
+
+- name: Assert dqlite HA is enabled with enough voters
+  ansible.builtin.assert:
+    that:
+      - _ha_status_doc['high-availability']['enabled'] | bool
+      - >-
+        (_ha_status_doc['high-availability']['nodes'] | default([])
+         | selectattr('role', 'equalto', 'voter') | list | length) >= microk8s_ha_min_masters
+    fail_msg: "MicroK8s HA is not healthy: {{ _ha_status_doc['high-availability'] | default({}) }}"
+    success_msg: "MicroK8s HA enabled: {{ _ha_status_doc['high-availability']['nodes'] | default([]) | map(attribute='address') | list }}"
+  run_once: true
+
+- name: List node readiness
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl get nodes
+    -o 'jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  run_once: true
+  register: _ha_node_readiness
+  changed_when: false
+
+- name: Assert every inventory node is registered and Ready
+  ansible.builtin.assert:
+    that: (item | lower) ~ '=True' in _ha_node_readiness.stdout_lines
+    fail_msg: "{{ item }} is missing or NotReady"
+    quiet: true
+  loop: "{{ groups['microk8s_cluster'] }}"
+  run_once: true

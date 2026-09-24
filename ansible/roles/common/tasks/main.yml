@@ -1,0 +1,58 @@
+---
+- name: Verify supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] in ['22.04', '24.04']
+    fail_msg: >-
+      {{ inventory_hostname }} runs {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }};
+      only Ubuntu 22.04 / 24.04 LTS are supported.
+    quiet: true
+  tags: [always]
+
+- name: Hostname and /etc/hosts
+  ansible.builtin.import_tasks: hostname.yml
+  tags: [common, hostname, etc_hosts]
+
+- name: Outbound proxy
+  ansible.builtin.import_tasks: proxy.yml
+  when: common_proxy_enabled | bool
+  tags: [common, proxy]
+
+- name: Packages
+  ansible.builtin.import_tasks: packages.yml
+  tags: [common, packages]
+
+- name: Time synchronisation
+  ansible.builtin.import_tasks: time.yml
+  tags: [common, time, chrony]
+
+- name: Swap
+  ansible.builtin.import_tasks: swap.yml
+  when: common_disable_swap | bool
+  tags: [common, swap]
+
+- name: Kernel modules
+  ansible.builtin.import_tasks: modules.yml
+  tags: [common, kernel, modules]
+
+- name: Kernel parameters
+  ansible.builtin.import_tasks: sysctl.yml
+  tags: [common, kernel, sysctl]
+
+- name: Resource limits and THP
+  ansible.builtin.import_tasks: limits.yml
+  tags: [common, limits]
+
+- name: Storage prerequisites (Longhorn)
+  ansible.builtin.import_tasks: storage.yml
+  tags: [common, storage, longhorn]
+
+- name: journald
+  ansible.builtin.import_tasks: journald.yml
+  tags: [common, journald]
+
+- name: Host firewall
+  ansible.builtin.import_tasks: firewall.yml
+  when: common_firewall_enabled | bool
+  tags: [common, firewall]

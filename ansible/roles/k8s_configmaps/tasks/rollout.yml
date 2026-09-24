@@ -1,0 +1,47 @@
+---
+# Stamp the ConfigMap checksum on the pod template -> Kubernetes / Argo Rollouts roll the pods.
+# Argo CD ignores this annotation (argocd_bootstrap values: ignoreDifferences.all).
+- name: Find Deployments of the service
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ _k8s_cm_changed.metadata.namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/instance={{ _k8s_cm_changed.metadata.labels['app.kubernetes.io/instance'] }}"
+  register: _k8s_cm_deployments
+
+- name: Find Argo Rollouts of the service
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: argoproj.io/v1alpha1
+    kind: Rollout
+    namespace: "{{ _k8s_cm_changed.metadata.namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/instance={{ _k8s_cm_changed.metadata.labels['app.kubernetes.io/instance'] }}"
+  register: _k8s_cm_rollouts
+  failed_when: false          # Rollout CRD may not be installed yet
+
+- name: Patch pod template checksum annotation
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: patched
+    merge_type: merge
+    definition:
+      apiVersion: "{{ _wl.apiVersion }}"
+      kind: "{{ _wl.kind }}"
+      metadata:
+        name: "{{ _wl.metadata.name }}"
+        namespace: "{{ _wl.metadata.namespace }}"
+      spec:
+        template:
+          metadata:
+            annotations: "{{ {k8s_configmaps_checksum_annotation: _checksum} }}"
+  loop: "{{ (_k8s_cm_deployments.resources | default([])) + (_k8s_cm_rollouts.resources | default([])) }}"
+  loop_control:
+    loop_var: _wl
+    label: "{{ _wl.kind }}/{{ _wl.metadata.name }}"
+  vars:
+    _checksum: "{{ _k8s_cm_changed.metadata.annotations['platform.example.com/config-checksum'] }}"
+  when: >-
+    ((_wl.spec.template.metadata.annotations | default({})).get(k8s_configmaps_checksum_annotation)) != _checksum

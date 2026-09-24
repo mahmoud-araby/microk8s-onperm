@@ -1,0 +1,55 @@
+---
+# Addons are cluster-wide: everything runs once, on the first control-plane node.
+- name: Read addon status
+  ansible.builtin.command: "{{ microk8s_bin }} status --format yaml --wait-ready --timeout 300"
+  register: _addons_status
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  tags: [microk8s_addons, addons]
+
+- name: Index addon states
+  ansible.builtin.set_fact:
+    _addons_state: >-
+      {{ (_addons_status.stdout | from_yaml).addons | default([])
+         | items2dict(key_name='name', value_name='status') }}
+  run_once: true
+  tags: [microk8s_addons, addons]
+
+- name: Disable unwanted addons
+  ansible.builtin.command:
+    cmd: "{{ microk8s_bin }} disable {{ item }}"
+    stdin: "n\n"
+  loop: "{{ microk8s_addons_disabled }}"
+  when: _addons_state.get(item) == 'enabled'
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  tags: [microk8s_addons, addons]
+
+- name: Enable required addons
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} enable {{ item.name }}{{ (':' ~ item.args) if (item.args | default('') | length > 0) else '' }}
+  loop: "{{ microk8s_addons_enabled }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: _addons_state.get(item.name) != 'enabled'
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  tags: [microk8s_addons, addons]
+
+- name: Wait for the cluster after addon changes
+  ansible.builtin.command: "{{ microk8s_bin }} status --wait-ready --timeout 600"
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  tags: [microk8s_addons, addons]
+
+- name: CoreDNS high availability
+  ansible.builtin.import_tasks: coredns.yml
+  tags: [microk8s_addons, coredns]
+
+- name: Fetch kubeconfig to the controller
+  ansible.builtin.import_tasks: kubeconfig.yml
+  tags: [microk8s_addons, kubeconfig]

@@ -1,0 +1,24 @@
+---
+# Service catalogue defaults for "orders" (.NET) - gitops/apps/orders (language: dotnet).
+# Layer 4a of "ConfigMap Ansible".
+config:
+  database:
+    enabled: true
+    name: orders
+  redis:
+    enabled: true
+  rabbitmq:
+    enabled: true
+  kafka:
+    enabled: true
+    topics:
+      events: orders-events
+      payments: payments-events
+  http:
+    timeoutSeconds: 5
+  features:
+    partialShipments: true
+environments:
+  staging:
+    features:
+      partialShipments: true

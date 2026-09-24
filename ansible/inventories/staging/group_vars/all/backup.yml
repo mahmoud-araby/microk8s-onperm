@@ -1,0 +1,21 @@
+---
+# ---------------------------------------------------------------------------
+# dqlite / cluster-state backups - STAGING (role: backup, runs on masters)
+# ---------------------------------------------------------------------------
+backup_enabled: true
+backup_dir: /var/backups/microk8s
+backup_retention_days: 3
+backup_on_calendar: "*-*-* 01:30:00"
+backup_randomized_delay: 45m
+
+# Copy every archive off-node (rsync over SSH). The private key is vault_backup_ssh_private_key.
+backup_remote_enabled: false
+backup_remote_user: microk8s-backup
+backup_remote_host: backup01.ops.example.local
+backup_remote_path: "/srv/backups/microk8s/{{ platform_cluster_name }}"
+# `ssh-keyscan backup01.ops.example.local` output (pinned host key, no TOFU)
+backup_remote_known_hosts_line: "backup01.ops.example.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReplaceWithRealHostKeyReplaceWithRealHostKey00"
+
+# Encrypt archives with GPG before they leave the node (they contain every Secret).
+backup_gpg_recipient: ""
+backup_gpg_public_key_file: "{{ inventory_dir }}/files/platform-backup.pub.asc"

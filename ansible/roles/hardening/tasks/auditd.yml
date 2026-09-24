@@ -1,0 +1,46 @@
+---
+- name: Install auditd
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - audispd-plugins
+    state: present
+    lock_timeout: 300
+
+- name: Configure auditd log rotation
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^\s*{{ item.key }}\s*='
+    line: "{{ item.key }} = {{ item.value }}"
+  loop:
+    - {key: max_log_file, value: "{{ hardening_auditd_max_log_file }}"}
+    - {key: num_logs, value: "{{ hardening_auditd_num_logs }}"}
+    - {key: max_log_file_action, value: ROTATE}
+    - {key: space_left_action, value: "{{ hardening_auditd_space_left_action }}"}
+  loop_control:
+    label: "{{ item.key }}"
+  notify: Restart auditd
+
+- name: Check whether MicroK8s is installed (enables MicroK8s audit watches)
+  ansible.builtin.stat:
+    path: /var/snap/microk8s/current/credentials
+  register: _hardening_microk8s_dir
+
+- name: Remember MicroK8s presence for the audit rules template
+  ansible.builtin.set_fact:
+    _hardening_microk8s_present: "{{ _hardening_microk8s_dir.stat.exists }}"
+
+- name: Install audit rules
+  ansible.builtin.template:
+    src: audit.rules.j2
+    dest: /etc/audit/rules.d/90-platform.rules
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Load audit rules
+
+- name: Enable and start auditd
+  ansible.builtin.systemd_service:
+    name: auditd
+    enabled: true
+    state: started

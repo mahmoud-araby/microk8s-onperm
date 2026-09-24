@@ -1,0 +1,55 @@
+---
+# ---------------------------------------------------------------------------
+# Global platform settings - STAGING
+# Shared by several roles. Role-specific knobs live in the other files of this
+# directory (microk8s.yml, network.yml, os.yml, registry.yml, argocd.yml,
+# configmaps.yml, backup.yml). Secrets live ONLY in vault.yml (ansible-vault).
+# ---------------------------------------------------------------------------
+
+platform_environment: staging
+platform_cluster_name: stg-k8s
+
+# Public DNS zone (docs/conventions.md "External hostnames": replace example.com)
+platform_domain: staging.example.com
+# Internal zone for ops tooling behind the Istio internal gateway (*.ops.example.local)
+platform_internal_domain: staging.example.local   # ops tooling: *.ops.staging.example.local
+platform_ops_domain: "ops.{{ platform_internal_domain }}"
+
+# GitOps source of truth (docs/conventions.md)
+platform_git_repo_url: https://github.com/mahmoud-araby/microk8s-onperm.git
+platform_git_revision: main
+
+# Networks allowed to SSH to nodes and reach the Kubernetes API (16443).
+platform_admin_cidrs:
+  - 10.20.0.0/24      # bastion / jump hosts
+  - 10.20.250.0/24    # CI runners / Ansible controllers
+
+# Node networks (all cluster-internal ports are opened between these).
+platform_node_cidrs:
+  - 10.20.10.0/24     # masters
+  - 10.20.11.0/24     # edge
+  - 10.20.12.0/24     # platform
+  - 10.20.13.0/24     # data
+  - 10.20.14.0/24     # apps
+  - 10.20.15.0/24     # observability
+
+# Controller-side path of the admin kubeconfig fetched by the microk8s_addons role
+# and consumed by argocd_bootstrap / k8s_configmaps / vault_init (git-ignored).
+kubeconfig_path: "{{ inventory_dir }}/.kubeconfig"
+
+# Tenants known to this environment (gitops/tenants/<name>); used by vault_init for the
+# per-tenant Vault roles/policies. "shared" is the pool (namespace shared-services).
+platform_tenants:
+  - acme
+  - globex
+  - initech
+  - shared
+# Shared-tier tenants served by the pool (objects prefixed tenant-<name>- in shared-services)
+platform_pooled_tenants:
+  - initech
+
+# Minimum node sizing enforced by playbooks/preflight.yml (overridden per pool).
+preflight_min_vcpus: 4
+preflight_min_memory_gb: 16
+preflight_min_root_disk_gb: 80
+preflight_strict: false

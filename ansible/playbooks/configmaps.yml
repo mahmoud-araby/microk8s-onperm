@@ -1,0 +1,16 @@
+---
+# "ConfigMap Ansible": render layered application configuration into ConfigMaps.
+#   gitops (default in production): writes gitops/tenants/<tenant>/configmaps/generated-*.yaml
+#   apply  (default in staging):     applies to the cluster and rolls changed workloads
+#
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/configmaps.yml
+#   ansible-playbook -i inventories/staging/hosts.yml playbooks/configmaps.yml -e k8s_configmaps_only_tenants='["acme"]'
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/configmaps.yml -e k8s_configmaps_mode=apply
+- name: Render tenant ConfigMaps
+  hosts: controller
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - role: k8s_configmaps
+      tags: [configmaps]

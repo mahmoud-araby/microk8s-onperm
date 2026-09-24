@@ -1,0 +1,23 @@
+---
+# {{ ansible_managed }}
+# MicroK8s launch configuration - only read on the first `snap install`.
+version: 0.1.0
+extraCNIEnv:
+  IPv4_SUPPORT: true
+  IPv4_CLUSTER_CIDR: {{ microk8s_pod_cidr }}
+  IPv4_SERVICE_CIDR: {{ microk8s_service_cidr }}
+extraKubeAPIServerArgs:
+  --service-cluster-ip-range: {{ microk8s_service_cidr }}
+extraKubeProxyArgs:
+  --cluster-cidr: {{ microk8s_pod_cidr }}
+extraSANs:
+  - {{ microk8s_service_cidr | ip_nth_in_cidr(1) }}
+{% if microk8s_api_vip_enabled | bool and microk8s_api_vip | length > 0 %}
+  - {{ microk8s_api_vip }}
+{% endif %}
+{% if microk8s_api_dns_name | length > 0 %}
+  - {{ microk8s_api_dns_name }}
+{% endif %}
+{% for san in microk8s_extra_sans %}
+  - {{ san }}
+{% endfor %}

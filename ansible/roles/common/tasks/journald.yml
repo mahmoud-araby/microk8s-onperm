@@ -1,0 +1,26 @@
+---
+- name: Create journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Limit journald disk usage and rate
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/90-platform.conf
+    content: |
+      # Managed by Ansible (role: common)
+      [Journal]
+      Storage=persistent
+      Compress=yes
+      SystemMaxUse={{ common_journald_system_max_use }}
+      SystemMaxFileSize={{ common_journald_system_max_file_size }}
+      MaxRetentionSec={{ common_journald_max_retention }}
+      RateLimitIntervalSec={{ common_journald_rate_limit_interval }}
+      RateLimitBurst={{ common_journald_rate_limit_burst }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald

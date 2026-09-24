@@ -1,0 +1,3 @@
+---
+# Restarts triggered by re-applied configuration are handled by the microk8s role handlers.
+[]

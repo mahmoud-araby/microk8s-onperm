@@ -1,0 +1,131 @@
+---
+# ---------------------------------------------------------------------------
+# kubelet arguments  (/var/snap/microk8s/current/args/kubelet)
+# ---------------------------------------------------------------------------
+- name: Compute effective kubelet arguments
+  ansible.builtin.set_fact:
+    _mk8s_kubelet_args: "{{ microk8s_kubelet_args_default | combine(microk8s_kubelet_args, microk8s_kubelet_args_pool) }}"
+
+- name: Set kubelet arguments
+  ansible.builtin.lineinfile:
+    path: "{{ microk8s_snap_data }}/args/kubelet"
+    regexp: '^{{ item.key | regex_escape }}(=|\s|$)'
+    line: "{{ item.key }}={{ item.value }}"
+  loop: "{{ _mk8s_kubelet_args | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  notify: Restart kubelite
+
+- name: Remove unwanted kubelet arguments
+  ansible.builtin.lineinfile:
+    path: "{{ microk8s_snap_data }}/args/kubelet"
+    regexp: '^{{ item | regex_escape }}(=|\s|$)'
+    state: absent
+  loop: "{{ microk8s_kubelet_args_absent }}"
+  notify: Restart kubelite
+
+# ---------------------------------------------------------------------------
+# containerd environment (ulimits inherited by containers, proxy)
+# ---------------------------------------------------------------------------
+- name: Configure containerd environment
+  ansible.builtin.blockinfile:
+    path: "{{ microk8s_snap_data }}/args/containerd-env"
+    marker: "# {mark} ANSIBLE MANAGED - platform"
+    block: |
+      {% for line in microk8s_containerd_ulimits %}
+      {{ line }}
+      {% endfor %}
+      {% if microk8s_containerd_proxy_enabled | bool %}
+      HTTP_PROXY={{ proxy_http }}
+      HTTPS_PROXY={{ proxy_https }}
+      NO_PROXY={{ common_proxy_no_proxy | default([microk8s_pod_cidr, microk8s_service_cidr]) | join(',') }}
+      {% endif %}
+  notify: Restart containerd
+
+# ---------------------------------------------------------------------------
+# Registry mirrors: Harbor + pull-through proxy-cache projects
+# containerd reads certs.d/<registry>/hosts.toml on every pull - no restart needed.
+# ---------------------------------------------------------------------------
+- name: Check for the registry CA certificate on the controller
+  ansible.builtin.stat:
+    path: "{{ microk8s_registry_ca_cert_file }}"
+  delegate_to: localhost
+  become: false
+  register: _mk8s_registry_ca
+  when: microk8s_registry_ca_cert_file | length > 0
+
+- name: Require the registry CA certificate when configured as mandatory
+  ansible.builtin.assert:
+    that: _mk8s_registry_ca.stat.exists | default(false)
+    fail_msg: "registry_ca_cert_file {{ microk8s_registry_ca_cert_file }} not found on the controller"
+    quiet: true
+  when: microk8s_registry_ca_cert_required | bool
+
+- name: Record whether a registry CA is deployed
+  ansible.builtin.set_fact:
+    _mk8s_registry_ca_present: "{{ _mk8s_registry_ca.stat.exists | default(false) }}"
+    _mk8s_certs_d: "{{ microk8s_snap_data }}/args/certs.d"
+
+- name: Create certs.d directories
+  ansible.builtin.file:
+    path: "{{ _mk8s_certs_d }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ [microk8s_registry_harbor_host] + (microk8s_registry_mirrors | map(attribute='upstream') | list) }}"
+
+- name: Install the registry CA certificate
+  ansible.builtin.copy:
+    src: "{{ microk8s_registry_ca_cert_file }}"
+    dest: "{{ _mk8s_certs_d }}/{{ microk8s_registry_harbor_host }}/ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  when: _mk8s_registry_ca_present | bool
+
+- name: Configure Harbor registry host
+  ansible.builtin.template:
+    src: hosts-harbor.toml.j2
+    dest: "{{ _mk8s_certs_d }}/{{ microk8s_registry_harbor_host }}/hosts.toml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure pull-through mirrors via Harbor proxy-cache projects
+  ansible.builtin.template:
+    src: hosts-mirror.toml.j2
+    dest: "{{ _mk8s_certs_d }}/{{ mirror.upstream }}/hosts.toml"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ microk8s_registry_mirrors }}"
+  loop_control:
+    loop_var: mirror
+    label: "{{ mirror.upstream }} -> {{ microk8s_registry_harbor_host }}/{{ mirror.project }}"
+
+# ---------------------------------------------------------------------------
+# API server certificate SANs (VIP / DNS name) - control plane only
+# ---------------------------------------------------------------------------
+- name: Compute API server SANs
+  ansible.builtin.set_fact:
+    _mk8s_api_sans: >-
+      {{ ((microk8s_api_vip_enabled | bool and microk8s_api_vip | length > 0) | ternary([microk8s_api_vip], []))
+         + ((microk8s_api_dns_name | length > 0) | ternary([microk8s_api_dns_name], []))
+         + microk8s_extra_sans }}
+  when: microk8s_role == 'master'
+
+- name: Add SANs to the API server certificate template
+  ansible.builtin.lineinfile:
+    path: "{{ microk8s_snap_data }}/certs/csr.conf.template"
+    regexp: '^(DNS|IP)\.{{ 100 + idx }}\s*='
+    line: "{{ (san is match('^[0-9.]+$')) | ternary('IP', 'DNS') }}.{{ 100 + idx }} = {{ san }}"
+    insertafter: '^#MOREIPS'
+  loop: "{{ _mk8s_api_sans }}"
+  loop_control:
+    loop_var: san
+    index_var: idx
+  when:
+    - microk8s_role == 'master'
+    - _mk8s_api_sans | length > 0
+  notify: Refresh API server certificate

@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# {{ mirror.upstream }} is pulled through the Harbor proxy-cache project "{{ mirror.project }}".
+{% if microk8s_registry_fallback_to_upstream | bool %}
+# Falls back to the upstream registry when Harbor is unreachable (e.g. during bootstrap).
+server = "{{ mirror.server }}"
+{% else %}
+# Air-gapped: no fallback to the upstream registry.
+server = "https://{{ microk8s_registry_harbor_host }}/v2/{{ mirror.project }}"
+{% endif %}
+
+[host."https://{{ microk8s_registry_harbor_host }}/v2/{{ mirror.project }}"]
+  capabilities = ["pull", "resolve"]
+  override_path = true
+{% if _mk8s_registry_ca_present | bool %}
+  ca = "{{ _mk8s_certs_d }}/{{ microk8s_registry_harbor_host }}/ca.crt"
+{% endif %}

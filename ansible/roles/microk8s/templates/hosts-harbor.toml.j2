@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# containerd registry host config for the platform Harbor ({{ microk8s_registry_harbor_host }})
+server = "https://{{ microk8s_registry_harbor_host }}"
+
+[host."https://{{ microk8s_registry_harbor_host }}"]
+  capabilities = ["pull", "resolve"]
+{% if _mk8s_registry_ca_present | bool %}
+  ca = "{{ _mk8s_certs_d }}/{{ microk8s_registry_harbor_host }}/ca.crt"
+{% endif %}

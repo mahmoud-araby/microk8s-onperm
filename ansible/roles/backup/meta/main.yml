@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: backup
+  namespace: platform
+  author: Platform Engineering
+  description: Scheduled MicroK8s dqlite + PKI backups (systemd timer), GPG encryption, off-node rsync, Prometheus textfile metrics
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [backup, microk8s, dqlite, disasterrecovery]
+dependencies: []

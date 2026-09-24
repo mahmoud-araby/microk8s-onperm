@@ -1,0 +1,62 @@
+---
+# Idempotent: a node that is already part of the cluster (per the first master) is skipped.
+- name: List nodes known to the cluster
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl get nodes -o 'jsonpath={.items[*].metadata.name}'
+  delegate_to: "{{ microk8s_ha_first_master }}"
+  register: _ha_nodes
+  changed_when: false
+  retries: 5
+  delay: 10
+  until: _ha_nodes.rc == 0
+
+- name: Join when the node is not yet a cluster member
+  when: microk8s_node_name not in _ha_nodes.stdout.split()
+  block:
+    - name: Mint a single-use join token for this node
+      ansible.builtin.set_fact:
+        _ha_join_token: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_lowercase', 'digits'], length=32) }}"
+      no_log: true
+
+    - name: Register the join token on the first master
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} add-node --token {{ _ha_join_token }} --token-ttl {{ microk8s_ha_join_token_ttl }} --format short
+      delegate_to: "{{ microk8s_ha_first_master }}"
+      register: _ha_add_node
+      changed_when: true
+      no_log: true
+
+    - name: Select the join URL (with CA fingerprint) for the first master's address
+      ansible.builtin.set_fact:
+        _ha_join_url: >-
+          {{ (_ha_add_node.stdout | regex_findall('microk8s join ([^ \n]+)')
+              | select('match', '^' ~ (microk8s_ha_first_master_address | regex_escape) ~ ':')
+              | list
+              + [microk8s_ha_first_master_address ~ ':25000/' ~ _ha_join_token]) | first }}
+      no_log: true
+
+    - name: Join the cluster ({{ microk8s_role }})
+      ansible.builtin.command: >-
+        timeout {{ microk8s_ha_join_timeout }}
+        {{ microk8s_bin }} join {{ _ha_join_url }}{{ ' --worker' if microk8s_role == 'worker' else '' }}
+      register: _ha_join
+      changed_when: true
+      no_log: true
+
+    - name: Wait until the node is Ready
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl get node {{ microk8s_node_name }}
+        -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}'
+      delegate_to: "{{ microk8s_ha_first_master }}"
+      register: _ha_ready
+      changed_when: false
+      failed_when: false
+      retries: "{{ microk8s_ha_node_ready_retries }}"
+      delay: 10
+      until: _ha_ready.stdout == 'True'
+
+    - name: Fail when the node never became Ready
+      ansible.builtin.assert:
+        that: _ha_ready.stdout == 'True'
+        fail_msg: "{{ microk8s_node_name }} joined but is not Ready: {{ _ha_ready.stderr | default('') }}"
+        quiet: true

@@ -1,0 +1,15 @@
+---
+# STAGING: same labels/taints as production (docs/conventions.md), reduced sizing.
+# Application pool: tenant + shared .NET / Java / Python microservices and frontends.
+workload_tier: apps
+microk8s_node_labels:
+  workload-tier: apps
+  node-role.kubernetes.io/apps: ""
+microk8s_node_taints: []
+microk8s_kubelet_args_pool:
+  --max-pods: "250"
+common_sysctl_pool: {}
+
+preflight_min_vcpus: 4
+preflight_min_memory_gb: 16
+preflight_min_root_disk_gb: 80

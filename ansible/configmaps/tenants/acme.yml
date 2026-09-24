@@ -1,0 +1,60 @@
+---
+# Tenant "acme" - dedicated tier (namespace tenant-acme, acme.api.example.com, realm acme).
+# Layer 3 (tenant) + layer 4b (service overrides) of "ConfigMap Ansible".
+# Keep in sync with gitops/tenants/acme/tenant.yaml and gitops/tenants/acme/services/*.yaml.
+tenant:
+  name: acme
+  tier: dedicated            # dedicated | shared
+  # namespace: tenant-acme   (default: tenant-<name>; shared tier: shared-services)
+  # realm: acme              (Keycloak realm, default <name>)
+
+# Tenant-wide configuration applied to every service of the tenant.
+# Derived automatically (same rules as charts/tenant + the services ApplicationSet), override only
+# if needed: database "<tenant>_<db>", Redis key prefix "<tenant>:<service>:", RabbitMQ vhost
+# "<tenant>", Kafka topic prefix "<tenant>.", Keycloak issuer .../realms/<realm>, API host.
+config:
+  redis:
+    db: 1
+  http:
+    corsAllowedOrigins:
+      - https://acme.app.example.com
+  features:
+    newCheckout: false
+    loyaltyProgram: true
+
+# Per-environment tenant overrides
+environments:
+  staging:
+    logging:
+      level: debug
+    http:
+      corsAllowedOrigins:
+        - https://acme.app.staging.example.com
+
+# Deployed service versions (mirror of gitops/tenants/acme/services/*.yaml)
+services:
+  - name: orders
+    version: v1
+    language: dotnet
+    config:
+      database:
+        poolMax: 60
+  - name: orders
+    version: v2
+    language: dotnet
+    config:
+      features:
+        asyncInvoicing: true
+  - name: payments
+    version: v1
+    language: java
+  - name: catalog
+    version: v1
+    language: python
+  - name: web
+    version: v1
+    language: static
+    config:
+      custom:
+        theme: acme
+        apiVersions: {orders: v2, payments: v1, catalog: v1}

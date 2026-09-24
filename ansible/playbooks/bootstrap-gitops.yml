@@ -1,0 +1,11 @@
+---
+# Install Argo CD (HA, pinned chart) and apply gitops/bootstrap/root-app.yaml.
+# Runs on the controller against the fetched kubeconfig (needs helm + python kubernetes).
+- name: Bootstrap GitOps
+  hosts: controller
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - role: argocd_bootstrap
+      tags: [argocd]

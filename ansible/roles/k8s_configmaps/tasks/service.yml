@@ -1,0 +1,123 @@
+---
+- name: Validate service entry
+  ansible.builtin.assert:
+    that:
+      - _k8s_cm_service.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - _k8s_cm_service.language | default('') in (k8s_configmaps_language_templates.keys() | list)
+      - (_k8s_cm_service.version | default('')) is match('^v[0-9]+$')
+    fail_msg: >-
+      {{ _k8s_cm_tenant_file | basename }}: service {{ _k8s_cm_service.name }} needs a language
+      ({{ k8s_configmaps_language_templates.keys() | list | join('|') }}) and a version (vN).
+    quiet: true
+
+- name: Look for service catalogue defaults
+  ansible.builtin.stat:
+    path: "{{ k8s_configmaps_services_dir }}/{{ _k8s_cm_service.name }}.yml"
+  register: _k8s_cm_catalog_stat
+
+- name: Load service catalogue defaults
+  ansible.builtin.include_vars:
+    file: "{{ _k8s_cm_catalog_stat.stat.path }}"
+    name: _k8s_cm_catalog_doc
+  when: _k8s_cm_catalog_stat.stat.exists
+
+- name: Merge configuration layers (global -> environment -> tenant -> service)
+  ansible.builtin.set_fact:
+    _k8s_cm_cfg: >-
+      {{ k8s_configmaps_global
+         | combine(k8s_configmaps_environment | default({}), recursive=True)
+         | combine(_k8s_cm_tenant_implicit, recursive=True)
+         | combine(_k8s_cm_tenant_layer, recursive=True)
+         | combine(_catalog.config | default({}), recursive=True)
+         | combine((_catalog.environments | default({})).get(k8s_configmaps_environment_name, {}), recursive=True)
+         | combine(_k8s_cm_service.config | default({}), recursive=True)
+         | combine((_k8s_cm_service.environments | default({})).get(k8s_configmaps_environment_name, {}), recursive=True) }}
+    _k8s_cm_svc:
+      name: "{{ _k8s_cm_service.name }}"
+      version: "{{ _k8s_cm_service.version | default('') }}"
+      language: "{{ _k8s_cm_service.language }}"
+      fullname: "{{ _fullname }}"
+      configMapName: >-
+        {{ _k8s_cm_service.configMapName
+           | default(_k8s_cm_tenant.objectPrefix ~ _fullname ~ '-'
+                     ~ (k8s_configmaps_frontend_suffix if _k8s_cm_service.language == 'static' else k8s_configmaps_service_suffix)) }}
+    _k8s_cm_data: {}
+  vars:
+    _catalog: "{{ _k8s_cm_catalog_doc if _k8s_cm_catalog_stat.stat.exists else {} }}"
+    # charts/microservice: <service>-<version>; charts/frontend: <name> or <name>-<tenant>
+    _fullname: >-
+      {{ (_k8s_cm_service.name ~ (('-' ~ _k8s_cm_tenant.name) if _k8s_cm_tenant.tier == 'dedicated' else ''))
+         if _k8s_cm_service.language == 'static'
+         else (_k8s_cm_service.name ~ '-' ~ _k8s_cm_service.version) }}
+
+- name: Refuse literal secrets in ConfigMaps
+  ansible.builtin.assert:
+    that: _k8s_cm_secret_keys | length == 0
+    fail_msg: >-
+      {{ _k8s_cm_svc.fullname }} ({{ _k8s_cm_tenant.name }}): secret-looking keys with literal values
+      {{ _k8s_cm_secret_keys }}. Store them in Vault (secret/tenants/{{ _k8s_cm_tenant.name }}/{{ _k8s_cm_svc.name }})
+      and reference them as "${ENV_VAR}" placeholders.
+    quiet: true
+  vars:
+    _k8s_cm_secret_keys: "{{ _k8s_cm_cfg | find_secret_keys(k8s_configmaps_secret_key_patterns) }}"
+  when: k8s_configmaps_fail_on_secrets | bool
+
+- name: Render configuration files
+  ansible.builtin.set_fact:
+    _k8s_cm_data: >-
+      {{ _k8s_cm_data | combine({_tpl.key: lookup('ansible.builtin.template', _tpl_path,
+           template_vars={'cfg': _k8s_cm_cfg, 'service': _k8s_cm_svc, 'tenant': _k8s_cm_tenant,
+                          'endpoints': k8s_configmaps_endpoints})}) }}
+  loop: "{{ _k8s_cm_service.templates | default(k8s_configmaps_language_templates[_k8s_cm_service.language]) }}"
+  loop_control:
+    loop_var: _tpl
+    label: "{{ _k8s_cm_svc.configMapName }}/{{ _tpl.key }}"
+  vars:
+    # custom templates may live in ansible/configmaps/templates/ or be absolute paths
+    _custom_tpl: "{{ k8s_configmaps_root }}/templates/{{ _tpl.template }}"
+    _tpl_path: "{{ _tpl.template if (_tpl.template is abs) else (_custom_tpl if (_custom_tpl is file) else _tpl.template) }}"
+
+- name: Validate rendered JSON documents
+  ansible.builtin.assert:
+    that: (_doc.value | from_json) is mapping
+    fail_msg: "{{ _k8s_cm_svc.configMapName }}/{{ _doc.key }} is not valid JSON"
+    quiet: true
+  loop: "{{ _k8s_cm_data | dict2items | selectattr('key', 'search', '\\.json$') | list }}"
+  loop_control:
+    loop_var: _doc
+    label: "{{ _doc.key }}"
+
+- name: Validate rendered YAML documents
+  ansible.builtin.assert:
+    that: (_doc.value | from_yaml) is mapping
+    fail_msg: "{{ _k8s_cm_svc.configMapName }}/{{ _doc.key }} is not valid YAML"
+    quiet: true
+  loop: "{{ _k8s_cm_data | dict2items | selectattr('key', 'search', '\\.ya?ml$') | list }}"
+  loop_control:
+    loop_var: _doc
+    label: "{{ _doc.key }}"
+
+- name: Build the ConfigMap object
+  ansible.builtin.set_fact:
+    _k8s_cm_objects: "{{ _k8s_cm_objects + [_obj] }}"
+  vars:
+    _obj:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ _k8s_cm_svc.configMapName }}"
+        namespace: "{{ _k8s_cm_tenant.namespace }}"
+        labels: >-
+          {{ k8s_configmaps_labels_common | combine({
+               'app.kubernetes.io/name': _k8s_cm_svc.name,
+               'app.kubernetes.io/instance': _k8s_cm_svc.fullname,
+               'app.kubernetes.io/part-of': _k8s_cm_tenant.name,
+               'version': _k8s_cm_svc.version,
+               'platform.example.com/tenant': _k8s_cm_tenant.name,
+               'platform.example.com/language': _k8s_cm_svc.language}) }}
+        annotations:
+          platform.example.com/config-checksum: "{{ _k8s_cm_data | config_checksum }}"
+          platform.example.com/config-layers: global,environment,tenant,service
+          platform.example.com/environment: "{{ k8s_configmaps_environment_name }}"
+          argocd.argoproj.io/sync-wave: "{{ k8s_configmaps_sync_wave }}"
+      data: "{{ _k8s_cm_data }}"

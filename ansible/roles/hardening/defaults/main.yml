@@ -1,0 +1,114 @@
+---
+# ===========================================================================
+# role: hardening - CIS-inspired, Kubernetes-safe OS hardening (Ubuntu 22.04/24.04)
+# Every control can be switched off individually. Nothing here touches settings that
+# MicroK8s / Calico / Longhorn / Istio depend on (ip_forward, rp_filter, squashfs...).
+# ===========================================================================
+
+# --- SSH ----------------------------------------------------------------------
+hardening_ssh_enabled: true
+hardening_ssh_port: 22
+hardening_ssh_permit_root_login: "no"          # "no" | "prohibit-password"
+hardening_ssh_password_authentication: false
+hardening_ssh_max_auth_tries: 3
+hardening_ssh_max_sessions: 10
+hardening_ssh_login_grace_time: 30
+hardening_ssh_client_alive_interval: 300
+hardening_ssh_client_alive_count_max: 2
+hardening_ssh_allow_tcp_forwarding: "no"
+hardening_ssh_allow_agent_forwarding: "no"
+hardening_ssh_x11_forwarding: "no"
+hardening_ssh_allow_groups: []                 # empty = no AllowGroups directive
+hardening_ssh_ciphers:
+  - chacha20-poly1305@openssh.com
+  - aes256-gcm@openssh.com
+  - aes128-gcm@openssh.com
+  - aes256-ctr
+  - aes192-ctr
+  - aes128-ctr
+hardening_ssh_macs:
+  - hmac-sha2-512-etm@openssh.com
+  - hmac-sha2-256-etm@openssh.com
+  - umac-128-etm@openssh.com
+hardening_ssh_kex:
+  - sntrup761x25519-sha512@openssh.com
+  - curve25519-sha256
+  - curve25519-sha256@libssh.org
+  - diffie-hellman-group16-sha512
+  - diffie-hellman-group18-sha512
+# Safety net: refuse to disable password auth if the connecting user has no authorized_keys
+hardening_ssh_require_authorized_keys: true
+
+# --- Login banner -------------------------------------------------------------
+hardening_login_banner: |
+  Authorized access only. All activity on this system is logged and monitored.
+
+# --- auditd -------------------------------------------------------------------
+hardening_auditd_enabled: true
+hardening_auditd_max_log_file: 100         # MB
+hardening_auditd_num_logs: 10
+hardening_auditd_space_left_action: syslog
+hardening_auditd_extra_rules: []
+
+# --- Automatic security updates ----------------------------------------------
+hardening_unattended_upgrades_enabled: true
+# Never reboot automatically: node reboots must be drained (use kured or playbooks/upgrade.yml)
+hardening_unattended_upgrades_reboot: false
+hardening_unattended_upgrades_reboot_time: "03:30"
+# Packages never upgraded unattended (container runtime comes from the snap anyway)
+hardening_unattended_upgrades_blacklist:
+  - linux-image-*
+  - linux-headers-*
+  - linux-modules-*
+
+# --- Kernel -------------------------------------------------------------------
+hardening_sysctl:
+  kernel.randomize_va_space: 2
+  kernel.kptr_restrict: 1
+  kernel.dmesg_restrict: 1
+  kernel.yama.ptrace_scope: 1
+  kernel.sysrq: 0
+  fs.suid_dumpable: 0
+  fs.protected_hardlinks: 1
+  fs.protected_symlinks: 1
+  fs.protected_fifos: 1
+  fs.protected_regular: 2
+  net.ipv4.conf.all.accept_redirects: 0
+  net.ipv4.conf.default.accept_redirects: 0
+  net.ipv4.conf.all.secure_redirects: 0
+  net.ipv4.conf.default.secure_redirects: 0
+  net.ipv6.conf.all.accept_redirects: 0
+  net.ipv6.conf.default.accept_redirects: 0
+  net.ipv4.conf.all.accept_source_route: 0
+  net.ipv4.conf.default.accept_source_route: 0
+  net.ipv4.icmp_echo_ignore_broadcasts: 1
+  net.ipv4.icmp_ignore_bogus_error_responses: 1
+  net.ipv4.tcp_syncookies: 1
+  # NOTE: send_redirects stays default - Calico/Istio routing may rely on it on some setups.
+
+# Unused filesystems (squashfs is REQUIRED by snapd/MicroK8s and must never be listed)
+hardening_disabled_filesystems:
+  - cramfs
+  - freevxfs
+  - jffs2
+  - hfs
+  - hfsplus
+  - udf
+# Unused/risky network protocols
+hardening_disabled_net_protocols:
+  - dccp
+  - sctp        # remove from this list if a workload needs SCTP
+  - rds
+  - tipc
+
+# --- Misc -----------------------------------------------------------------------
+hardening_packages_absent:
+  - telnet
+  - rsh-client
+  - talk
+  - nis
+hardening_disable_ctrl_alt_del: true
+hardening_disable_core_dumps: true
+hardening_cron_restrict: true
+hardening_fail2ban_enabled: true
+hardening_fail2ban_ignore_ip: "{{ ['127.0.0.1/8'] + (platform_admin_cidrs | default([])) }}"

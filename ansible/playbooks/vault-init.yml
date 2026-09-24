@@ -1,0 +1,14 @@
+---
+# OPTIONAL, one-time: initialise + unseal Vault, enable KV v2 "secret", Kubernetes auth and the
+# External Secrets / per-tenant policies. Guarded by vault_init_enabled:
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/vault-init.yml \
+#     -e vault_init_enabled=true --vault-id production@prompt
+# Re-running is safe (idempotent); after a pod restart it only unseals.
+- name: Initialise and configure Vault
+  hosts: controller
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - role: vault_init
+      tags: [vault_init]

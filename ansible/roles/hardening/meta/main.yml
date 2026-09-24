@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: hardening
+  namespace: platform
+  author: Platform Engineering
+  description: CIS-inspired, Kubernetes-safe hardening (SSH, auditd, unattended security updates, kernel, fail2ban)
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [security, hardening, cis, ssh, auditd]
+dependencies: []

@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# role: hardening - loaded early (10-) so these values win (sshd uses the first value seen)
+Port {{ hardening_ssh_port }}
+PermitRootLogin {{ hardening_ssh_permit_root_login }}
+PasswordAuthentication {{ 'yes' if hardening_ssh_password_authentication | bool else 'no' }}
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+HostbasedAuthentication no
+IgnoreRhosts yes
+MaxAuthTries {{ hardening_ssh_max_auth_tries }}
+MaxSessions {{ hardening_ssh_max_sessions }}
+LoginGraceTime {{ hardening_ssh_login_grace_time }}
+ClientAliveInterval {{ hardening_ssh_client_alive_interval }}
+ClientAliveCountMax {{ hardening_ssh_client_alive_count_max }}
+AllowTcpForwarding {{ hardening_ssh_allow_tcp_forwarding }}
+AllowAgentForwarding {{ hardening_ssh_allow_agent_forwarding }}
+X11Forwarding {{ hardening_ssh_x11_forwarding }}
+PermitUserEnvironment no
+UseDNS no
+LogLevel VERBOSE
+Banner /etc/issue.net
+Ciphers {{ hardening_ssh_ciphers | join(',') }}
+MACs {{ hardening_ssh_macs | join(',') }}
+KexAlgorithms {{ hardening_ssh_kex | join(',') }}
+{% if hardening_ssh_allow_groups | length > 0 %}
+AllowGroups {{ hardening_ssh_allow_groups | join(' ') }}
+{% endif %}

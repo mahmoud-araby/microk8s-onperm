@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Tenant "{{ tenant }}" - namespaced SecretStore "vault-tenant" (charts/tenant)
+path "{{ vault_init_kv_path }}/data/tenants/{{ tenant }}/*" {
+  capabilities = ["read"]
+}
+path "{{ vault_init_kv_path }}/metadata/tenants/{{ tenant }}/*" {
+  capabilities = ["read", "list"]
+}

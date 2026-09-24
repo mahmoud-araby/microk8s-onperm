@@ -1,0 +1,81 @@
+---
+- name: Validate the service CIDR keeps the MicroK8s CoreDNS ClusterIP
+  ansible.builtin.assert:
+    that:
+      - "'10.152.183.10' | ip_in_range(microk8s_service_cidr)"
+      - "'10.152.183.1' | ip_in_range(microk8s_service_cidr) or microk8s_launch_config_enabled | bool"
+    fail_msg: >-
+      microk8s_service_cidr={{ microk8s_service_cidr }} must contain 10.152.183.10 (CoreDNS ClusterIP
+      assigned by the MicroK8s dns addon). Use e.g. 10.152.0.0/16.
+    quiet: true
+
+- name: Query installed MicroK8s snap
+  ansible.builtin.command: snap list microk8s
+  register: _mk8s_snap_list
+  changed_when: false
+  failed_when: _mk8s_snap_list.rc not in [0, 1]
+
+- name: Read the channel MicroK8s is tracking
+  ansible.builtin.command: snap info microk8s
+  register: _mk8s_snap_info
+  changed_when: false
+  when: _mk8s_snap_list.rc == 0
+
+- name: Record MicroK8s installation state
+  ansible.builtin.set_fact:
+    microk8s_installed: "{{ _mk8s_snap_list.rc == 0 }}"
+    microk8s_tracking_channel: >-
+      {{ (_mk8s_snap_info.stdout | default('') | regex_findall('(?m)^tracking:[ \t]*([^ \t\r\n]+)') + ['']) | first }}
+
+- name: Refuse to change the MicroK8s channel outside of the upgrade playbook
+  ansible.builtin.assert:
+    that: >-
+      (not microk8s_installed | bool)
+      or microk8s_tracking_channel == microk8s_channel
+      or microk8s_allow_channel_change | bool
+    fail_msg: >-
+      {{ inventory_hostname }} tracks {{ microk8s_tracking_channel }} but microk8s_channel is {{ microk8s_channel }}.
+      Run playbooks/upgrade.yml to perform a drained, rolling channel change.
+    quiet: true
+
+- name: Write MicroK8s launch configuration (first install only)
+  when:
+    - not (microk8s_installed | bool)
+    - microk8s_launch_config_enabled | bool
+  block:
+    - name: Create MicroK8s common directory
+      ansible.builtin.file:
+        path: "{{ microk8s_snap_common }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render launch configuration
+      ansible.builtin.template:
+        src: launch-config.yaml.j2
+        dest: "{{ microk8s_snap_common }}/.microk8s.yaml"
+        owner: root
+        group: root
+        mode: "0600"
+
+- name: Install MicroK8s
+  community.general.snap:
+    name: microk8s
+    classic: true
+    channel: "{{ microk8s_channel }}"
+    state: present
+  when: not (microk8s_installed | bool)
+
+- name: Check whether MicroK8s auto-refresh is held
+  ansible.builtin.command: snap list microk8s
+  register: _mk8s_snap_notes
+  changed_when: false
+  when: microk8s_hold_refresh | bool
+
+- name: Hold MicroK8s auto-refresh (upgrades are done with playbooks/upgrade.yml)
+  ansible.builtin.command: snap refresh --hold microk8s
+  when:
+    - microk8s_hold_refresh | bool
+    - "'held' not in _mk8s_snap_notes.stdout"
+  changed_when: true

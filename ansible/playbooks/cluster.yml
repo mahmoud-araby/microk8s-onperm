@@ -1,0 +1,43 @@
+---
+# Install MicroK8s everywhere (in parallel), then form the HA cluster:
+#   1. control plane joins ONE AT A TIME (dqlite membership changes must be serial)
+#   2. workers join in small batches with --worker
+#   3. verify dqlite HA + every node Ready
+- name: Install and configure MicroK8s
+  hosts: microk8s_cluster
+  become: true
+  gather_facts: true
+  roles:
+    - role: microk8s
+      tags: [microk8s]
+
+- name: Form the control plane (dqlite voters)
+  hosts: microk8s_masters
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - role: microk8s_ha
+      tags: [microk8s_ha]
+
+- name: Join the worker pools
+  hosts: microk8s_workers
+  become: true
+  gather_facts: false
+  serial: "{{ microk8s_worker_join_batch | default(3) }}"
+  max_fail_percentage: 0
+  roles:
+    - role: microk8s_ha
+      tags: [microk8s_ha]
+
+- name: Verify cluster health
+  hosts: microk8s_masters[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Verify HA and node readiness
+      ansible.builtin.include_role:
+        name: microk8s_ha
+        tasks_from: verify.yml
+      tags: [microk8s_ha, verify]

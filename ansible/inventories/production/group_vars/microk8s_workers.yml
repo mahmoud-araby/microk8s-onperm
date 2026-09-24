@@ -1,0 +1,3 @@
+---
+# All worker pools join with `microk8s join ... --worker` (no control-plane services).
+microk8s_role: worker

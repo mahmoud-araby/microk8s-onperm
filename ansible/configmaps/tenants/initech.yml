@@ -1,0 +1,16 @@
+---
+# Tenant "initech" - POOLED (tier shared): no namespace and no releases of its own. It is served by
+# the pool in shared-services; only per-tenant settings are rendered there, prefixed "tenant-initech-"
+# (ConfigMap "tenant-initech-tenant-settings") so they never collide with the pool's own objects.
+tenant:
+  name: initech
+  tier: shared
+  namespace: shared-services
+  realm: initech
+
+config:
+  features:
+    newCheckout: false
+
+# Pooled tenants must not declare services (see gitops/tenants/README.md).
+services: []

@@ -1,0 +1,14 @@
+---
+# Platform pool: Argo CD, Vault, Keycloak, Harbor, cert-manager, External Secrets, Kyverno,
+# operators, Argo Rollouts, KEDA, istiod. 6 nodes, 16 vCPU / 64 GiB.
+workload_tier: platform
+microk8s_node_labels:
+  workload-tier: platform
+  node-role.kubernetes.io/platform: ""
+microk8s_node_taints: []
+microk8s_kubelet_args_pool: {}
+common_sysctl_pool: {}
+
+preflight_min_vcpus: 16
+preflight_min_memory_gb: 64
+preflight_min_root_disk_gb: 200

@@ -1,0 +1,46 @@
+---
+# ===========================================================================
+# role: backup - scheduled dqlite (Kubernetes datastore) + cluster PKI backups on the
+# control plane, copied off-node. Runs on microk8s_masters.
+#
+# Restore (see README "Disaster recovery"): `microk8s dbctl restore <archive>.tar.gz` on a
+# fresh single master with the same certs, then re-join the other nodes.
+# ===========================================================================
+
+backup_enabled: true
+microk8s_bin: /snap/bin/microk8s
+microk8s_snap_data: /var/snap/microk8s/current
+
+backup_dir: /var/backups/microk8s
+backup_retention_days: 7
+backup_script_path: /usr/local/sbin/microk8s-backup
+# systemd timer schedule (every master runs it; RandomizedDelaySec spreads them out)
+backup_on_calendar: "*-*-* 01:30:00"
+backup_randomized_delay: 30m
+# Also archive certs/, credentials/ and args/ (CA keys + tokens - required for a restore)
+backup_include_pki: true
+
+# --- Off-node copy (rsync over SSH) -------------------------------------------------
+backup_remote_enabled: false
+backup_remote_user: microk8s-backup
+backup_remote_host: backup01.ops.example.local
+backup_remote_path: "/srv/backups/microk8s/{{ platform_cluster_name | default('cluster') }}"
+backup_remote_ssh_key_path: /root/.ssh/id_microk8s_backup
+backup_remote_ssh_private_key: "{{ vault_backup_ssh_private_key | default('') }}"
+# Pinned host key line (from ssh-keyscan) - no trust-on-first-use
+backup_remote_known_hosts_line: ""
+backup_remote_bwlimit_kbps: 0
+
+# --- Encryption (archives contain every Kubernetes Secret) -------------------------------
+backup_gpg_recipient: ""
+backup_gpg_public_key_file: ""
+
+# --- Monitoring -------------------------------------------------------------------------
+# node-exporter textfile collector (kube-prometheus-stack mounts /var/lib/node_exporter)
+backup_textfile_dir: /var/lib/node_exporter/textfile_collector
+
+# Trigger a backup immediately (playbooks/backup.yml -e backup_run_now=true)
+backup_run_now: false
+# Pull the newest archive of every master to the controller (-e backup_fetch=true)
+backup_fetch: false
+backup_fetch_dest: "{{ playbook_dir }}/../backups/{{ platform_cluster_name | default('cluster') }}"

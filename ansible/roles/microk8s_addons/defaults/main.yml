@@ -1,0 +1,39 @@
+---
+# ===========================================================================
+# role: microk8s_addons - minimal MicroK8s addons + controller kubeconfig
+#
+# Deliberately minimal. MetalLB, ingress, Istio, cert-manager, Longhorn, observability,
+# registry ... are NOT MicroK8s addons here - Argo CD installs them from gitops/.
+# ===========================================================================
+
+microk8s_bin: /snap/bin/microk8s
+microk8s_ha_first_master: "{{ groups['microk8s_masters'][0] }}"
+
+# Upstream resolvers CoreDNS forwards to (empty = /etc/resolv.conf of the node)
+microk8s_addons_dns_upstream: "{{ dns_servers | default([]) }}"
+
+microk8s_addons_enabled:
+  - name: dns
+    args: "{{ microk8s_addons_dns_upstream | join(',') }}"
+  - name: rbac
+  - name: ha-cluster
+  - name: metrics-server
+  - name: helm3
+
+microk8s_addons_disabled:
+  - hostpath-storage      # Longhorn (longhorn / longhorn-db) is the only storage provider
+  - storage               # legacy alias of hostpath-storage on older channels
+  - dashboard
+  - metallb               # via GitOps (gitops/platform/core/metallb)
+  - ingress               # Kong / Istio gateways via GitOps
+  - istio                 # via GitOps
+  - cert-manager          # via GitOps
+  - observability         # via GitOps (kube-prometheus-stack, ECK ...)
+
+# CoreDNS runs a single replica by default in MicroK8s - scale it for HA.
+microk8s_coredns_replicas: 3
+
+# Where the admin kubeconfig is written on the controller (git-ignored).
+kubeconfig_path: "{{ inventory_dir }}/.kubeconfig"
+# API server URL written into the kubeconfig (VIP / DNS name); empty keeps the node IP.
+microk8s_api_endpoint: ""

@@ -1,0 +1,36 @@
+---
+# Restarts are throttled AND wait for the service inside the same task, so only one
+# node at a time is ever without a kubelet / API server.
+- name: Restart kubelite
+  ansible.builtin.shell: |
+    set -euo pipefail
+    snap restart microk8s.daemon-kubelite
+    timeout 300 bash -c 'until ss -Hltn "sport = :10250" | grep -q 10250; do sleep 2; done'
+    # control-plane nodes (no clustered.lock) must also bring the API server back
+    if [ ! -f {{ microk8s_snap_data }}/var/lock/clustered.lock ]; then
+      timeout 300 bash -c 'until ss -Hltn "sport = :16443" | grep -q 16443; do sleep 2; done'
+    fi
+  args:
+    executable: /bin/bash
+  throttle: "{{ microk8s_restart_throttle }}"
+  changed_when: true
+
+- name: Restart containerd
+  ansible.builtin.shell: |
+    set -euo pipefail
+    snap restart microk8s.daemon-containerd
+    timeout 120 bash -c 'until [ -S {{ microk8s_snap_common }}/run/containerd.sock ]; do sleep 2; done'
+  args:
+    executable: /bin/bash
+  throttle: "{{ microk8s_restart_throttle }}"
+  changed_when: true
+
+- name: Refresh API server certificate
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {{ microk8s_bin }} refresh-certs --cert server.crt
+    {{ microk8s_bin }} status --wait-ready --timeout 300 >/dev/null
+  args:
+    executable: /bin/bash
+  throttle: 1
+  changed_when: true

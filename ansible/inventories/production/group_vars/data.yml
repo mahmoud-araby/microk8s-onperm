@@ -1,0 +1,27 @@
+---
+# Data pool: PostgreSQL (CNPG), Redis + Sentinel, RabbitMQ, Kafka (KRaft), Micro Integrator.
+# 6 nodes, 32 vCPU / 128 GiB, dedicated NVMe for Longhorn `longhorn-db` (strict-local).
+# Tainted: only data services (with toleration) run here.
+workload_tier: data
+microk8s_node_labels:
+  workload-tier: data
+  node-role.kubernetes.io/data: ""
+microk8s_node_taints:
+  - key: workload-tier
+    value: data
+    effect: NoSchedule
+microk8s_kubelet_args_pool:
+  --max-pods: "110"
+
+# Databases / brokers: no THP, low swappiness, bigger dirty buffers, many AIO contexts.
+common_disable_thp: true
+common_sysctl_pool:
+  vm.swappiness: 1
+  vm.dirty_background_ratio: 5
+  vm.dirty_ratio: 15
+  fs.aio-max-nr: 1048576
+  net.core.somaxconn: 65535
+
+preflight_min_vcpus: 32
+preflight_min_memory_gb: 128
+preflight_min_root_disk_gb: 200

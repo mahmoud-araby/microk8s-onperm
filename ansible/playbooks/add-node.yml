@@ -1,0 +1,40 @@
+---
+# Add new node(s): put them in the inventory (right pool group), then run with --limit:
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/add-node.yml --limit prd-apps-13
+# The first master is used through delegation even when it is outside --limit.
+# Afterwards refresh /etc/hosts everywhere:
+#   ansible-playbook ... playbooks/prepare-nodes.yml --tags etc_hosts
+- name: Guard - require --limit
+  hosts: microk8s_cluster
+  gather_facts: false
+  tasks:
+    - name: Refuse to run without --limit
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - inventory_hostname != groups['microk8s_masters'][0]
+        fail_msg: "Use --limit <new-node(s)>; the first master cannot be (re)added with this playbook."
+        quiet: true
+      tags: [always]
+
+- name: Preflight checks
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: OS baseline and hardening
+  ansible.builtin.import_playbook: prepare-nodes.yml
+
+- name: Install MicroK8s
+  hosts: microk8s_cluster
+  become: true
+  gather_facts: true
+  roles:
+    - role: microk8s
+
+- name: Join new node(s) one at a time
+  hosts: microk8s_cluster
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - role: microk8s_ha

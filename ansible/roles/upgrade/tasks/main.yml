@@ -1,0 +1,112 @@
+---
+- name: Read the channel this node tracks
+  ansible.builtin.command: snap info microk8s
+  register: _upg_snap_info
+  changed_when: false
+  tags: [upgrade]
+
+- name: Determine current and target channels
+  ansible.builtin.set_fact:
+    _upg_current: "{{ (_upg_snap_info.stdout | regex_findall('(?m)^tracking:[ \\t]*([^ \\t\\r\\n]+)') + ['']) | first }}"
+  tags: [upgrade]
+
+- name: Node already on the target channel
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} already tracks {{ upgrade_target_channel }} - nothing to do"
+  when: _upg_current == upgrade_target_channel
+  tags: [upgrade]
+
+- name: Upgrade this node
+  when: _upg_current != upgrade_target_channel
+  tags: [upgrade]
+  block:
+    - name: Refuse to skip a Kubernetes minor version
+      ansible.builtin.assert:
+        that: >-
+          upgrade_allow_minor_skip | bool
+          or ((_to.split('.')[1] | int) - (_from.split('.')[1] | int)) in [0, 1]
+        fail_msg: "{{ _upg_current }} -> {{ upgrade_target_channel }} skips a minor version; upgrade one minor at a time."
+        quiet: true
+      vars:
+        _from: "{{ _upg_current.split('/')[0] }}"
+        _to: "{{ upgrade_target_channel.split('/')[0] }}"
+
+    - name: Pre-check - every node is Ready
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl get nodes
+        -o 'jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+      delegate_to: "{{ upgrade_control_host }}"
+      register: _upg_nodes
+      changed_when: false
+      until: "'False' not in _upg_nodes.stdout_lines and 'Unknown' not in _upg_nodes.stdout_lines"
+      retries: 30
+      delay: 10
+
+    - name: Cordon and drain
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl drain {{ microk8s_node_name }}
+        {{ upgrade_drain_extra_args }}
+        --grace-period={{ upgrade_drain_grace_period }}
+        --timeout={{ upgrade_drain_timeout }}
+      delegate_to: "{{ upgrade_control_host }}"
+      when: upgrade_drain | bool
+      changed_when: true
+
+    - name: Refresh MicroK8s to the target channel
+      ansible.builtin.command: snap refresh microk8s --channel={{ upgrade_target_channel }}
+      changed_when: true
+
+    - name: Keep auto-refresh held after the refresh
+      ansible.builtin.command: snap refresh --hold microk8s
+      changed_when: false
+
+    - name: Wait for the local control plane / kubelet
+      ansible.builtin.include_role:
+        name: microk8s
+        tasks_from: ready.yml
+
+    - name: Re-apply MicroK8s configuration (kubelet args, containerd, registry mirrors)
+      ansible.builtin.include_role:
+        name: microk8s
+        tasks_from: config.yml
+      vars:
+        microk8s_allow_channel_change: true
+
+    - name: Apply configuration restarts now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait until the node is Ready on the new version
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl get node {{ microk8s_node_name }}
+        -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status} {.status.nodeInfo.kubeletVersion}'
+      delegate_to: "{{ upgrade_control_host }}"
+      register: _upg_node
+      changed_when: false
+      until: >-
+        _upg_node.stdout.startswith('True')
+        and ('v' ~ upgrade_target_channel.split('/')[0]) in _upg_node.stdout
+      retries: "{{ upgrade_ready_retries }}"
+      delay: 10
+
+    - name: Uncordon
+      ansible.builtin.command: "{{ microk8s_bin }} kubectl uncordon {{ microk8s_node_name }}"
+      delegate_to: "{{ upgrade_control_host }}"
+      changed_when: true
+
+    - name: Wait for Longhorn volumes to be healthy again
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl -n longhorn-system get volumes.longhorn.io
+        -o 'jsonpath={range .items[*]}{.status.robustness}{"\n"}{end}'
+      delegate_to: "{{ upgrade_control_host }}"
+      register: _upg_longhorn
+      changed_when: false
+      failed_when: false
+      until: _upg_longhorn.rc != 0 or 'degraded' not in _upg_longhorn.stdout_lines
+      retries: "{{ upgrade_longhorn_retries }}"
+      delay: 20
+      when: upgrade_wait_longhorn | bool
+
+    - name: Let workloads settle before the next node
+      ansible.builtin.pause:
+        seconds: "{{ upgrade_pause_seconds }}"
+      when: upgrade_pause_seconds | int > 0

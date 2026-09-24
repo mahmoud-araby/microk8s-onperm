@@ -1,0 +1,46 @@
+---
+- name: Look up admin users
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+    fail_key: false
+  loop: "{{ microk8s_admin_users }}"
+  register: _mk8s_users
+
+- name: Add existing admin users to the microk8s group
+  ansible.builtin.user:
+    name: "{{ item.item }}"
+    groups: microk8s
+    append: true
+  loop: "{{ _mk8s_users.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: (item.ansible_facts.getent_passwd[item.item] | default(none)) is not none
+
+- name: Create ~/.kube for admin users
+  ansible.builtin.file:
+    path: "{{ item.ansible_facts.getent_passwd[item.item][4] }}/.kube"
+    state: directory
+    owner: "{{ item.item }}"
+    mode: "0700"
+  loop: "{{ _mk8s_users.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: (item.ansible_facts.getent_passwd[item.item] | default(none)) is not none
+
+- name: Read snap aliases
+  ansible.builtin.command: snap aliases microk8s
+  register: _mk8s_aliases
+  changed_when: false
+  when: microk8s_snap_aliases | bool
+
+- name: Create kubectl / helm aliases
+  ansible.builtin.command: snap alias {{ item.app }} {{ item.alias }}
+  loop:
+    - {app: microk8s.kubectl, alias: kubectl}
+    - {app: microk8s.helm3, alias: helm}
+  when:
+    - microk8s_snap_aliases | bool
+    - microk8s_role == 'master'
+    - _mk8s_aliases.stdout is not search('(?m)^' ~ (item.app | regex_escape) ~ ' +' ~ item.alias ~ '( |$)')
+  changed_when: true

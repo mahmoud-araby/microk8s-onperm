@@ -1,0 +1,37 @@
+---
+# ---------------------------------------------------------------------------
+# Container registry - Harbor (harbor.ops.example.local) - STAGING
+# Configured in containerd through /var/snap/microk8s/current/args/certs.d/<registry>/hosts.toml
+# ---------------------------------------------------------------------------
+
+# Staging pulls from the shared production Harbor (single source of signed images).
+registry_harbor_host: harbor.ops.example.local
+
+# PEM of the on-prem CA that signed Harbor's certificate (same CA as the cert-manager
+# `internal-ca` ClusterIssuer). Leave empty when Harbor uses a publicly trusted cert.
+# Controller-side file path; the content is copied to every node.
+registry_ca_cert_file: "{{ inventory_dir }}/files/internal-ca.crt"
+registry_ca_cert_required: false
+
+# Harbor proxy-cache projects used as pull-through mirrors. containerd tries the mirror
+# first and falls back to the upstream `server` if Harbor is unavailable (e.g. while
+# the cluster is being bootstrapped, before Argo CD has deployed Harbor).
+registry_mirrors:
+  - upstream: docker.io
+    server: https://registry-1.docker.io
+    project: dockerhub-proxy
+  - upstream: quay.io
+    server: https://quay.io
+    project: quay-proxy
+  - upstream: ghcr.io
+    server: https://ghcr.io
+    project: ghcr-proxy
+  - upstream: registry.k8s.io
+    server: https://registry.k8s.io
+    project: k8s-proxy
+  - upstream: docker.elastic.co
+    server: https://docker.elastic.co
+    project: elastic-proxy
+
+# Air-gapped mode: do not fall back to upstream registries at all.
+registry_mirror_fallback_to_upstream: true

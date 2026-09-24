@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: microk8s_ha
+  namespace: platform
+  author: Platform Engineering
+  description: Form a MicroK8s HA cluster (dqlite voters + workers), apply node labels/taints, keepalived API VIP
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [kubernetes, microk8s, ha, dqlite]
+dependencies: []

@@ -1,0 +1,18 @@
+---
+- name: Persist kernel modules across reboots
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/90-platform.conf
+    content: |
+      # Managed by Ansible (role: common)
+      {% for module in common_kernel_modules + common_kernel_modules_extra %}
+      {{ module }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Load kernel modules now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ common_kernel_modules + common_kernel_modules_extra }}"

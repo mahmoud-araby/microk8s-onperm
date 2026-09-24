@@ -1,0 +1,14 @@
+{#- Structured settings for Python services that prefer a JSON file over env vars
+    (e.g. pydantic-settings JsonConfigSettingsSource). Same model as the .env file. -#}
+{{ {
+  'service': {'name': service.name, 'version': service.version, 'environment': cfg.environment, 'tenantId': cfg.tenantId},
+  'logging': cfg.logging,
+  'http': cfg.http,
+  'database': ((cfg.database | combine({'name': cfg.database.namePrefix ~ cfg.database.name})) if cfg.database.enabled | bool else {'enabled': false}),
+  'redis': ((cfg.redis | combine({'keyPrefix': cfg.redis.keyPrefix ~ service.name ~ ':'})) if cfg.redis.enabled | bool else {'enabled': false}),
+  'rabbitmq': (cfg.rabbitmq if cfg.rabbitmq.enabled | bool else {'enabled': false}),
+  'kafka': (cfg.kafka if cfg.kafka.enabled | bool else {'enabled': false}),
+  'otel': cfg.otel,
+  'auth': cfg.auth,
+  'features': cfg.features
+} | combine(cfg.custom, recursive=True) | to_nice_json(indent=2) }}

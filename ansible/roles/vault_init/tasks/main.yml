@@ -1,0 +1,26 @@
+---
+- name: Vault initialisation is opt-in
+  ansible.builtin.debug:
+    msg: "vault_init_enabled is false - skipping (run with -e vault_init_enabled=true)"
+  when: not (vault_init_enabled | bool)
+  tags: [vault_init, always]
+
+- name: Initialise, unseal and configure Vault
+  when: vault_init_enabled | bool
+  tags: [vault_init]
+  block:
+    - name: Discover Vault server pods
+      ansible.builtin.import_tasks: discover.yml
+
+    - name: Initialise Vault (first run only)
+      ansible.builtin.import_tasks: init.yml
+
+    - name: Unseal every Vault pod
+      ansible.builtin.include_tasks: unseal.yml
+      loop: "{{ _vault_pods }}"
+      loop_control:
+        loop_var: _vault_pod
+
+    - name: Configure secrets engine, auth and policies
+      ansible.builtin.import_tasks: configure.yml
+      when: vault_init_configure | bool

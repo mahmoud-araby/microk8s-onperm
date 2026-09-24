@@ -1,0 +1,33 @@
+---
+# The shared-services POOL (landing zone of the shared tier): pooled releases used by every
+# shared-tier tenant (e.g. initech) on api.example.com. Releases run with tenant "" and resolve the
+# tenant per request from X-Tenant-ID / the JWT claim `tenant`.
+tenant:
+  name: shared
+  tier: shared
+  pool: true                 # owns the namespace -> no "tenant-<name>-" object prefix
+  namespace: shared-services
+  realm: shared
+
+config:
+  redis:
+    db: 0
+  database:
+    poolMax: 100             # pooled releases serve every shared-tier tenant
+
+services:
+  - name: orders
+    version: v1
+    language: dotnet
+  - name: orders
+    version: v2
+    language: dotnet
+  - name: payments
+    version: v1
+    language: java
+  - name: catalog
+    version: v1
+    language: python
+  - name: web
+    version: v1
+    language: static

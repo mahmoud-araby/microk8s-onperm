@@ -1,0 +1,34 @@
+---
+# ---------------------------------------------------------------------------
+# "ConfigMap Ansible" - STAGING (role: k8s_configmaps, playbook: configmaps.yml)
+#
+# Layering (later wins, deep merge, lists replace):
+#   1. global       roles/k8s_configmaps/defaults/main.yml  -> k8s_configmaps_global
+#   2. environment  THIS FILE                               -> k8s_configmaps_environment
+#   3. tenant       ansible/configmaps/tenants/<tenant>.yml -> config + environments.<env>
+#   4. service      ansible/configmaps/services/<svc>.yml (catalogue defaults)
+#                   + tenant file services[].config + services[].environments.<env>
+# ---------------------------------------------------------------------------
+
+# apply  -> kubernetes.core.k8s apply to the cluster + checksum annotation rollout trigger
+# gitops -> write YAML to gitops/tenants/<tenant>/configmaps/generated-*.yaml for Argo CD
+# Staging applies directly (fast feedback) so it never rewrites the production GitOps tree on main.
+k8s_configmaps_mode: apply
+
+k8s_configmaps_environment:
+  environment: staging
+  logging:
+    level: debug
+  otel:
+    tracesSamplerRatio: 1.0
+  database:
+    sslMode: require
+    poolMin: 2
+    poolMax: 20
+  http:
+    timeoutSeconds: 10
+    retries: 2
+  rabbitmq:
+    prefetch: 100
+  features:
+    maintenanceBanner: false

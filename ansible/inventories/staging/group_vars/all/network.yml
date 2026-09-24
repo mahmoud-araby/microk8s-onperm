@@ -1,0 +1,49 @@
+---
+# ---------------------------------------------------------------------------
+# Network - STAGING
+# ---------------------------------------------------------------------------
+
+# MetalLB address pools (docs/conventions.md). MetalLB itself is deployed by Argo CD
+# (gitops/platform/core/metallb); these ranges are the source of truth that the
+# gitops IPAddressPool manifests must match. preflight.yml verifies they do not
+# overlap each other or any node IP.
+metallb_pools:
+  public-pool:
+    # Kong external API gateway + Istio public ingress (announced from edge nodes)
+    addresses:
+      - 203.0.113.40-203.0.113.49
+    announce_from_tier: edge
+  internal-pool:
+    # Istio internal gateway, Kafka external listener, ops tooling (*.ops.example.local)
+    addresses:
+      - 10.20.100.10-10.20.100.40
+    announce_from_tier: edge
+
+# Upstream DNS resolvers (also used by CoreDNS forwarders, see microk8s.yml)
+dns_servers:
+  - 10.20.0.53
+  - 10.20.0.54
+dns_search_domains:
+  - "{{ platform_ops_domain }}"
+
+# Time sync (chrony). Use at least 3 sources.
+ntp_servers:
+  - ntp1.ops.example.local
+  - ntp2.ops.example.local
+  - ntp3.ops.example.local
+ntp_pools: []
+
+# Outbound HTTP(S) proxy. When enabled it is applied to /etc/environment, apt, snapd
+# and the MicroK8s containerd environment. no_proxy always contains cluster CIDRs.
+proxy_enabled: false
+proxy_http: http://proxy.ops.example.local:3128
+proxy_https: http://proxy.ops.example.local:3128
+proxy_no_proxy_extra:
+  - .example.local
+  - .svc
+  - .cluster.local
+  - localhost
+  - 127.0.0.1
+
+# Host firewall (ufw). Cluster ports are opened between platform_node_cidrs only.
+common_firewall_enabled: true

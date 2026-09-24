@@ -1,0 +1,32 @@
+---
+- name: Read CoreDNS replica count
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl -n kube-system get deployment coredns -o 'jsonpath={.spec.replicas}'
+  register: _addons_coredns_replicas
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+
+- name: Scale CoreDNS
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl -n kube-system scale deployment coredns --replicas={{ microk8s_coredns_replicas }}
+  when: (_addons_coredns_replicas.stdout | int) != (microk8s_coredns_replicas | int)
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+
+- name: Spread CoreDNS replicas across nodes
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl -n kube-system patch deployment coredns --type merge -p
+    '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"k8s-app":"kube-dns"}}}]}}}}'
+  register: _addons_coredns_patch
+  changed_when: "'no change' not in _addons_coredns_patch.stdout"
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"
+
+- name: Wait for CoreDNS rollout
+  ansible.builtin.command: >-
+    {{ microk8s_bin }} kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ microk8s_ha_first_master }}"

@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: common
+  namespace: platform
+  author: Platform Engineering
+  description: OS baseline for MicroK8s nodes (packages, chrony, swap, kernel modules, sysctl, limits, Longhorn prerequisites, ufw, journald)
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [kubernetes, microk8s, baseline, sysctl]
+dependencies: []

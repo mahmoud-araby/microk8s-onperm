@@ -1,0 +1,82 @@
+---
+- name: Check prerequisites on the controller
+  tags: [argocd, always]
+  block:
+    - name: Check that the kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: _argocd_kubeconfig
+
+    - name: Fail without kubeconfig
+      ansible.builtin.assert:
+        that: _argocd_kubeconfig.stat.exists
+        fail_msg: "{{ kubeconfig_path }} not found - run playbooks/addons.yml first."
+        quiet: true
+
+    - name: Check the helm binary
+      ansible.builtin.command: "{{ argocd_helm_binary }} version --short"
+      register: _argocd_helm_version
+      changed_when: false
+
+- name: Create the Argo CD namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ argocd_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: ansible
+          app.kubernetes.io/part-of: argocd
+  tags: [argocd]
+
+- name: Git repository credentials
+  ansible.builtin.import_tasks: repo-credentials.yml
+  when: argocd_repo_auth_method != 'none'
+  tags: [argocd, argocd_repo]
+
+- name: Install / upgrade Argo CD (pinned chart version)
+  kubernetes.core.helm:
+    kubeconfig: "{{ kubeconfig_path }}"
+    binary_path: "{{ argocd_helm_binary if (argocd_helm_binary is match('/')) else omit }}"
+    name: "{{ argocd_release_name }}"
+    chart_ref: "{{ argocd_chart_ref }}"
+    chart_repo_url: "{{ argocd_chart_repo_url }}"
+    chart_version: "{{ argocd_chart_version }}"
+    release_namespace: "{{ argocd_namespace }}"
+    create_namespace: false
+    values: "{{ lookup('ansible.builtin.template', 'values.yaml.j2') | from_yaml | combine(argocd_values_overrides, recursive=True) }}"
+    wait: true
+    wait_timeout: "{{ argocd_helm_timeout }}"
+    atomic: false
+    state: present
+  tags: [argocd, argocd_install]
+
+- name: Wait for the Argo CD API server
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    kind: Deployment
+    namespace: "{{ argocd_namespace }}"
+    name: "{{ argocd_release_name }}-server"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 600
+  tags: [argocd, argocd_install]
+
+- name: Apply extra bootstrap manifests
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    apply: true
+    src: "{{ item }}"
+  loop: "{{ argocd_extra_bootstrap_manifests }}"
+  tags: [argocd, argocd_root_app]
+
+- name: Hand over to GitOps - root application
+  ansible.builtin.import_tasks: root-app.yml
+  when: argocd_apply_root_app | bool
+  tags: [argocd, argocd_root_app]

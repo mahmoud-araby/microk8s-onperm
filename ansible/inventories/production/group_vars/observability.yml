@@ -1,0 +1,19 @@
+---
+# Observability pool: Prometheus/Thanos, Alertmanager, Grafana, ECK Elasticsearch (hot tier),
+# Kibana, APM Server, OpenTelemetry Collector gateway. 3 nodes, 16 vCPU / 64 GiB, NVMe.
+workload_tier: observability
+microk8s_node_labels:
+  workload-tier: observability
+  node-role.kubernetes.io/observability: ""
+microk8s_node_taints: []
+microk8s_kubelet_args_pool:
+  --max-pods: "110"
+
+common_disable_thp: true
+common_sysctl_pool:
+  vm.max_map_count: 262144
+  vm.swappiness: 1
+
+preflight_min_vcpus: 16
+preflight_min_memory_gb: 64
+preflight_min_root_disk_gb: 200

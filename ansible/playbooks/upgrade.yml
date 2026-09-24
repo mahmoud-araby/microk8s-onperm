@@ -1,0 +1,38 @@
+---
+# Rolling MicroK8s upgrade to microk8s_channel (bump it by ONE minor version first).
+# Control plane first, then workers pool by pool, one node at a time. Stops at the first failure.
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/upgrade.yml
+#   ansible-playbook ... playbooks/upgrade.yml --limit data            # one pool
+- name: Snapshot the datastore before upgrading
+  hosts: microk8s_masters[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Run a backup now
+      ansible.builtin.include_role:
+        name: backup
+      vars:
+        backup_run_now: true
+      tags: [upgrade, backup]
+
+- name: Upgrade the control plane
+  hosts: microk8s_masters
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  roles:
+    - role: upgrade
+      tags: [upgrade]
+
+- name: Upgrade the worker pools
+  hosts: "edge:platform:observability:apps:data"
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  roles:
+    - role: upgrade
+      tags: [upgrade]

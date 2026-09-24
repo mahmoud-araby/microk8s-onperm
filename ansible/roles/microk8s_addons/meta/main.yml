@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: microk8s_addons
+  namespace: platform
+  author: Platform Engineering
+  description: Enable the minimal MicroK8s addon set (dns, rbac, ha-cluster, metrics-server, helm3), HA CoreDNS, fetch kubeconfig
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [kubernetes, microk8s, addons]
+dependencies: []

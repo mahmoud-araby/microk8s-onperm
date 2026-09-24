@@ -1,0 +1,20 @@
+---
+# STAGING: same labels/taints as production (docs/conventions.md), reduced sizing.
+# Observability pool: Prometheus/Thanos, Alertmanager, Grafana, ECK Elasticsearch (hot tier),
+# Kibana, APM Server, OpenTelemetry Collector gateway.
+workload_tier: observability
+microk8s_node_labels:
+  workload-tier: observability
+  node-role.kubernetes.io/observability: ""
+microk8s_node_taints: []
+microk8s_kubelet_args_pool:
+  --max-pods: "110"
+
+common_disable_thp: true
+common_sysctl_pool:
+  vm.max_map_count: 262144
+  vm.swappiness: 1
+
+preflight_min_vcpus: 4
+preflight_min_memory_gb: 16
+preflight_min_root_disk_gb: 80

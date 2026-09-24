@@ -1,0 +1,20 @@
+---
+# Worker nodes that already joined a cluster carry clustered.lock and have no local
+# control plane, so `microk8s status` cannot be used on them.
+- name: Detect whether this node is a joined worker
+  ansible.builtin.stat:
+    path: "{{ microk8s_snap_data }}/var/lock/clustered.lock"
+  register: _mk8s_clustered_lock
+
+- name: Wait for the MicroK8s control plane to be ready
+  ansible.builtin.command: "{{ microk8s_bin }} status --wait-ready --timeout {{ microk8s_ready_timeout }}"
+  register: _mk8s_status
+  changed_when: false
+  when: not _mk8s_clustered_lock.stat.exists
+
+- name: Wait for kubelet on joined workers
+  ansible.builtin.wait_for:
+    port: 10250
+    host: 127.0.0.1
+    timeout: "{{ microk8s_ready_timeout }}"
+  when: _mk8s_clustered_lock.stat.exists

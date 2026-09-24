@@ -1,0 +1,41 @@
+---
+- name: Install keepalived
+  ansible.builtin.apt:
+    name: keepalived
+    state: present
+    lock_timeout: 300
+
+- name: Allow VRRP between control-plane nodes
+  community.general.ufw:
+    rule: allow
+    src: "{{ hostvars[item]['microk8s_advertise_address'] | default(hostvars[item]['ansible_host']) }}"
+    proto: vrrp
+    comment: keepalived-api-vip
+  loop: "{{ groups['microk8s_masters'] | difference([inventory_hostname]) }}"
+  when: microk8s_ha_manage_firewall | bool
+
+- name: Install API server health check script
+  ansible.builtin.copy:
+    dest: /etc/keepalived/check_apiserver.sh
+    content: |
+      #!/bin/bash
+      # Managed by Ansible (role: microk8s_ha) - VIP only lives where the API server answers
+      exec timeout 3 bash -c '</dev/tcp/127.0.0.1/16443'
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure keepalived
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart keepalived
+
+- name: Enable and start keepalived
+  ansible.builtin.systemd_service:
+    name: keepalived
+    enabled: true
+    state: started

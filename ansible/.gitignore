@@ -1,0 +1,12 @@
+# Local controller artefacts - never commit
+.cache/
+collections/ansible_collections/
+*.retry
+# Kubeconfigs fetched from the cluster by the microk8s_addons role
+inventories/*/.kubeconfig
+# Vault init output (ansible-vault encrypted, but still keep out of git by default)
+inventories/*/vault-init-*.yml
+# Unencrypted secrets - only vault.yml (encrypted with ansible-vault) may be committed
+inventories/*/group_vars/all/vault.yml.dec
+backups/
+__pycache__/

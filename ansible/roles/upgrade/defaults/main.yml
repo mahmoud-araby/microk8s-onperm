@@ -1,0 +1,33 @@
+---
+# ===========================================================================
+# role: upgrade - rolling MicroK8s upgrade, ONE node at a time (play uses serial: 1)
+#   cordon + drain -> snap refresh --channel -> wait ready -> re-apply config -> uncordon
+#   -> wait for Longhorn volumes to be healthy again before the next node.
+#
+# Procedure: bump microk8s_channel in inventories/<env>/group_vars/all/microk8s.yml by ONE
+# minor version, then run playbooks/upgrade.yml (control plane first, then each pool).
+# ===========================================================================
+
+microk8s_bin: /snap/bin/microk8s
+microk8s_node_name: "{{ inventory_hostname | lower }}"
+upgrade_target_channel: "{{ microk8s_channel }}"
+# Kubernetes supports upgrading one minor version at a time only
+upgrade_allow_minor_skip: false
+
+# kubectl runs on a control-plane node other than the one being upgraded
+upgrade_control_host: >-
+  {{ (groups['microk8s_masters'] | difference([inventory_hostname]) | first)
+     if inventory_hostname in groups['microk8s_masters'] else groups['microk8s_masters'][0] }}
+
+upgrade_drain: true
+upgrade_drain_timeout: 900s
+upgrade_drain_grace_period: 60
+upgrade_drain_extra_args: "--ignore-daemonsets --delete-emptydir-data"
+upgrade_ready_retries: 60
+
+# Longhorn: wait until no volume is degraded before touching the next node
+upgrade_wait_longhorn: true
+upgrade_longhorn_retries: 90
+
+# Pause between nodes (seconds) to let workloads settle / canaries evaluate
+upgrade_pause_seconds: 60

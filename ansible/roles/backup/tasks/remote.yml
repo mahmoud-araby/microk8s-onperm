@@ -1,0 +1,24 @@
+---
+- name: Require the backup SSH key and pinned host key
+  ansible.builtin.assert:
+    that:
+      - backup_remote_ssh_private_key | length > 0
+      - backup_remote_known_hosts_line | length > 0
+    fail_msg: "backup_remote_enabled needs vault_backup_ssh_private_key and backup_remote_known_hosts_line"
+    quiet: true
+
+- name: Install backup SSH private key
+  ansible.builtin.copy:
+    content: "{{ backup_remote_ssh_private_key | trim }}\n"
+    dest: "{{ backup_remote_ssh_key_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Pin the backup host key
+  ansible.builtin.known_hosts:
+    path: /root/.ssh/known_hosts
+    name: "{{ backup_remote_host }}"
+    key: "{{ backup_remote_known_hosts_line }}"
+    state: present

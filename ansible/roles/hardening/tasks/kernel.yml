@@ -1,0 +1,31 @@
+---
+- name: Apply kernel hardening parameters
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/80-hardening.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  loop: "{{ hardening_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+
+- name: Guard - squashfs must never be disabled (snapd / MicroK8s)
+  ansible.builtin.assert:
+    that: "'squashfs' not in hardening_disabled_filesystems"
+    fail_msg: squashfs is required by snapd; remove it from hardening_disabled_filesystems.
+    quiet: true
+
+- name: Disable unused filesystems and network protocols
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/90-platform-hardening.conf
+    content: |
+      # Managed by Ansible (role: hardening)
+      {% for mod in hardening_disabled_filesystems + hardening_disabled_net_protocols %}
+      install {{ mod }} /bin/false
+      blacklist {{ mod }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"

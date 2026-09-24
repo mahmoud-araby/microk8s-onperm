@@ -1,0 +1,73 @@
+---
+- name: Validate ConfigMap rendering mode
+  ansible.builtin.assert:
+    that: k8s_configmaps_mode in ['apply', 'gitops']
+    fail_msg: "k8s_configmaps_mode must be 'apply' or 'gitops' (got {{ k8s_configmaps_mode }})"
+    quiet: true
+  tags: [configmaps, always]
+
+- name: Check kubeconfig for apply mode
+  when: k8s_configmaps_mode == 'apply'
+  tags: [configmaps]
+  block:
+    - name: Stat kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: _k8s_cm_kubeconfig
+
+    - name: Fail without kubeconfig
+      ansible.builtin.assert:
+        that: _k8s_cm_kubeconfig.stat.exists
+        fail_msg: "{{ kubeconfig_path }} not found - run playbooks/addons.yml or use k8s_configmaps_mode=gitops"
+        quiet: true
+
+- name: Discover tenant definitions
+  ansible.builtin.find:
+    paths: "{{ k8s_configmaps_tenants_dir }}"
+    patterns: ["*.yml", "*.yaml"]
+  register: _k8s_cm_tenant_files
+  tags: [configmaps]
+
+- name: Select tenant definitions to render
+  ansible.builtin.set_fact:
+    _k8s_cm_tenant_paths: >-
+      {{ _k8s_cm_tenant_files.files | map(attribute='path') | sort
+         | select('search', '/(' ~ (k8s_configmaps_only_tenants | map('regex_escape') | join('|')) ~ ')\.ya?ml$')
+         | list
+         if (k8s_configmaps_only_tenants | length > 0)
+         else (_k8s_cm_tenant_files.files | map(attribute='path') | sort | list) }}
+    _k8s_cm_summary: []
+  tags: [configmaps]
+
+- name: Fail when there is nothing to render
+  ansible.builtin.assert:
+    that: _k8s_cm_tenant_paths | length > 0
+    fail_msg: "No tenant definitions found in {{ k8s_configmaps_tenants_dir }} (filter: {{ k8s_configmaps_only_tenants }})"
+    quiet: true
+  tags: [configmaps]
+
+- name: Render ConfigMaps per tenant
+  ansible.builtin.include_tasks:
+    file: tenant.yml
+    apply:
+      tags: [configmaps]
+  loop: "{{ _k8s_cm_tenant_paths }}"
+  loop_control:
+    loop_var: _k8s_cm_tenant_file
+    label: "{{ _k8s_cm_tenant_file | basename }}"
+  tags: [configmaps]
+
+- name: Commit generated GitOps files
+  ansible.builtin.include_tasks:
+    file: git-commit.yml
+    apply:
+      tags: [configmaps]
+  when:
+    - k8s_configmaps_mode == 'gitops'
+    - k8s_configmaps_git_commit | bool
+  tags: [configmaps]
+
+- name: Summary
+  ansible.builtin.debug:
+    msg: "{{ _k8s_cm_summary }}"
+  tags: [configmaps]

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# MicroK8s dqlite datastore + PKI backup ({{ inventory_hostname }}, cluster {{ platform_cluster_name | default('cluster') }})
+set -euo pipefail
+umask 077
+
+BACKUP_DIR={{ backup_dir | quote }}
+RETENTION_DAYS={{ backup_retention_days | int }}
+HOST=$(hostname -s)
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+TEXTFILE_DIR={{ backup_textfile_dir | quote }}
+LOCK=/run/microk8s-backup.lock
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "another backup is running"; exit 0; }
+
+metric() {
+  [ -n "$TEXTFILE_DIR" ] && [ -d "$TEXTFILE_DIR" ] || return 0
+  cat > "$TEXTFILE_DIR/microk8s_backup.prom.$$" <<METRICS
+# HELP microk8s_backup_last_run_timestamp_seconds Last backup attempt (unix time)
+# TYPE microk8s_backup_last_run_timestamp_seconds gauge
+microk8s_backup_last_run_timestamp_seconds $(date +%s)
+# HELP microk8s_backup_last_success Whether the last backup succeeded (1/0)
+# TYPE microk8s_backup_last_success gauge
+microk8s_backup_last_success $1
+# HELP microk8s_backup_last_size_bytes Size of the last dqlite archive
+# TYPE microk8s_backup_last_size_bytes gauge
+microk8s_backup_last_size_bytes ${2:-0}
+METRICS
+  mv "$TEXTFILE_DIR/microk8s_backup.prom.$$" "$TEXTFILE_DIR/microk8s_backup.prom"
+}
+trap 'metric 0' ERR
+
+mkdir -p "$BACKUP_DIR"
+cd "$BACKUP_DIR"
+
+# 1. dqlite datastore snapshot (all Kubernetes objects incl. Secrets)
+BASE="dqlite-${HOST}-${TS}"
+{{ microk8s_bin }} dbctl backup -o "${BASE}" >/dev/null
+ARCHIVE="${BASE}.tar.gz"
+[ -f "$ARCHIVE" ] || ARCHIVE="${BASE}"
+[ -s "$ARCHIVE" ] || { echo "dqlite backup produced no archive"; exit 1; }
+FILES=("$ARCHIVE")
+
+{% if backup_include_pki | bool %}
+# 2. Cluster PKI, tokens and component arguments (needed to restore the same cluster identity)
+PKI="pki-${HOST}-${TS}.tar.gz"
+tar -C {{ microk8s_snap_data | quote }} -czf "$PKI" certs credentials args
+FILES+=("$PKI")
+{% endif %}
+
+{% if backup_gpg_recipient | length > 0 %}
+# 3. Encrypt before anything leaves the node
+ENC=()
+for f in "${FILES[@]}"; do
+  gpg --batch --yes --trust-model always -r {{ backup_gpg_recipient | quote }} -o "${f}.gpg" -e "$f"
+  rm -f "$f"
+  ENC+=("${f}.gpg")
+done
+FILES=("${ENC[@]}")
+{% endif %}
+
+sha256sum "${FILES[@]}" > "SHA256SUMS-${HOST}-${TS}"
+FILES+=("SHA256SUMS-${HOST}-${TS}")
+
+{% if backup_remote_enabled | bool %}
+# 4. Off-node copy
+rsync -a --partial{% if backup_remote_bwlimit_kbps | int > 0 %} --bwlimit={{ backup_remote_bwlimit_kbps | int }}{% endif %} \
+  -e "ssh -i {{ backup_remote_ssh_key_path }} -o BatchMode=yes -o StrictHostKeyChecking=yes" \
+  --rsync-path="mkdir -p {{ backup_remote_path | quote }} && rsync" \
+  "${FILES[@]}" {{ backup_remote_user }}@{{ backup_remote_host }}:{{ backup_remote_path | quote }}/
+{% endif %}
+
+# 5. Local retention
+find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'dqlite-*' -o -name 'pki-*' -o -name 'SHA256SUMS-*' \) \
+  -mtime +"$RETENTION_DAYS" -delete
+
+metric 1 "$(stat -c %s "${FILES[0]}")"
+echo "backup ok: ${FILES[*]}"

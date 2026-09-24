@@ -1,0 +1,12 @@
+---
+profile: production
+exclude_paths:
+  - collections/
+  - .cache/
+  - inventories/*/group_vars/all/vault.yml.example
+mock_roles: []
+skip_list:
+  # Jinja templates for Kubernetes / app configs intentionally use long lines
+  - yaml[line-length]
+warn_list:
+  - experimental

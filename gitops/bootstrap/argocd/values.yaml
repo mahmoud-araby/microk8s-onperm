@@ -135,6 +135,12 @@ configs:
       hs.message = obj.status.message or p
       return hs
 
+    # ---- diffing: the Ansible k8s_configmaps role (apply mode) stamps this checksum on pod templates
+    # to roll pods when a ConfigMap changes; Argo CD must not revert it.
+    resource.customizations.ignoreDifferences.all: |
+      jqPathExpressions:
+        - '.spec.template.metadata.annotations."platform.example.com/config-checksum"'
+
     # ---- diffing: Argo Rollouts owns the canary weights of VirtualServices (spec.http[0].route[*].weight)
     # and the rollouts-pod-template-hash labels of DestinationRule subsets. Never revert them.
     resource.customizations.ignoreDifferences.networking.istio.io_VirtualService: |

@@ -1,0 +1,180 @@
+---
+# Idempotent: every write is preceded by a read and only happens when the state differs.
+- name: Seed the configuration model (External Secrets ClusterSecretStore)
+  ansible.builtin.set_fact:
+    _vault_tenv: "{{ _vault_env }} VAULT_TOKEN={{ vault_init_root_token }}"
+    _vault_policies:
+      - name: "{{ vault_init_eso_role }}"
+        hcl: "{{ lookup('ansible.builtin.template', 'policy-external-secrets.hcl.j2') }}"
+    _vault_roles:
+      - name: "{{ vault_init_eso_role }}"
+        sa: "{{ vault_init_eso_service_account }}"
+        ns: "{{ vault_init_eso_namespace }}"
+        policies: "{{ vault_init_eso_role }}"
+        ttl: "{{ vault_init_eso_token_ttl }}"
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Add per-tenant policies and roles (SecretStore vault-tenant of charts/tenant)
+  ansible.builtin.set_fact:
+    _vault_policies: >-
+      {{ _vault_policies + [{'name': 'tenant-' ~ _tenant,
+                             'hcl': lookup('ansible.builtin.template', 'policy-tenant.hcl.j2', template_vars={'tenant': _tenant})}] }}
+    _vault_roles: >-
+      {{ _vault_roles + [{'name': 'tenant-' ~ _tenant,
+                          'sa': (('tenant-' ~ _tenant ~ '-') if _tenant in vault_init_pooled_tenants else '') ~ vault_init_tenant_service_account,
+                          'ns': vault_init_shared_namespace if (_tenant in vault_init_pooled_tenants or _tenant in vault_init_pool_tenants) else ('tenant-' ~ _tenant),
+                          'policies': 'tenant-' ~ _tenant,
+                          'ttl': vault_init_tenant_token_ttl}] }}
+  loop: "{{ vault_init_tenants }}"
+  loop_control:
+    loop_var: _tenant
+
+# --- Secrets engine -------------------------------------------------------------------
+- name: List secrets engines
+  kubernetes.core.k8s_exec: &vault_exec
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ vault_init_namespace }}"
+    pod: "{{ _vault_pods[0] }}"
+    container: "{{ vault_init_container }}"
+    command: "{{ _vault_tenv }} vault secrets list -format=json"
+  register: _vault_engines
+  changed_when: false
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Enable KV v2 at secret/
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault secrets enable -path={{ vault_init_kv_path }} -version=2 kv"
+  when: (vault_init_kv_path ~ '/') not in (_vault_engines.stdout | from_json)
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+# --- Audit ----------------------------------------------------------------------------
+- name: List audit devices
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault audit list -format=json"
+  register: _vault_audit
+  changed_when: false
+  failed_when: false
+  when: vault_init_audit_stdout | bool
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Enable audit log to stdout (shipped by Fluent Bit)
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault audit enable -path=stdout file file_path=stdout"
+  when:
+    - vault_init_audit_stdout | bool
+    - "'stdout/' not in (_vault_audit.stdout | default('{}', true) | from_json)"
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+# --- Kubernetes auth --------------------------------------------------------------------
+- name: List auth methods
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault auth list -format=json"
+  register: _vault_auths
+  changed_when: false
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Enable Kubernetes auth
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault auth enable -path={{ vault_init_k8s_auth_path }} kubernetes"
+  when: (vault_init_k8s_auth_path ~ '/') not in (_vault_auths.stdout | from_json)
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Read Kubernetes auth config
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault read -format=json auth/{{ vault_init_k8s_auth_path }}/config"
+  register: _vault_k8s_config
+  changed_when: false
+  failed_when: false
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Configure Kubernetes auth (in-cluster service account token reviewer)
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: >-
+      {{ _vault_tenv }} vault write auth/{{ vault_init_k8s_auth_path }}/config
+      kubernetes_host={{ vault_init_k8s_host }}
+  when: >-
+    _vault_k8s_config.rc | default(1) != 0
+    or (_vault_k8s_config.stdout | from_json).data.kubernetes_host | default('') != vault_init_k8s_host
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+# --- Policies ---------------------------------------------------------------------------
+- name: Read policies
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault policy read {{ _policy.name }}"
+  loop: "{{ _vault_policies }}"
+  loop_control:
+    loop_var: _policy
+    label: "{{ _policy.name }}"
+  register: _vault_policy_read
+  changed_when: false
+  failed_when: false
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Write policies that differ
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: >-
+      sh -c {{ ('echo ' ~ (_res._policy.hcl | b64encode) ~ ' | base64 -d | '
+                ~ _vault_tenv ~ ' vault policy write ' ~ _res._policy.name ~ ' -') | quote }}
+  loop: "{{ _vault_policy_read.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res._policy.name }}"
+  when: (_res.stdout | default('') | trim) != (_res._policy.hcl | trim)
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+# --- Roles ------------------------------------------------------------------------------
+- name: Read Kubernetes auth roles
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: "{{ _vault_tenv }} vault read -format=json auth/{{ vault_init_k8s_auth_path }}/role/{{ _role.name }}"
+  loop: "{{ _vault_roles }}"
+  loop_control:
+    loop_var: _role
+    label: "{{ _role.name }}"
+  register: _vault_role_read
+  changed_when: false
+  failed_when: false
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Write Kubernetes auth roles that differ
+  kubernetes.core.k8s_exec:
+    <<: *vault_exec
+    command: >-
+      {{ _vault_tenv }} vault write auth/{{ vault_init_k8s_auth_path }}/role/{{ _res._role.name }}
+      bound_service_account_names={{ _res._role.sa }}
+      bound_service_account_namespaces={{ _res._role.ns }}
+      token_policies={{ _res._role.policies }}
+      token_ttl={{ _res._role.ttl }}
+  loop: "{{ _vault_role_read.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res._role.name }} <- {{ _res._role.ns }}/{{ _res._role.sa }}"
+  when: >-
+    _res.rc | default(1) != 0
+    or (_res.stdout | from_json).data.bound_service_account_names != [_res._role.sa]
+    or (_res.stdout | from_json).data.bound_service_account_namespaces != [_res._role.ns]
+    or (_res.stdout | from_json).data.token_policies != [_res._role.policies]
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Vault ready for External Secrets
+  ansible.builtin.debug:
+    msg:
+      - "KV v2 mount: {{ vault_init_kv_path }}/ (ClusterSecretStore vault-backend)"
+      - "Roles: {{ _vault_roles | map(attribute='name') | list }}"
+      - "Seed secrets: secret/platform/<component>, secret/tenants/<tenant>/<service>"
+      - "Consider revoking the root token once an admin auth method (OIDC/Keycloak) is configured."

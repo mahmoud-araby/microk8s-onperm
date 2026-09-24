@@ -1,0 +1,38 @@
+---
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ common_timezone }}"
+
+- name: Stop and disable systemd-timesyncd (replaced by chrony)
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Configure chrony
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony
+
+- name: Enable and start chrony
+  ansible.builtin.systemd_service:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Apply chrony changes before checking synchronisation
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait until the clock is synchronised
+  ansible.builtin.command: chronyc -n tracking
+  register: _common_chrony_tracking
+  changed_when: false
+  until: "_common_chrony_tracking.stdout is search('Leap status *: *Normal')"
+  retries: "{{ common_time_sync_retries }}"
+  delay: 10
+  when: common_require_time_sync | bool

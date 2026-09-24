@@ -1,0 +1,8 @@
+---
+# Frontend (charts/frontend, nginx) - rendered to config.js (window.__CONFIG__).
+config:
+  frontend:
+    authClientId: web
+    telemetry:
+      enabled: true
+      otlpHttpEndpoint: "https://otel.example.com/v1/traces"

@@ -1,0 +1,204 @@
+---
+# ===========================================================================
+# role: common - OS baseline for every MicroK8s node (Ubuntu 22.04 / 24.04)
+# ===========================================================================
+
+# --- Hostname / name resolution --------------------------------------------
+# Set the OS hostname to the inventory hostname (= Kubernetes node name).
+common_set_hostname: true
+# Maintain a managed block in /etc/hosts with every cluster node (MicroK8s join and
+# kubelet rely on nodes resolving each other even when DNS is degraded).
+common_manage_etc_hosts: true
+
+# --- Packages ---------------------------------------------------------------
+common_packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - rsync
+  - chrony
+  - snapd
+  - ufw
+  - open-iscsi          # Longhorn (iSCSI frontend)
+  - nfs-common          # Longhorn RWX volumes / backups to NFS
+  - cryptsetup          # Longhorn encrypted volumes (dm_crypt)
+  - lvm2
+  - xfsprogs
+  - e2fsprogs
+  - multipath-tools
+  - conntrack
+  - ipset
+  - ipvsadm
+  - socat
+  - ethtool
+  - iproute2
+  - dnsutils
+  - net-tools
+  - sysstat
+  - htop
+  - iotop
+  - nvme-cli
+  - smartmontools
+  - bash-completion
+  - python3-apt
+common_extra_packages: []
+# Install linux-modules-extra-<kernel> when iscsi_tcp is missing (cloud / minimal kernels)
+common_install_modules_extra: true
+common_apt_cache_valid_time: 3600
+
+# --- Time -------------------------------------------------------------------
+common_timezone: Etc/UTC
+common_ntp_servers: "{{ ntp_servers | default(['0.ubuntu.pool.ntp.org', '1.ubuntu.pool.ntp.org', '2.ubuntu.pool.ntp.org']) }}"
+common_ntp_pools: "{{ ntp_pools | default([]) }}"
+# Refuse to continue if the clock is not synchronised (dqlite/raft and TLS need sane time)
+common_require_time_sync: true
+common_time_sync_retries: 12
+
+# --- Swap -------------------------------------------------------------------
+common_disable_swap: true
+
+# --- Kernel modules ---------------------------------------------------------
+common_kernel_modules:
+  - overlay
+  - br_netfilter
+  - nf_conntrack
+  - iscsi_tcp          # Longhorn
+  - dm_crypt           # Longhorn encrypted volumes
+  - dm_snapshot
+  - ip_tables          # Istio sidecar / CNI iptables redirection
+  - ip6_tables
+  - iptable_nat
+  - iptable_mangle
+  - iptable_raw
+  - ip6table_nat
+  - ip6table_mangle
+  - xt_REDIRECT
+  - xt_owner
+  - xt_conntrack
+  - xt_mark
+  - xt_connmark
+  - xt_tcpudp
+common_kernel_modules_extra: []
+
+# --- sysctl -----------------------------------------------------------------
+# Tuned for high-connection-count workloads (gateways, brokers, databases) and
+# the kernel settings kubelet expects (so --protect-kernel-defaults can be used).
+common_sysctl_file: /etc/sysctl.d/90-platform.conf
+common_sysctl_base:
+  # Kubernetes networking
+  net.ipv4.ip_forward: 1
+  net.ipv6.conf.all.forwarding: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  # Connection handling
+  net.core.somaxconn: 32768
+  net.core.netdev_max_backlog: 16384
+  net.ipv4.tcp_max_syn_backlog: 65535
+  net.ipv4.tcp_tw_reuse: 1
+  net.ipv4.tcp_fin_timeout: 15
+  net.ipv4.tcp_keepalive_time: 600
+  net.ipv4.tcp_keepalive_intvl: 30
+  net.ipv4.tcp_keepalive_probes: 5
+  net.ipv4.tcp_slow_start_after_idle: 0
+  net.ipv4.tcp_mtu_probing: 1
+  net.ipv4.ip_local_port_range: "10240 65535"
+  # never hand out NodePorts / MicroK8s service ports as ephemeral source ports
+  net.ipv4.ip_local_reserved_ports: "10250-10259,12379,16443,19001,25000,30000-32767"
+  net.core.rmem_max: 16777216
+  net.core.wmem_max: 16777216
+  net.ipv4.tcp_rmem: "4096 87380 16777216"
+  net.ipv4.tcp_wmem: "4096 65536 16777216"
+  # conntrack (kube-proxy iptables mode + Calico)
+  net.netfilter.nf_conntrack_max: 1048576
+  net.netfilter.nf_conntrack_tcp_timeout_established: 86400
+  net.netfilter.nf_conntrack_tcp_timeout_time_wait: 30
+  net.netfilter.nf_conntrack_tcp_timeout_close_wait: 60
+  # ARP/neighbour tables for many pods / services
+  net.ipv4.neigh.default.gc_thresh1: 4096
+  net.ipv4.neigh.default.gc_thresh2: 8192
+  net.ipv4.neigh.default.gc_thresh3: 16384
+  # File handles / inotify (kubelet, log shippers, IDE-like watchers in pods)
+  fs.file-max: 2097152
+  fs.nr_open: 2097152
+  fs.inotify.max_user_watches: 1048576
+  fs.inotify.max_user_instances: 8192
+  fs.inotify.max_queued_events: 32768
+  # Elasticsearch (ECK) requirement, harmless elsewhere
+  vm.max_map_count: 262144
+  vm.swappiness: 1
+  # Values kubelet enforces with --protect-kernel-defaults
+  vm.overcommit_memory: 1
+  vm.panic_on_oom: 0
+  kernel.panic: 10
+  kernel.panic_on_oops: 1
+  kernel.keys.root_maxkeys: 1000000
+  kernel.keys.root_maxbytes: 25000000
+  kernel.pid_max: 4194304
+# Environment-wide additions (inventories/<env>/group_vars/all/os.yml)
+common_sysctl_extra: {}
+# Pool-specific additions (inventories/<env>/group_vars/<pool>.yml)
+common_sysctl_pool: {}
+
+# --- Limits -----------------------------------------------------------------
+common_nofile_limit: 1048576
+common_nproc_limit: 1048576
+common_memlock_unlimited: true
+
+# --- Transparent huge pages (Redis, Kafka, Postgres, Elasticsearch prefer "never")
+common_disable_thp: false
+
+# --- Storage (Longhorn) -----------------------------------------------------
+# Blacklist sd* devices in multipathd (Longhorn KB: multipathd grabs iSCSI devices).
+common_multipath_blacklist_longhorn: true
+# Dedicated Longhorn disk: set `longhorn_disk_device` per host (e.g. /dev/nvme1n1).
+common_longhorn_mount_path: /var/lib/longhorn
+common_longhorn_fstype: ext4
+common_longhorn_mount_opts: defaults,noatime,nodiratime
+# Refuse to format a device that already carries a different filesystem.
+common_longhorn_force_format: false
+
+# --- Firewall (ufw) ---------------------------------------------------------
+common_firewall_enabled: true
+common_firewall_admin_cidrs: "{{ platform_admin_cidrs | default([]) }}"
+common_firewall_cluster_cidrs: "{{ platform_node_cidrs | default([]) }}"
+common_firewall_ssh_port: "22"
+# Ports opened between cluster nodes (MicroK8s / Calico / dqlite / MetalLB / monitoring)
+common_firewall_cluster_ports:
+  - {port: "16443", proto: tcp}        # kube-apiserver
+  - {port: "10250", proto: tcp}        # kubelet
+  - {port: "10256", proto: tcp}        # kube-proxy health (LoadBalancer health checks)
+  - {port: "25000", proto: tcp}        # microk8s cluster-agent (join)
+  - {port: "19001", proto: tcp}        # dqlite
+  - {port: "4789", proto: udp}         # Calico VXLAN
+  - {port: "7946", proto: tcp}         # MetalLB memberlist
+  - {port: "7946", proto: udp}         # MetalLB memberlist
+  - {port: "9100", proto: tcp}         # node-exporter
+  - {port: "30000:32767", proto: tcp}  # NodePorts
+  - {port: "30000:32767", proto: udp}  # NodePorts
+# Ports opened from the admin networks
+common_firewall_admin_ports:
+  - {port: "16443", proto: tcp}
+# Ports opened to the world (edge pool sets 80/443)
+common_firewall_public_ports: []
+# CNI interfaces whose traffic must not be filtered by ufw
+common_firewall_cni_interfaces:
+  - vxlan.calico
+  - cali+
+
+# --- journald ---------------------------------------------------------------
+common_journald_system_max_use: 2G
+common_journald_system_max_file_size: 200M
+common_journald_max_retention: 14day
+common_journald_rate_limit_interval: 30s
+common_journald_rate_limit_burst: 20000
+
+# --- Proxy ------------------------------------------------------------------
+common_proxy_enabled: "{{ proxy_enabled | default(false) }}"
+common_proxy_http: "{{ proxy_http | default('') }}"
+common_proxy_https: "{{ proxy_https | default('') }}"
+common_proxy_no_proxy: >-
+  {{ (proxy_no_proxy_extra | default([]))
+     + (platform_node_cidrs | default([]))
+     + [microk8s_pod_cidr | default('10.1.0.0/16'), microk8s_service_cidr | default('10.152.183.0/24')] }}

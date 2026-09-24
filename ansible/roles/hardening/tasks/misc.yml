@@ -1,0 +1,92 @@
+---
+- name: Remove insecure legacy packages
+  ansible.builtin.apt:
+    name: "{{ hardening_packages_absent }}"
+    state: absent
+    lock_timeout: 300
+
+- name: Mask ctrl-alt-del reboot
+  ansible.builtin.systemd_service:
+    name: ctrl-alt-del.target
+    masked: true
+  when: hardening_disable_ctrl_alt_del | bool
+
+- name: Disable systemd-coredump storage
+  when: hardening_disable_core_dumps | bool
+  block:
+    - name: Create coredump drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/coredump.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Do not store core dumps
+      ansible.builtin.copy:
+        dest: /etc/systemd/coredump.conf.d/90-platform.conf
+        content: |
+          # Managed by Ansible (role: hardening)
+          [Coredump]
+          Storage=none
+          ProcessSizeMax=0
+        owner: root
+        group: root
+        mode: "0644"
+
+- name: Restrict cron directories to root
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /etc/cron.d
+    - /etc/cron.daily
+    - /etc/cron.hourly
+    - /etc/cron.weekly
+    - /etc/cron.monthly
+  when: hardening_cron_restrict | bool
+
+- name: Restrict crontab file to root
+  ansible.builtin.file:
+    path: /etc/crontab
+    owner: root
+    group: root
+    mode: "0600"
+  when: hardening_cron_restrict | bool
+
+- name: Install fail2ban
+  ansible.builtin.apt:
+    name: fail2ban
+    state: present
+    lock_timeout: 300
+  when: hardening_fail2ban_enabled | bool
+
+- name: Configure fail2ban sshd jail
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/90-platform.local
+    content: |
+      # Managed by Ansible (role: hardening)
+      [DEFAULT]
+      ignoreip = {{ hardening_fail2ban_ignore_ip | join(' ') }}
+      bantime = 1h
+      findtime = 10m
+      maxretry = 5
+      backend = systemd
+
+      [sshd]
+      enabled = true
+      port = {{ hardening_ssh_port }}
+    owner: root
+    group: root
+    mode: "0644"
+  when: hardening_fail2ban_enabled | bool
+  notify: Restart fail2ban
+
+- name: Enable fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    enabled: true
+    state: started
+  when: hardening_fail2ban_enabled | bool

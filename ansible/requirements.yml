@@ -1,0 +1,14 @@
+---
+# Install with:  ansible-galaxy collection install -r requirements.yml -p ./collections
+# Controller Python requirements (same venv as ansible-core):
+#   pip install "ansible-core>=2.16,<2.20" "kubernetes>=29.0.0" "PyYAML>=6.0" "jsonpatch>=1.33"
+# Controller binaries: helm >= 3.14 (argocd_bootstrap), kubectl (optional, for humans).
+collections:
+  - name: kubernetes.core
+    version: ">=5.0.0,<7.0.0"
+  - name: community.general
+    version: ">=9.0.0,<12.0.0"
+  - name: ansible.posix
+    version: ">=1.5.4,<3.0.0"
+  - name: community.crypto
+    version: ">=2.20.0,<4.0.0"

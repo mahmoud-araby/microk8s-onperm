@@ -1,0 +1,22 @@
+---
+- name: SSH hardening
+  ansible.builtin.import_tasks: ssh.yml
+  when: hardening_ssh_enabled | bool
+  tags: [hardening, ssh]
+
+- name: auditd
+  ansible.builtin.import_tasks: auditd.yml
+  when: hardening_auditd_enabled | bool
+  tags: [hardening, auditd]
+
+- name: Unattended security updates
+  ansible.builtin.import_tasks: updates.yml
+  tags: [hardening, updates]
+
+- name: Kernel hardening
+  ansible.builtin.import_tasks: kernel.yml
+  tags: [hardening, kernel]
+
+- name: Miscellaneous CIS controls
+  ansible.builtin.import_tasks: misc.yml
+  tags: [hardening, cis]

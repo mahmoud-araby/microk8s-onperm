@@ -1,0 +1,150 @@
+---
+- name: Load tenant definition
+  ansible.builtin.include_vars:
+    file: "{{ _k8s_cm_tenant_file }}"
+    name: _k8s_cm_tenant_doc
+
+- name: Validate tenant definition
+  ansible.builtin.assert:
+    that:
+      - _k8s_cm_tenant_doc.tenant is defined
+      - _k8s_cm_tenant_doc.tenant.name is defined
+      - _k8s_cm_tenant_doc.tenant.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - (_k8s_cm_tenant_doc.tenant.tier | default('dedicated')) in ['dedicated', 'shared']
+    fail_msg: "{{ _k8s_cm_tenant_file }}: tenant.name (DNS-1123) is required, tenant.tier must be dedicated|shared"
+    quiet: true
+
+- name: Resolve tenant context
+  ansible.builtin.set_fact:
+    _k8s_cm_tenant:
+      name: "{{ _t.name }}"
+      tier: "{{ _tier }}"
+      pool: "{{ _pool }}"
+      pooled: "{{ _pooled }}"
+      namespace: "{{ _t.namespace | default(('tenant-' ~ _t.name) if _tier == 'dedicated' else 'shared-services') }}"
+      gitopsDir: "{{ _t.gitopsDir | default(_t.name) }}"
+      realm: "{{ _realm }}"
+      # same rule as charts/tenant "tenant.objectPrefix"
+      objectPrefix: "{{ ('tenant-' ~ _t.name ~ '-') if (_pooled | bool) else '' }}"
+    # Implicit tenant defaults, applied before the tenant file's own `config`
+    _k8s_cm_tenant_implicit:
+      tenantId: "{{ '' if (_pool | bool) else _t.name }}"
+      # Same derivations as charts/tenant + the services ApplicationSet (gitops/tenants/README.md)
+      database:
+        namePrefix: "{{ _t.name | replace('-', '_') }}_"
+      redis:
+        keyPrefix: "{{ _t.name }}:"
+      rabbitmq:
+        vhost: "{{ _t.name }}"
+      kafka:
+        topicPrefix: "{{ _t.name }}."
+      auth:
+        issuer: "{{ '' if (_pool | bool) else (k8s_configmaps_endpoints.keycloak.publicUrl ~ '/realms/' ~ _realm) }}"
+      frontend:
+        apiBaseUrl: "https://{{ (_t.name ~ '.') if _tier == 'dedicated' else '' }}api.{{ platform_domain | default('example.com') }}"
+        authUrl: "{{ k8s_configmaps_endpoints.keycloak.publicUrl }}/realms/{{ _realm }}"
+    _k8s_cm_tenant_layer: >-
+      {{ (_k8s_cm_tenant_doc.config | default({}))
+         | combine((_k8s_cm_tenant_doc.environments | default({})).get(k8s_configmaps_environment_name, {}), recursive=True) }}
+    _k8s_cm_objects: []
+  vars:
+    _t: "{{ _k8s_cm_tenant_doc.tenant }}"
+    _tier: "{{ _k8s_cm_tenant_doc.tenant.tier | default('dedicated') }}"
+    _pool: "{{ _k8s_cm_tenant_doc.tenant.pool | default(false) | bool }}"
+    _pooled: "{{ _tier == 'shared' and not (_k8s_cm_tenant_doc.tenant.pool | default(false) | bool) }}"
+    _realm: "{{ _k8s_cm_tenant_doc.tenant.realm | default(_k8s_cm_tenant_doc.tenant.name) }}"
+
+- name: Pooled tenants must not declare services
+  ansible.builtin.assert:
+    that: (_k8s_cm_tenant_doc.services | default([]) | length) == 0
+    fail_msg: >-
+      {{ _k8s_cm_tenant.name }} is a pooled (tier shared) tenant served by shared-services;
+      remove its services (add them to the pool, tenants/shared.yml, instead).
+    quiet: true
+  when: _k8s_cm_tenant.pooled | bool
+
+- name: Render service configurations
+  ansible.builtin.include_tasks: service.yml
+  loop: "{{ _k8s_cm_tenant_doc.services | default([]) }}"
+  loop_control:
+    loop_var: _k8s_cm_service
+    label: "{{ _k8s_cm_service.name }}-{{ _k8s_cm_service.version | default('') }}"
+  when: >-
+    (k8s_configmaps_only_services | length == 0)
+    or (_k8s_cm_service.name in k8s_configmaps_only_services)
+
+- name: Add the tenant settings ConfigMap
+  ansible.builtin.set_fact:
+    _k8s_cm_objects: "{{ _k8s_cm_objects + [_settings_obj] }}"
+  vars:
+    _settings_cfg: >-
+      {{ k8s_configmaps_global
+         | combine(k8s_configmaps_environment | default({}), recursive=True)
+         | combine(_k8s_cm_tenant_implicit, recursive=True)
+         | combine(_k8s_cm_tenant_layer, recursive=True) }}
+    _settings_data: >-
+      {{ {'settings.json': ({'tenant': {'name': _k8s_cm_tenant.name, 'tier': _k8s_cm_tenant.tier, 'realm': _k8s_cm_tenant.realm},
+                             'environment': _settings_cfg.environment, 'features': _settings_cfg.features,
+                             'auth': _settings_cfg.auth, 'http': {'corsAllowedOrigins': _settings_cfg.http.corsAllowedOrigins},
+                             'redis': {'db': _settings_cfg.redis.db, 'keyPrefix': _settings_cfg.redis.keyPrefix},
+                             'rabbitmq': {'vhost': _settings_cfg.rabbitmq.vhost}, 'kafka': {'topicPrefix': _settings_cfg.kafka.topicPrefix},
+                             'frontend': _settings_cfg.frontend} | to_nice_json(indent=2))}
+         | combine({'features': _settings_cfg.features} | flatten_env(prefix='TENANT')) }}
+    _settings_obj:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ _k8s_cm_tenant.objectPrefix }}{{ k8s_configmaps_tenant_settings_name }}"
+        namespace: "{{ _k8s_cm_tenant.namespace }}"
+        labels: >-
+          {{ k8s_configmaps_labels_common | combine({
+               'app.kubernetes.io/name': k8s_configmaps_tenant_settings_name,
+               'app.kubernetes.io/part-of': 'platform',
+               'platform.example.com/tenant': _k8s_cm_tenant.name}) }}
+        annotations:
+          platform.example.com/config-checksum: "{{ _settings_data | config_checksum }}"
+          platform.example.com/config-layers: global,environment,tenant
+          platform.example.com/environment: "{{ k8s_configmaps_environment_name }}"
+          argocd.argoproj.io/sync-wave: "{{ k8s_configmaps_sync_wave }}"
+      data: "{{ _settings_data }}"
+  when: k8s_configmaps_tenant_settings_enabled | bool
+
+# One per namespace: dedicated tenants and the pool. Pooled tenants share the pool's copy.
+- name: Add the platform endpoints ConfigMap
+  ansible.builtin.set_fact:
+    _k8s_cm_objects: "{{ _k8s_cm_objects + [_endpoints_obj] }}"
+  vars:
+    _endpoints_data: "{{ k8s_configmaps_endpoints | flatten_env(prefix=k8s_configmaps_platform_endpoints_prefix) }}"
+    _endpoints_obj:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ k8s_configmaps_platform_endpoints_name }}"
+        namespace: "{{ _k8s_cm_tenant.namespace }}"
+        labels: >-
+          {{ k8s_configmaps_labels_common | combine({
+               'app.kubernetes.io/name': k8s_configmaps_platform_endpoints_name,
+               'app.kubernetes.io/part-of': 'platform',
+               'platform.example.com/tenant': _k8s_cm_tenant.name}) }}
+        annotations:
+          platform.example.com/config-checksum: "{{ _endpoints_data | config_checksum }}"
+          platform.example.com/environment: "{{ k8s_configmaps_environment_name }}"
+          argocd.argoproj.io/sync-wave: "{{ k8s_configmaps_sync_wave }}"
+      data: "{{ _endpoints_data }}"
+  when:
+    - k8s_configmaps_platform_endpoints_enabled | bool
+    - not (_k8s_cm_tenant.pooled | bool)
+
+- name: Apply ConfigMaps to the cluster
+  ansible.builtin.include_tasks: apply.yml
+  when: k8s_configmaps_mode == 'apply'
+
+- name: Write ConfigMaps into the GitOps tree
+  ansible.builtin.include_tasks: gitops.yml
+  when: k8s_configmaps_mode == 'gitops'
+
+- name: Record summary
+  ansible.builtin.set_fact:
+    _k8s_cm_summary: >-
+      {{ _k8s_cm_summary + [_k8s_cm_tenant.name ~ ' (' ~ _k8s_cm_tenant.namespace ~ '): '
+         ~ (_k8s_cm_objects | map(attribute='metadata.name') | join(', '))] }}

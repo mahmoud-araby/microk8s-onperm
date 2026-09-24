@@ -1,0 +1,19 @@
+---
+# Service catalogue defaults for "catalog" (Python / FastAPI) - gitops/apps/catalog (language: python).
+# Layer 4a of "ConfigMap Ansible": applied to every tenant that runs catalog, before the tenant
+# file's services[].config.
+config:
+  database:
+    enabled: true
+    name: catalog
+    poolMax: 40
+  redis:
+    enabled: true
+  kafka:
+    enabled: true
+    topics:
+      inventory: inventory-events
+  custom:
+    catalog:
+      cacheTtlSeconds: 300
+      pageSizeMax: 200

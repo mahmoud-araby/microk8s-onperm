@@ -1,0 +1,44 @@
+---
+- name: Configure system-wide proxy environment
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: "^{{ item.key }}="
+    line: '{{ item.key }}="{{ item.value }}"'
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {key: http_proxy, value: "{{ common_proxy_http }}"}
+    - {key: HTTP_PROXY, value: "{{ common_proxy_http }}"}
+    - {key: https_proxy, value: "{{ common_proxy_https }}"}
+    - {key: HTTPS_PROXY, value: "{{ common_proxy_https }}"}
+    - {key: no_proxy, value: "{{ common_proxy_no_proxy | join(',') }}"}
+    - {key: NO_PROXY, value: "{{ common_proxy_no_proxy | join(',') }}"}
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Configure apt proxy
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/95platform-proxy
+    content: |
+      // Managed by Ansible (role: common)
+      Acquire::http::Proxy "{{ common_proxy_http }}";
+      Acquire::https::Proxy "{{ common_proxy_https }}";
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read current snapd proxy settings
+  ansible.builtin.command: snap get -d system proxy
+  register: _common_snap_proxy
+  changed_when: false
+  failed_when: false
+
+- name: Configure snapd proxy
+  ansible.builtin.command: >-
+    snap set system proxy.http={{ common_proxy_http | quote }} proxy.https={{ common_proxy_https | quote }}
+  when: >-
+    _common_snap_proxy.rc != 0
+    or ((_common_snap_proxy.stdout | from_json).get('proxy', {}).get('http') != common_proxy_http)
+    or ((_common_snap_proxy.stdout | from_json).get('proxy', {}).get('https') != common_proxy_https)
+  changed_when: true

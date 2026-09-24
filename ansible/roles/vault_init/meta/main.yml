@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: vault_init
+  namespace: platform
+  author: Platform Engineering
+  description: Optional one-time HashiCorp Vault init/unseal (ansible-vault protected keys), KV v2, Kubernetes auth and External Secrets policies
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+  galaxy_tags: [vault, secrets, kubernetes, externalsecrets]
+dependencies: []

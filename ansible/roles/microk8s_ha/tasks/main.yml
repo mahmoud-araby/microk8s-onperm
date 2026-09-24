@@ -1,0 +1,37 @@
+---
+- name: Validate control-plane topology
+  ansible.builtin.assert:
+    that:
+      - groups['microk8s_masters'] | length >= microk8s_ha_min_masters
+      - groups['microk8s_masters'] | length is odd
+    fail_msg: >-
+      MicroK8s HA needs at least {{ microk8s_ha_min_masters }} control-plane nodes and an odd
+      number of dqlite voters (found {{ groups['microk8s_masters'] | length }}).
+    quiet: true
+  run_once: true
+  tags: [always]
+
+- name: Join the node to the cluster
+  ansible.builtin.include_tasks:
+    file: join.yml
+    apply:
+      tags: [microk8s_ha, join]
+  when: inventory_hostname != microk8s_ha_first_master
+  tags: [microk8s_ha, join]
+
+- name: Keepalived API VIP on control-plane nodes
+  ansible.builtin.include_tasks:
+    file: keepalived.yml
+    apply:
+      tags: [microk8s_ha, keepalived]
+  when:
+    - microk8s_role == 'master'
+    - microk8s_api_vip_enabled | bool
+  tags: [microk8s_ha, keepalived]
+
+- name: Node labels and taints
+  ansible.builtin.include_tasks:
+    file: labels.yml
+    apply:
+      tags: [microk8s_ha, labels]
+  tags: [microk8s_ha, labels]

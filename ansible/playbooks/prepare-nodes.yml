@@ -1,0 +1,14 @@
+---
+# OS baseline (packages, chrony, swap, kernel modules, sysctl, limits, Longhorn prerequisites,
+# firewall, journald) + CIS-inspired hardening on every cluster node.
+- name: Prepare cluster nodes
+  hosts: microk8s_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: false
+  max_fail_percentage: 10
+  roles:
+    - role: common
+      tags: [common]
+    - role: hardening
+      tags: [hardening]

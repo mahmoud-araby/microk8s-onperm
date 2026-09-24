@@ -1,0 +1,30 @@
+---
+# ---------------------------------------------------------------------------
+# Operating-system baseline - PRODUCTION (roles: common, hardening)
+# Supported OS: Ubuntu Server 22.04 LTS / 24.04 LTS.
+# ---------------------------------------------------------------------------
+
+common_timezone: Etc/UTC
+
+# Extra sysctls for every node (merged over the role defaults; pools add
+# common_sysctl_pool in their own group_vars file).
+common_sysctl_extra:
+  net.netfilter.nf_conntrack_max: 1048576
+  net.core.somaxconn: 65535
+
+# File descriptor / process limits
+common_nofile_limit: 1048576
+common_nproc_limit: 1048576
+
+# journald retention on nodes (logs are shipped to Elasticsearch by Fluent Bit)
+common_journald_system_max_use: 2G
+common_journald_max_retention: 14day
+
+# Hardening
+hardening_ssh_allow_groups: []          # e.g. [ssh-users]; empty = no AllowGroups line
+hardening_ssh_permit_root_login: "no"
+hardening_unattended_upgrades_enabled: true
+hardening_unattended_upgrades_reboot: false   # reboots are coordinated (drain first), never automatic
+hardening_auditd_enabled: true
+hardening_login_banner: |
+  Authorized access only. All activity on this system is logged and monitored.

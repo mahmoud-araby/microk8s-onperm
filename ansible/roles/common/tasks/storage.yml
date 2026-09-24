@@ -1,0 +1,48 @@
+---
+- name: Blacklist sd* devices in multipathd (Longhorn requirement)
+  ansible.builtin.blockinfile:
+    path: /etc/multipath.conf
+    create: true
+    marker: "# {mark} ANSIBLE MANAGED - longhorn"
+    block: |
+      blacklist {
+          devnode "^sd[a-z0-9]+"
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  when: common_multipath_blacklist_longhorn | bool
+  notify: Restart multipathd
+
+- name: Prepare dedicated Longhorn disk
+  when: longhorn_disk_device is defined and (longhorn_disk_device | length) > 0
+  block:
+    - name: Check that the Longhorn device exists
+      ansible.builtin.stat:
+        path: "{{ longhorn_disk_device }}"
+      register: _common_longhorn_dev
+
+    - name: Fail when the Longhorn device is missing
+      ansible.builtin.assert:
+        that: _common_longhorn_dev.stat.exists
+        fail_msg: "longhorn_disk_device {{ longhorn_disk_device }} does not exist on {{ inventory_hostname }}"
+        quiet: true
+
+    - name: Create filesystem on the Longhorn device (never reformats an existing one)
+      community.general.filesystem:
+        dev: "{{ longhorn_disk_device }}"
+        fstype: "{{ common_longhorn_fstype }}"
+        force: "{{ common_longhorn_force_format | bool }}"
+
+    - name: Read the filesystem UUID
+      ansible.builtin.command: blkid -s UUID -o value {{ longhorn_disk_device }}
+      register: _common_longhorn_uuid
+      changed_when: false
+
+    - name: Mount the Longhorn disk
+      ansible.posix.mount:
+        path: "{{ common_longhorn_mount_path }}"
+        src: "UUID={{ _common_longhorn_uuid.stdout }}"
+        fstype: "{{ common_longhorn_fstype }}"
+        opts: "{{ common_longhorn_mount_opts }}"
+        state: mounted

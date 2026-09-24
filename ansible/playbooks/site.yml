@@ -1,0 +1,22 @@
+---
+# Full build of a MicroK8s HA cluster, from bare OS to Argo CD owning the platform.
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/site.yml
+# Vault initialisation (vault-init.yml) and ConfigMap rendering (configmaps.yml) are run
+# separately, after Argo CD has synced the platform.
+- name: Preflight checks
+  ansible.builtin.import_playbook: preflight.yml
+
+- name: OS baseline and hardening
+  ansible.builtin.import_playbook: prepare-nodes.yml
+
+- name: MicroK8s install and HA cluster formation
+  ansible.builtin.import_playbook: cluster.yml
+
+- name: MicroK8s addons and kubeconfig
+  ansible.builtin.import_playbook: addons.yml
+
+- name: Argo CD bootstrap (GitOps hand-over)
+  ansible.builtin.import_playbook: bootstrap-gitops.yml
+
+- name: dqlite backups
+  ansible.builtin.import_playbook: backup.yml

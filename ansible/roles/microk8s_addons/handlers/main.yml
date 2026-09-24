@@ -1,0 +1,3 @@
+---
+# No handlers: addon changes are applied synchronously and followed by a readiness wait.
+[]

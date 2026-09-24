@@ -1,0 +1,62 @@
+---
+# ===========================================================================
+# role: argocd_bootstrap - install Argo CD (HA) with Helm and hand over to GitOps
+# Runs on the controller (hosts: controller) against kubeconfig_path.
+# Controller needs: helm >= 3.14, python `kubernetes` library.
+# ===========================================================================
+
+kubeconfig_path: "{{ inventory_dir }}/.kubeconfig"
+
+argocd_namespace: argocd
+argocd_release_name: argocd              # resources become argocd-server, argocd-repo-server, ...
+argocd_chart_ref: argo-cd
+argocd_chart_repo_url: https://argoproj.github.io/argo-helm
+argocd_chart_version: "10.9.2"            # PINNED - see inventories/<env>/group_vars/all/argocd.yml
+argocd_helm_timeout: 15m
+argocd_helm_binary: helm            # name on PATH or absolute path
+
+# HA knobs (production). Staging sets argocd_ha_enabled: false.
+argocd_ha_enabled: true
+argocd_controller_replicas: 3
+argocd_server_min_replicas: 3
+argocd_server_max_replicas: 6
+argocd_repo_server_min_replicas: 3
+argocd_repo_server_max_replicas: 8
+argocd_applicationset_replicas: 2
+argocd_node_selector:
+  workload-tier: platform
+argocd_tolerations: []
+
+argocd_hostname: "argocd.{{ platform_ops_domain | default('ops.example.local') }}"
+argocd_log_format: json
+argocd_log_level: info
+
+# Values merged last over the rendered values.yaml.j2 (free-form escape hatch)
+argocd_values_overrides: {}
+
+# --- SSO (Keycloak OIDC) ------------------------------------------------------------
+argocd_oidc_enabled: false
+argocd_oidc_issuer: ""
+argocd_oidc_client_id: argocd
+argocd_oidc_client_secret: "{{ vault_argocd_oidc_client_secret | default('') }}"
+argocd_rbac_admin_groups: [platform-admins]
+argocd_rbac_readonly_groups: []
+argocd_admin_password_bcrypt: "{{ vault_argocd_admin_password_bcrypt | default('') }}"
+
+# --- Git repository credentials -----------------------------------------------------
+argocd_repo_url: "{{ platform_git_repo_url | default('https://github.com/mahmoud-araby/microk8s-onperm.git') }}"
+# https | ssh | none. Default: https when a password is in vault.yml, ssh when a key is, else none
+argocd_repo_auth_method: >-
+  {{ 'https' if (vault_argocd_repo_password | default('') | length > 0)
+     else ('ssh' if (vault_argocd_repo_ssh_private_key | default('') | length > 0) else 'none') }}
+argocd_repo_username: "{{ vault_argocd_repo_username | default('git') }}"
+argocd_repo_password: "{{ vault_argocd_repo_password | default('') }}"
+argocd_repo_ssh_private_key: "{{ vault_argocd_repo_ssh_private_key | default('') }}"
+argocd_repo_ssh_url: git@github.com:mahmoud-araby/microk8s-onperm.git
+
+# --- Root application (app-of-apps) -------------------------------------------------
+# Relative to the playbooks directory: ansible/playbooks/../../gitops/bootstrap/root-app.yaml
+argocd_root_app_path: "{{ playbook_dir }}/../../gitops/bootstrap/root-app.yaml"
+argocd_apply_root_app: true
+# Additional bootstrap manifests applied before the root app (e.g. AppProjects)
+argocd_extra_bootstrap_manifests: []

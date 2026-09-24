@@ -1,0 +1,33 @@
+---
+# Tenant "globex" - dedicated tier, canary ring (namespace tenant-globex, realm globex).
+# Keep in sync with gitops/tenants/globex/.
+tenant:
+  name: globex
+  tier: dedicated
+
+config:
+  redis:
+    db: 2
+  http:
+    corsAllowedOrigins:
+      - https://globex.app.example.com
+  features:
+    newCheckout: true
+    facetedSearch: true
+
+services:
+  - name: orders
+    version: v2
+    language: dotnet
+  - name: payments
+    version: v1
+    language: java
+  - name: catalog
+    version: v2
+    language: python
+    # early-access major: more verbose logging + full tracing while it is being evaluated
+    config:
+      logging:
+        level: debug
+      otel:
+        tracesSamplerRatio: 1.0

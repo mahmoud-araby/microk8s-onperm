@@ -1,0 +1,30 @@
+---
+# Edge pool: Kong (public VIP), Istio ingress / internal / egress gateways, MetalLB speakers.
+# 3 nodes, 8 vCPU / 16 GiB, 2x 10/25 GbE. Tainted: only gateways (with toleration) run here.
+workload_tier: edge
+microk8s_node_labels:
+  workload-tier: edge
+  node-role.kubernetes.io/edge: ""
+microk8s_node_taints:
+  - key: workload-tier
+    value: edge
+    effect: NoSchedule
+microk8s_kubelet_args_pool:
+  --max-pods: "110"
+
+# Gateways terminate hundreds of thousands of connections.
+common_sysctl_pool:
+  net.core.somaxconn: 65535
+  net.ipv4.tcp_max_syn_backlog: 262144
+  net.core.netdev_max_backlog: 65536
+  net.netfilter.nf_conntrack_max: 2097152
+  net.ipv4.tcp_max_tw_buckets: 2000000
+
+# Public traffic reaches MetalLB VIPs on these ports (DNAT -> FORWARD chain).
+common_firewall_public_ports:
+  - {port: "80", proto: tcp}
+  - {port: "443", proto: tcp}
+
+preflight_min_vcpus: 8
+preflight_min_memory_gb: 16
+preflight_min_root_disk_gb: 100

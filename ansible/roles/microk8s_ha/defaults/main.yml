@@ -1,0 +1,42 @@
+---
+# ===========================================================================
+# role: microk8s_ha - form the HA cluster, apply node labels/taints, API VIP
+# ===========================================================================
+
+microk8s_bin: /snap/bin/microk8s
+microk8s_node_name: "{{ inventory_hostname | lower }}"
+microk8s_role: "{{ 'master' if inventory_hostname in groups.get('microk8s_masters', []) else 'worker' }}"
+
+# The node every other node joins through (and where kubectl commands are delegated).
+microk8s_ha_first_master: "{{ groups['microk8s_masters'][0] }}"
+microk8s_ha_first_master_address: >-
+  {{ hostvars[microk8s_ha_first_master]['microk8s_advertise_address']
+     | default(hostvars[microk8s_ha_first_master]['ansible_host']) }}
+
+# One-time join token lifetime (seconds). A fresh random token is minted per joining node.
+microk8s_ha_join_token_ttl: 900
+microk8s_ha_join_timeout: 900
+# How long to wait for a joined node to become Ready (retries x 10s)
+microk8s_ha_node_ready_retries: 60
+# Minimum control-plane nodes for dqlite HA
+microk8s_ha_min_masters: 3
+
+# --- Node labels / taints (from inventories/<env>/group_vars/<pool>.yml) -----------
+microk8s_node_labels: {}
+# Per-host additions (host_vars)
+microk8s_node_labels_extra: {}
+microk8s_node_labels_absent: []
+# [{key: workload-tier, value: data, effect: NoSchedule}]
+microk8s_node_taints: []
+# [{key: foo, effect: NoSchedule}]
+microk8s_node_taints_absent: []
+# `topology_zone` host var -> this label
+microk8s_ha_zone_label: topology.kubernetes.io/zone
+
+# --- API VIP (keepalived on the control plane) ------------------------------------
+microk8s_api_vip_enabled: false
+microk8s_api_vip: ""
+microk8s_api_vip_prefix: 32
+microk8s_api_vip_interface: "{{ ansible_facts['default_ipv4']['interface'] | default('eth0') }}"
+microk8s_api_vip_router_id: 51
+microk8s_ha_manage_firewall: "{{ common_firewall_enabled | default(false) }}"

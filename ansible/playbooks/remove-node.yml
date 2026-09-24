@@ -1,0 +1,91 @@
+---
+# Remove a node safely:
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/remove-node.yml -e node=prd-apps-12
+# Options: -e remove_node_unreachable=true (node is dead: skip leave, force remove)
+#          -e remove_node_purge=true       (snap remove --purge microk8s on the node)
+#          -e remove_node_force_master=true (allow going below 3 control-plane nodes)
+# Afterwards delete the host from the inventory.
+- name: Remove a node from the cluster
+  hosts: microk8s_masters[0]
+  become: true
+  gather_facts: false
+  vars:
+    microk8s_bin: /snap/bin/microk8s
+    remove_node_unreachable: false
+    remove_node_purge: false
+    remove_node_force_master: false
+    remove_node_longhorn_evict: true
+    _node_name: "{{ node | default('') | lower }}"
+  tasks:
+    - name: Validate the request
+      ansible.builtin.assert:
+        that:
+          - node is defined
+          - node in groups['microk8s_cluster']
+          - node != groups['microk8s_masters'][0]
+          - >-
+            node not in groups['microk8s_masters']
+            or (groups['microk8s_masters'] | length - 1) >= 3
+            or remove_node_force_master | bool
+        fail_msg: >-
+          Pass -e node=<inventory host>. The first master cannot be removed (move it last in the group
+          first) and the control plane must keep >= 3 dqlite voters.
+        quiet: true
+
+    - name: Request Longhorn replica eviction from the node
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl -n longhorn-system patch nodes.longhorn.io {{ _node_name }} --type merge
+        -p '{"spec":{"allowScheduling":false,"evictionRequested":true}}'
+      register: _rm_lh_patch
+      changed_when: _rm_lh_patch.rc == 0 and 'no change' not in _rm_lh_patch.stdout
+      failed_when: false
+      when: remove_node_longhorn_evict | bool and not (remove_node_unreachable | bool)
+
+    - name: Wait until Longhorn has moved all replicas away
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl -n longhorn-system get replicas.longhorn.io
+        -l longhornnode={{ _node_name }} -o name
+      register: _rm_lh_replicas
+      changed_when: false
+      failed_when: false
+      until: _rm_lh_replicas.rc != 0 or (_rm_lh_replicas.stdout | trim | length) == 0
+      retries: 180
+      delay: 20
+      when:
+        - remove_node_longhorn_evict | bool
+        - not (remove_node_unreachable | bool)
+        - _rm_lh_patch.rc | default(1) == 0
+
+    - name: Drain the node
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} kubectl drain {{ _node_name }} --ignore-daemonsets --delete-emptydir-data
+        --timeout=900s {{ '--disable-eviction --force' if remove_node_unreachable | bool else '' }}
+      changed_when: true
+
+    - name: Leave the cluster (run on the node)
+      ansible.builtin.command: "{{ microk8s_bin }} leave"
+      delegate_to: "{{ node }}"
+      when: not (remove_node_unreachable | bool)
+      changed_when: true
+
+    - name: Remove the node from the cluster (and from dqlite for control-plane nodes)
+      ansible.builtin.command: >-
+        {{ microk8s_bin }} remove-node {{ _node_name }}{{ ' --force' if remove_node_unreachable | bool else '' }}
+      changed_when: true
+
+    - name: Purge MicroK8s from the node
+      ansible.builtin.command: snap remove --purge microk8s
+      delegate_to: "{{ node }}"
+      changed_when: true
+      when:
+        - remove_node_purge | bool
+        - not (remove_node_unreachable | bool)
+
+    - name: Show remaining nodes
+      ansible.builtin.command: "{{ microk8s_bin }} kubectl get nodes -o wide"
+      register: _rm_nodes
+      changed_when: false
+
+    - name: Remaining nodes
+      ansible.builtin.debug:
+        var: _rm_nodes.stdout_lines

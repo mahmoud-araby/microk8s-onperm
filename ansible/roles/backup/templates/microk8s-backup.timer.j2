@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Schedule MicroK8s dqlite + PKI backup
+
+[Timer]
+OnCalendar={{ backup_on_calendar }}
+RandomizedDelaySec={{ backup_randomized_delay }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

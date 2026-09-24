@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=MicroK8s dqlite + PKI backup
+Wants=network-online.target
+After=network-online.target snap.microk8s.daemon-k8s-dqlite.service
+
+[Service]
+Type=oneshot
+ExecStart={{ backup_script_path }}
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+TimeoutStartSec=1h

@@ -1,0 +1,19 @@
+---
+- name: Reload sshd
+  ansible.builtin.systemd_service:
+    name: ssh
+    state: reloaded
+
+- name: Restart auditd
+  # auditd refuses `systemctl restart` (RefuseManualStop); use its own service script
+  ansible.builtin.command: service auditd restart
+  changed_when: true
+
+- name: Load audit rules
+  ansible.builtin.command: augenrules --load
+  changed_when: true
+
+- name: Restart fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    state: restarted

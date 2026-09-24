@@ -1,0 +1,77 @@
+---
+- name: Install and schedule backups
+  when: backup_enabled | bool
+  tags: [backup]
+  block:
+    - name: Install backup prerequisites
+      ansible.builtin.apt:
+        name: [rsync, gnupg]
+        state: present
+        lock_timeout: 300
+
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Create node-exporter textfile directory
+      ansible.builtin.file:
+        path: "{{ backup_textfile_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: backup_textfile_dir | length > 0
+
+    - name: Off-node copy prerequisites
+      ansible.builtin.import_tasks: remote.yml
+      when: backup_remote_enabled | bool
+
+    - name: GPG encryption key
+      ansible.builtin.import_tasks: gpg.yml
+      when: backup_gpg_recipient | length > 0
+
+    - name: Install backup script
+      ansible.builtin.template:
+        src: microk8s-backup.sh.j2
+        dest: "{{ backup_script_path }}"
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Install systemd service and timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - microk8s-backup.service
+        - microk8s-backup.timer
+      notify: Restart backup timer
+
+    - name: Enable backup timer
+      ansible.builtin.systemd_service:
+        name: microk8s-backup.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+- name: Run a backup now
+  ansible.builtin.systemd_service:
+    name: microk8s-backup.service
+    state: started
+  when:
+    - backup_enabled | bool
+    - backup_run_now | bool
+  changed_when: true
+  tags: [backup, backup_now]
+
+- name: Fetch newest archives to the controller
+  ansible.builtin.import_tasks: fetch.yml
+  when: backup_fetch | bool
+  tags: [backup, backup_fetch]

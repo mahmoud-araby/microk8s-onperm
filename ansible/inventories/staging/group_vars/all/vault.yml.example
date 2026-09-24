@@ -1,0 +1,52 @@
+---
+# ===========================================================================
+# EXAMPLE ONLY - NEVER COMMIT REAL SECRETS IN CLEAR TEXT.
+#
+#   cp vault.yml.example vault.yml
+#   $EDITOR vault.yml                       # fill in real values
+#   ansible-vault encrypt --vault-id staging@prompt vault.yml
+#   ansible-vault edit    --vault-id staging@prompt vault.yml
+#
+# Only the ENCRYPTED vault.yml may be committed. Every value below is a placeholder.
+# Variables are prefixed with `vault_` and referenced from the plain-text group_vars /
+# role defaults so it is always obvious where a secret comes from.
+# ===========================================================================
+
+# --- Argo CD ----------------------------------------------------------------
+# Git credentials for https://github.com/mahmoud-araby/microk8s-onperm.git
+# (GitHub fine-grained PAT with read-only "Contents" permission, or a deploy key).
+vault_argocd_repo_username: git
+vault_argocd_repo_password: "CHANGEME-github-pat"
+# Alternative: SSH deploy key (set argocd_repo_auth_method: ssh)
+vault_argocd_repo_ssh_private_key: |
+  -----BEGIN OPENSSH PRIVATE KEY-----
+  CHANGEME
+  -----END OPENSSH PRIVATE KEY-----
+# Keycloak OIDC client secret for the "argocd" client in realm "platform"
+vault_argocd_oidc_client_secret: "CHANGEME"
+# Optional bcrypt hash for the local admin account (htpasswd -nbBC 10 "" 'pw' | tr -d ':\n')
+# Leave empty to keep the chart-generated argocd-initial-admin-secret (rotate it!).
+vault_argocd_admin_password_bcrypt: ""
+
+# --- Harbor -----------------------------------------------------------------
+# Robot account used by containerd if the Harbor projects are private
+vault_registry_username: "robot$platform-pull"
+vault_registry_password: "CHANGEME"
+
+# --- HashiCorp Vault (role: vault_init) -------------------------------------
+# Filled in AFTER the first `playbooks/vault-init.yml` run from the encrypted
+# vault-init-<env>.yml output file it produces (5 shares, threshold 3).
+vault_unseal_keys:
+  - "CHANGEME-unseal-key-1"
+  - "CHANGEME-unseal-key-2"
+  - "CHANGEME-unseal-key-3"
+  - "CHANGEME-unseal-key-4"
+  - "CHANGEME-unseal-key-5"
+vault_root_token: "CHANGEME-root-token"
+
+# --- Backups ----------------------------------------------------------------
+# Private key authorised on backup01 for user microk8s-backup (rsync target)
+vault_backup_ssh_private_key: |
+  -----BEGIN OPENSSH PRIVATE KEY-----
+  CHANGEME
+  -----END OPENSSH PRIVATE KEY-----

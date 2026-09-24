@@ -1,0 +1,20 @@
+---
+- name: Install MicroK8s snap (pinned channel)
+  ansible.builtin.import_tasks: install.yml
+  tags: [microk8s, microk8s_install]
+
+- name: Configure MicroK8s (kubelet, containerd, registry mirrors, API SANs)
+  ansible.builtin.import_tasks: config.yml
+  tags: [microk8s, microk8s_config]
+
+- name: MicroK8s users and aliases
+  ansible.builtin.import_tasks: users.yml
+  tags: [microk8s, microk8s_users]
+
+- name: Apply pending MicroK8s restarts before readiness checks
+  ansible.builtin.meta: flush_handlers
+  tags: [microk8s]
+
+- name: Wait for MicroK8s to be ready
+  ansible.builtin.import_tasks: ready.yml
+  tags: [microk8s, microk8s_ready]

@@ -1,0 +1,29 @@
+---
+- name: Install baseline packages
+  ansible.builtin.apt:
+    name: "{{ common_packages + common_extra_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: "{{ common_apt_cache_valid_time }}"
+    lock_timeout: 300
+
+- name: Check whether the iscsi_tcp module is available for the running kernel
+  ansible.builtin.command: modinfo iscsi_tcp
+  register: _common_modinfo_iscsi
+  changed_when: false
+  failed_when: false
+
+- name: Install linux-modules-extra for the running kernel (iscsi_tcp)
+  ansible.builtin.apt:
+    name: "linux-modules-extra-{{ ansible_facts['kernel'] }}"
+    state: present
+    lock_timeout: 300
+  when:
+    - common_install_modules_extra | bool
+    - _common_modinfo_iscsi.rc != 0
+
+- name: Enable and start iSCSI daemon (Longhorn)
+  ansible.builtin.systemd_service:
+    name: iscsid
+    enabled: true
+    state: started

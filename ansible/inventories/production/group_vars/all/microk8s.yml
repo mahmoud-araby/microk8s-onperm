@@ -1,0 +1,62 @@
+---
+# ---------------------------------------------------------------------------
+# MicroK8s - PRODUCTION
+# ---------------------------------------------------------------------------
+
+# PINNED snap channel. Never use "latest". To upgrade: bump this value by ONE minor
+# (e.g. 1.32/stable -> 1.33/stable) and run playbooks/upgrade.yml (rolling, serial: 1).
+# The microk8s role refuses to change channels outside of the upgrade playbook.
+microk8s_channel: 1.32/stable
+
+# Stop snapd from auto-refreshing MicroK8s (refreshes restart kubelite on every node).
+microk8s_hold_refresh: true
+
+# Pod / Service CIDRs. Applied through a MicroK8s launch configuration, which is only
+# honoured on the FIRST install of a node - decide before building the cluster.
+# The MicroK8s default service CIDR is a /24 (254 ClusterIPs) which is too small for a
+# multi-tenant platform running many service versions side by side.
+microk8s_launch_config_enabled: true
+microk8s_pod_cidr: 10.1.0.0/16
+microk8s_service_cidr: 10.152.0.0/16
+
+# Stable API endpoint for humans/CI (kubeconfig). Workers do not need it (MicroK8s
+# workers load-balance to all control-plane nodes through the local apiserver-proxy).
+# keepalived floats the VIP across the masters; the DNS name and VIP are added to the
+# API server certificate SANs.
+microk8s_api_vip_enabled: true
+microk8s_api_vip: 10.10.10.10
+microk8s_api_vip_interface: ens192
+microk8s_api_vip_router_id: 51
+microk8s_api_dns_name: "k8s-api.{{ platform_ops_domain }}"
+microk8s_api_endpoint: "https://{{ microk8s_api_dns_name }}:16443"
+
+# Control-plane nodes are dedicated (tainted) in production.
+microk8s_dedicated_masters: true
+
+# Kubelet tuning (merged over role defaults; per-pool overrides use microk8s_kubelet_args_pool).
+microk8s_kubelet_args:
+  --max-pods: "250"
+  --kube-reserved: cpu=500m,memory=1Gi,ephemeral-storage=2Gi
+  --system-reserved: cpu=500m,memory=1Gi,ephemeral-storage=2Gi
+  --eviction-hard: '"memory.available<500Mi,nodefs.available<10%,nodefs.inodesFree<5%,imagefs.available<15%"'
+  --eviction-soft: '"memory.available<1Gi,nodefs.available<15%,imagefs.available<20%"'
+  --eviction-soft-grace-period: '"memory.available=1m30s,nodefs.available=2m,imagefs.available=2m"'
+  --eviction-max-pod-grace-period: "60"
+  --serialize-image-pulls: "false"
+  --image-gc-high-threshold: "80"
+  --image-gc-low-threshold: "70"
+  --container-log-max-size: 50Mi
+  --container-log-max-files: "5"
+  --kube-api-qps: "50"
+  --kube-api-burst: "100"
+
+# Addons managed by Ansible (everything else - MetalLB, ingress, Istio, cert-manager,
+# Longhorn, observability ... - is delivered by Argo CD from gitops/).
+microk8s_addons_dns_upstream:
+  - 10.10.0.53
+  - 10.10.0.54
+microk8s_coredns_replicas: 4
+
+# Operating-system users allowed to run `microk8s` without sudo.
+microk8s_admin_users:
+  - ansible

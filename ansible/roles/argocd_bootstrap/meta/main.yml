@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: argocd_bootstrap
+  namespace: platform
+  author: Platform Engineering
+  description: Install Argo CD in HA mode with a pinned Helm chart, register the GitOps repository and apply the root app-of-apps
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [kubernetes, argocd, gitops, helm]
+dependencies: []

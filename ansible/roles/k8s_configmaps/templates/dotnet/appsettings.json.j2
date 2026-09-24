@@ -1,0 +1,67 @@
+{#- ASP.NET Core appsettings.<Environment>.json
+    Mounted read-only, e.g. /app/config/appsettings.Production.json, and loaded with
+    builder.Configuration.AddJsonFile(...). Secrets (DB_PASSWORD, REDIS_PASSWORD,
+    RABBITMQ_PASSWORD) are NOT here: they arrive as env vars from the Vault-backed Secret
+    and are appended in code (e.g. NpgsqlConnectionStringBuilder.Password = env DB_PASSWORD). -#}
+{%- set levels = {'trace': 'Trace', 'debug': 'Debug', 'info': 'Information', 'warn': 'Warning', 'error': 'Error'} -%}
+{%- set level = levels.get(cfg.logging.level, 'Information') -%}
+{%- set db = cfg.database -%}
+{%- set redis = cfg.redis -%}
+{%- set db_name = db.namePrefix ~ db.name -%}
+{%- set key_prefix = redis.keyPrefix ~ service.name ~ ':' -%}
+{%- set doc = {
+  'Logging': {
+    'LogLevel': {'Default': level, 'Microsoft.AspNetCore': 'Warning', 'Microsoft.EntityFrameworkCore': 'Warning', 'System.Net.Http.HttpClient': 'Warning'},
+    'Console': {'FormatterName': 'json', 'FormatterOptions': {'IncludeScopes': true, 'UseUtcTimestamp': true, 'TimestampFormat': 'yyyy-MM-ddTHH:mm:ss.fffZ'}}
+  },
+  'AllowedHosts': '*',
+  'Kestrel': {
+    'Endpoints': {'Http': {'Url': 'http://0.0.0.0:' ~ cfg.http.port}},
+    'Limits': {'MaxConcurrentConnections': 10000, 'KeepAliveTimeout': '00:02:00'}
+  },
+  'HostOptions': {'ShutdownTimeout': '00:00:' ~ ('%02d' | format(cfg.http.shutdownTimeoutSeconds | int))},
+  'Service': {
+    'Name': service.name,
+    'Version': service.version,
+    'Environment': cfg.environment,
+    'TenantId': cfg.tenantId
+  },
+  'ConnectionStrings': {},
+  'Http': {'TimeoutSeconds': cfg.http.timeoutSeconds | int, 'Retries': cfg.http.retries | int, 'CorsAllowedOrigins': cfg.http.corsAllowedOrigins},
+  'Authentication': {
+    'Enabled': cfg.auth.enabled | bool,
+    'Authority': cfg.auth.issuer,
+    'Audience': cfg.auth.audience,
+    'TenantClaim': cfg.auth.tenantClaim,
+    'RequireHttpsMetadata': true
+  },
+  'OpenTelemetry': {
+    'ServiceName': service.name,
+    'Endpoint': cfg.otel.endpoint,
+    'Protocol': cfg.otel.protocol,
+    'TracesSamplerRatio': cfg.otel.tracesSamplerRatio | float
+  },
+  'HealthChecks': {'LivePath': '/health/live', 'ReadyPath': '/health/ready', 'StartupPath': '/health/startup', 'MetricsPath': '/metrics'},
+  'Features': cfg.features
+} -%}
+{%- if db.enabled | bool -%}
+{%- set _ = doc.ConnectionStrings.update({
+  'Postgres': 'Host=' ~ db.host ~ ';Port=' ~ db.port ~ ';Database=' ~ db_name ~ ';SSL Mode=' ~ (db.sslMode | capitalize) ~ ';Pooling=true;Minimum Pool Size=' ~ db.poolMin ~ ';Maximum Pool Size=' ~ db.poolMax ~ ';Command Timeout=' ~ db.commandTimeoutSeconds ~ ';No Reset On Close=true',
+  'PostgresReadOnly': 'Host=' ~ db.readHost ~ ';Port=' ~ db.port ~ ';Database=' ~ db_name ~ ';SSL Mode=' ~ (db.sslMode | capitalize) ~ ';Pooling=true;Maximum Pool Size=' ~ db.poolMax
+}) -%}
+{%- endif -%}
+{%- if redis.enabled | bool -%}
+{%- if redis.useSentinel | bool -%}
+{%- set _ = doc.ConnectionStrings.update({'Redis': redis.sentinelHost ~ ':' ~ redis.sentinelPort ~ ',serviceName=' ~ redis.sentinelMasterSet ~ ',defaultDatabase=' ~ redis.db ~ ',abortConnect=false,connectRetry=5'}) -%}
+{%- else -%}
+{%- set _ = doc.ConnectionStrings.update({'Redis': redis.host ~ ':' ~ redis.port ~ ',defaultDatabase=' ~ redis.db ~ ',abortConnect=false,connectRetry=5'}) -%}
+{%- endif -%}
+{%- set _ = doc.update({'Redis': {'KeyPrefix': key_prefix}}) -%}
+{%- endif -%}
+{%- if cfg.rabbitmq.enabled | bool -%}
+{%- set _ = doc.update({'RabbitMQ': {'Host': cfg.rabbitmq.host, 'Port': cfg.rabbitmq.port | int, 'VirtualHost': cfg.rabbitmq.vhost, 'PrefetchCount': cfg.rabbitmq.prefetch | int}}) -%}
+{%- endif -%}
+{%- if cfg.kafka.enabled | bool -%}
+{%- set _ = doc.update({'Kafka': {'BootstrapServers': cfg.kafka.bootstrapServers, 'SecurityProtocol': cfg.kafka.securityProtocol, 'TopicPrefix': cfg.kafka.topicPrefix, 'ConsumerGroup': cfg.kafka.consumerGroup or (cfg.kafka.topicPrefix ~ service.name ~ '-' ~ service.version), 'Topics': cfg.kafka.topics}}) -%}
+{%- endif -%}
+{{ doc | combine(cfg.custom, recursive=True) | to_nice_json(indent=2) }}
