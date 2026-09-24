@@ -93,7 +93,7 @@ services:
       retries: 30
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.120.0
+    image: otel/opentelemetry-collector-contrib:0.161.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./dev/otel-collector.yaml:/etc/otelcol/config.yaml:ro
