@@ -9,7 +9,7 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -q -DskipTests package \
  && java -Djarmode=tools -jar target/app.jar extract --layers --launcher --destination /extracted
 
 # ---- runtime ------------------------------------------------------------------------------------------------------
-FROM eclipse-temurin:21-jre-noble
+FROM eclipse-temurin:25-jre-noble
 ARG APP_VERSION=dev
 LABEL org.opencontainers.image.title="payments" \
       org.opencontainers.image.version="${APP_VERSION}" \
