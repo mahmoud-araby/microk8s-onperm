@@ -48,7 +48,7 @@ spec:
             matchExpressions:
               - key: kubernetes.io/metadata.name
                 operator: In
-                values: [shared-services, integration, keycloak, harbor, data-kafka]
+                values: [shared-services, integration, keycloak, harbor, data-kafka, monitoring] # monitoring = Grafana state DB
       ports:
         - protocol: TCP
           port: 5432

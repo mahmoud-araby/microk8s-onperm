@@ -56,3 +56,20 @@ spec:
   ensure: present
   databaseReclaimPolicy: retain
   encoding: UTF8
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: pg-main-grafana
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: platform-data
+spec:
+  cluster:
+    name: pg-main
+  name: grafana
+  owner: grafana
+  ensure: present
+  databaseReclaimPolicy: retain
+  encoding: UTF8

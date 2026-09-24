@@ -11,7 +11,7 @@ microk8s_kubelet_args_pool:
 
 common_disable_thp: true
 common_sysctl_pool:
-  vm.max_map_count: 262144
+  vm.max_map_count: 1048576
   vm.swappiness: 1
 
 preflight_min_vcpus: 16

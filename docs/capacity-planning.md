@@ -29,7 +29,7 @@ traffic mix before go-live and revisit quarterly.
 | `platform` | 6 | 16 vCPU, 64 GB | Istio control plane, Keycloak, Vault, Harbor, operators |
 | `data` | 6 | 32 vCPU, 128 GB, 2×2 TB NVMe | Postgres, Redis, RabbitMQ, Kafka (tainted) |
 | `apps` | 12 → 30 | 32 vCPU, 64 GB | Tenant workloads (cluster autoscaling = add nodes via Ansible `add-node.yml`) |
-| `observability` | 5 | 16 vCPU, 64 GB, 4 TB NVMe | Elasticsearch, Prometheus, Thanos, Grafana, OTel |
+| `observability` | 8 | 16–32 vCPU, 64–128 GB; 3 × 8 TB NVMe (ES hot), 2 × 16 TB (ES warm), 3 × 2 TB (Prometheus/Thanos/OTel) | Elasticsearch, Prometheus, Thanos, Grafana, OTel |
 
 Spread every pool across ≥ 3 racks / failure domains and label nodes with `topology.kubernetes.io/zone`.
 
@@ -59,7 +59,8 @@ Python async ~300–600 RPS per worker. Target 60–70% CPU at peak.
 - **Redis**: 3 × 16 GB, `maxmemory 12gb`, `allkeys-lru`. Move to Redis Cluster (sharding) above ~100k ops/s.
 - **Kafka**: 3 controllers + 5 brokers, RF=3, min.insync=2; 24 partitions for hot topics.
 - **RabbitMQ**: 3 nodes, quorum queues, publisher confirms, lazy queues for backlogs.
-- **Elasticsearch**: 3 masters, 3 hot (NVMe), 2 warm; ~45 TB total with RF=1 replica.
+- **Elasticsearch**: 3 masters, 3 hot (6 TiB NVMe each), 2 warm (12 TiB each) ≈ 42 TiB raw; hot indices keep 1 replica,
+  warm indices none (read-only, covered by nightly snapshots). Set `vm.max_map_count=1048576` on these nodes.
 
 ## Scaling levers
 

@@ -71,7 +71,7 @@ over 3 failure domains (`topology_zone` -> `topology.kubernetes.io/zone`).
 | `platform` | 6 | 16 / 64 GiB | 200 GB | Argo CD (HA), Vault, Keycloak, Harbor, cert-manager, ESO, Kyverno, operators, Rollouts, KEDA, istiod | - |
 | `data` | 6 | 32 / 128 GiB | 200 GB OS + 2-4 TB NVMe (`longhorn-db`) | CNPG Postgres, Redis+Sentinel, RabbitMQ, Kafka (KRaft), Micro Integrator | `workload-tier=data:NoSchedule` |
 | `apps` | 12+ (HPA/KEDA headroom, grow to 24) | 16 / 64 GiB | 200 GB | tenant + pooled .NET / Java / Python services, frontends | - |
-| `observability` | 3 | 16 / 64 GiB | 200 GB OS + 2 TB NVMe | Prometheus/Thanos, Alertmanager, Grafana, ECK Elasticsearch hot tier, Kibana, APM, OTel gateway | - |
+| `observability` | 8 | 16-32 / 64-128 GiB | 200 GB OS + 8-16 TB NVMe (see docs/capacity-planning.md) | Prometheus/Thanos, Alertmanager, Grafana, ECK Elasticsearch hot tier, Kibana, APM, OTel gateway | - |
 | **Total** | **33** | ~530 vCPU / ~2.1 TiB | | | |
 
 Scale-out rule of thumb: add `apps` nodes when requested CPU > 65% across the pool; add `data` nodes in

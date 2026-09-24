@@ -89,6 +89,13 @@ spec:
         connectionLimit: 150
         passwordSecret:
           name: pg-main-role-harbor
+      - name: grafana
+        ensure: present
+        comment: Grafana state (namespace monitoring)
+        login: true
+        connectionLimit: 50
+        passwordSecret:
+          name: pg-main-role-grafana
       - name: platform_readonly
         ensure: present
         comment: Group role for read-only reporting access (grant to login roles)
