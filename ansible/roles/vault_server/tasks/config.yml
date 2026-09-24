@@ -1,0 +1,65 @@
+---
+- name: Create Vault directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ vault_server_user }}"
+    group: "{{ vault_server_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ vault_server_config_dir }}", mode: "0750"}
+    - {path: "{{ vault_server_data_dir }}", mode: "0700"}
+    - {path: "{{ vault_server_tls_dir }}", mode: "0750"}
+    - {path: "{{ vault_server_log_dir }}", mode: "0750"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Resolve every Vault node without DNS (/etc/hosts)
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED - vault_servers"
+    block: |
+      {% for host in groups['vault_servers'] | sort %}
+      {{ hostvars[host]['ansible_host'] }} {{ host }}.{{ platform_internal_domain | default('example.local') }} {{ host }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+  when: vault_server_manage_etc_hosts | bool
+
+- name: Render vault.hcl
+  ansible.builtin.template:
+    src: vault.hcl.j2
+    dest: "{{ vault_server_config_dir }}/vault.hcl"
+    owner: "{{ vault_server_user }}"
+    group: "{{ vault_server_group }}"
+    mode: "0640"
+  notify: Restart vault
+
+- name: Environment file for the Vault CLI on the node
+  ansible.builtin.copy:
+    dest: /etc/profile.d/vault.sh
+    content: |
+      # Managed by Ansible (role: vault_server)
+      export VAULT_ADDR=https://127.0.0.1:{{ vault_server_port }}
+      export VAULT_CACERT={{ vault_server_tls_dir }}/ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Hardened systemd unit (overrides the packaged unit)
+  ansible.builtin.template:
+    src: vault.service.j2
+    dest: /etc/systemd/system/vault.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart vault
+
+- name: Rotate the file audit log (SIGHUP re-opens it)
+  ansible.builtin.template:
+    src: logrotate-vault.j2
+    dest: /etc/logrotate.d/vault
+    owner: root
+    group: root
+    mode: "0644"

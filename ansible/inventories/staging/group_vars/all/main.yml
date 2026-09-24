@@ -32,6 +32,7 @@ platform_node_cidrs:
   - 10.20.13.0/24     # data
   - 10.20.14.0/24     # apps
   - 10.20.15.0/24     # observability
+  - 10.20.16.0/24     # storage
 
 # Controller-side path of the admin kubeconfig fetched by the microk8s_addons role
 # and consumed by argocd_bootstrap / k8s_configmaps / vault_init (git-ignored).

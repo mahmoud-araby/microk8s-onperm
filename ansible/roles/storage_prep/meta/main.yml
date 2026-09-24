@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: storage_prep
+  namespace: platform
+  author: Platform Engineering
+  description: Guarded preparation of dedicated data disks - XFS local-nvme for the local-path provisioner, MinIO drives /mnt/diskN, NFS client, Longhorn disk via role common
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [storage, xfs, minio, localpath, longhorn]
+dependencies: []

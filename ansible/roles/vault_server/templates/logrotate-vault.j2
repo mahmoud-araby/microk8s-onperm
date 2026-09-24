@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# role: vault_server - file audit device. Vault re-opens the file on SIGHUP (systemctl reload).
+{{ vault_server_log_dir }}/*.log {
+    daily
+    rotate {{ vault_server_logrotate_days }}
+    dateext
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 {{ vault_server_user }} {{ vault_server_group }}
+    sharedscripts
+    postrotate
+        /bin/systemctl reload vault >/dev/null 2>&1 || true
+    endscript
+}

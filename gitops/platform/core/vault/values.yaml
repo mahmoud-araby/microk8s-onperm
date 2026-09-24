@@ -129,13 +129,22 @@ server:
         }
 
         # ---- Auto-unseal (choose ONE; without it every pod restart needs manual unseal with Shamir keys)
-        # (1) Transit auto-unseal against a small, separately operated "unseal" Vault (DR site / VM):
+        # (1) Transit auto-unseal against the EXTERNAL Vault on VMs (Ansible role vault_server,
+        #     vault_deployment_mode: external | both - docs/conventions.md "External Vault (optional)").
+        #     Enable together with extraSecretEnvironmentVars below. Secret vault/vault-transit-token (key token)
+        #     is created by ansible/playbooks/vault-init.yml from the periodic token minted by vault-server.yml
+        #     (or, alternatively, by an ExternalSecret from a ClusterSecretStore on vault-ext reading
+        #     secret/platform/vault-transit-token). The external Vault certificate is signed by the same on-prem CA
+        #     as internal-ca, so vault-server-tls/ca.crt verifies it.
+        #     Migrating an initialised Shamir Vault: deploy this, delete the pods one by one (OnDelete), then
+        #     vault-init.yml -e vault_init_enabled=true -e vault_init_seal_migrate=true (unseal -migrate).
         # seal "transit" {
-        #   address         = "https://vault-unseal.example.local:8200"
-        #   key_name        = "platform-autounseal"
+        #   address         = "https://vault-ext.example.local:8200"
+        #   key_name        = "autounseal-k8s"
         #   mount_path      = "transit/"
         #   tls_ca_cert     = "/vault/userconfig/vault-server-tls/ca.crt"
-        #   # token via env VAULT_TOKEN from Secret vault-unseal-token (extraSecretEnvironmentVars)
+        #   tls_server_name = "vault-ext.example.local"
+        #   # token: env VAULT_TOKEN from Secret vault-transit-token (extraSecretEnvironmentVars below)
         # }
         # (2) HSM (PKCS#11, Vault Enterprise):
         # seal "pkcs11" {
@@ -153,10 +162,10 @@ server:
           disable_hostname          = true
         }
 
-  # Uncomment for transit auto-unseal token
+  # Uncomment together with seal "transit" above (vault_deployment_mode external | both)
   # extraSecretEnvironmentVars:
   #   - envName: VAULT_TOKEN
-  #     secretName: vault-unseal-token
+  #     secretName: vault-transit-token
   #     secretKey: token
 
 ui:

@@ -1,0 +1,55 @@
+---
+- name: Verify supported operating system and inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] in ['22.04', '24.04']
+      - minio_drives | default([]) | length > 0
+      - minio_server_root_user | length >= 3
+      - minio_server_root_password | length >= 8
+    fail_msg: >-
+      {{ inventory_hostname }}: needs Ubuntu 22.04/24.04, a non-empty `minio_drives` list and root credentials
+      (vault_minio_external_root_user / vault_minio_external_root_password, see group_vars/all/secrets.yml).
+    quiet: true
+  no_log: "{{ minio_server_no_log }}"
+  tags: [always]
+
+- name: Erasure-coding topology
+  ansible.builtin.assert:
+    that:
+      - (groups['minio_servers'] | map('extract', hostvars, 'minio_drives') | map('length') | unique | list | length) == 1
+    fail_msg: "Every host in minio_servers must have the same number of minio_drives"
+    quiet: true
+  run_once: true
+  tags: [always]
+
+- name: Install minio and mc
+  ansible.builtin.import_tasks: install.yml
+  tags: [minio_server, minio_install]
+
+- name: TLS certificate
+  ansible.builtin.import_tasks: tls.yml
+  tags: [minio_server, minio_tls, pki]
+
+- name: Drives, environment file, systemd unit
+  ansible.builtin.import_tasks: config.yml
+  tags: [minio_server, minio_config]
+
+- name: Host firewall
+  ansible.builtin.import_tasks: firewall.yml
+  when: minio_server_firewall_enabled | bool
+  tags: [minio_server, firewall]
+
+- name: Start MinIO
+  ansible.builtin.import_tasks: service.yml
+  tags: [minio_server, minio_service]
+
+- name: Buckets, policies, consumer identities, credentials
+  ansible.builtin.include_tasks:
+    file: configure.yml
+    apply:
+      tags: [minio_server, minio_configure]
+  when:
+    - minio_server_configure | bool
+    - inventory_hostname == _minio_first
+  tags: [minio_server, minio_configure]

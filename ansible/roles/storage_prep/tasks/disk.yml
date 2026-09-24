@@ -1,0 +1,85 @@
+---
+# Inputs: _disk_device, _disk_mount, _disk_fstype, _disk_label, _disk_opts
+- name: "Device exists | {{ _disk_device }}"
+  ansible.builtin.stat:
+    path: "{{ _disk_device }}"
+    follow: true
+  register: _sp_dev
+
+- name: "Device is a block device | {{ _disk_device }}"
+  ansible.builtin.assert:
+    that: _sp_dev.stat.exists and _sp_dev.stat.isblk
+    fail_msg: "{{ _disk_device }} does not exist or is not a block device on {{ inventory_hostname }}"
+    quiet: true
+
+- name: "Inspect partitions and mounts | {{ _disk_device }}"
+  ansible.builtin.command: "lsblk -J -o NAME,TYPE,FSTYPE,MOUNTPOINT {{ _disk_device }}"
+  register: _sp_lsblk
+  changed_when: false
+
+- name: "Probe signatures (filesystem / partition table) | {{ _disk_device }}"
+  ansible.builtin.command: "blkid -p -o export {{ _disk_device }}"
+  register: _sp_blkid
+  changed_when: false
+  # rc 2 = no signature at all (blank device)
+  failed_when: _sp_blkid.rc not in [0, 2]
+
+- name: "Classify the device | {{ _disk_device }}"
+  ansible.builtin.set_fact:
+    _sp_dev_info:
+      children: "{{ (_sp_lsblk.stdout | from_json).blockdevices[0].children | default([]) | length }}"
+      mounts: >-
+        {{ ([(_sp_lsblk.stdout | from_json).blockdevices[0]]
+            + ((_sp_lsblk.stdout | from_json).blockdevices[0].children | default([])))
+           | map(attribute='mountpoint') | select | list }}
+      fstype: "{{ _sp_blkid.stdout | regex_search('(?m)^TYPE=(\\S+)$', '\\1') | default([''], true) | first }}"
+      pttype: "{{ _sp_blkid.stdout | regex_search('(?m)^PTTYPE=(\\S+)$', '\\1') | default([''], true) | first }}"
+
+- name: "Never touch a device that is mounted elsewhere or holds the root filesystem | {{ _disk_device }}"
+  ansible.builtin.assert:
+    that:
+      - "'/' not in _sp_dev_info.mounts"
+      - _sp_dev_info.mounts | reject('equalto', _disk_mount) | list | length == 0
+    fail_msg: "{{ _disk_device }} is mounted at {{ _sp_dev_info.mounts }} - refusing to use it for {{ _disk_mount }}"
+    quiet: true
+
+- name: "Refuse to wipe existing data unless storage_prep_force=true | {{ _disk_device }}"
+  ansible.builtin.assert:
+    that: >-
+      storage_prep_force | bool
+      or (_sp_dev_info.children | int == 0
+          and _sp_dev_info.pttype | length == 0
+          and _sp_dev_info.fstype in ['', _disk_fstype])
+    fail_msg: >-
+      {{ _disk_device }} on {{ inventory_hostname }} carries data (filesystem '{{ _sp_dev_info.fstype }}',
+      partition table '{{ _sp_dev_info.pttype }}', {{ _sp_dev_info.children }} partition(s)).
+      Wipe it deliberately or re-run with -e storage_prep_force=true (DESTROYS the data).
+    quiet: true
+
+- name: "Create the filesystem (never reformats) | {{ _disk_device }}"
+  community.general.filesystem:
+    dev: "{{ _disk_device }}"
+    fstype: "{{ _disk_fstype }}"
+    opts: "-L {{ _disk_label }}{{ ' -f' if (storage_prep_force | bool and _disk_fstype == 'xfs') else '' }}"
+    force: "{{ storage_prep_force | bool and _sp_dev_info.fstype not in ['', _disk_fstype] }}"
+
+- name: "Read the filesystem UUID | {{ _disk_device }}"
+  ansible.builtin.command: "blkid -s UUID -o value {{ _disk_device }}"
+  register: _sp_uuid
+  changed_when: false
+
+- name: "Mount by UUID (fstab) | {{ _disk_mount }}"
+  ansible.posix.mount:
+    path: "{{ _disk_mount }}"
+    src: "UUID={{ _sp_uuid.stdout }}"
+    fstype: "{{ _disk_fstype }}"
+    opts: "{{ _disk_opts }}"
+    state: mounted
+
+- name: "Mount point permissions | {{ _disk_mount }}"
+  ansible.builtin.file:
+    path: "{{ _disk_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

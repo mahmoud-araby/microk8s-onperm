@@ -6,6 +6,12 @@ collections/ansible_collections/
 inventories/*/.kubeconfig
 # Vault init output (ansible-vault encrypted, but still keep out of git by default)
 inventories/*/vault-init-*.yml
+# External Vault init output / transit token, external MinIO credentials (ansible-vault encrypted, keep out of git)
+inventories/*/vault-ext-init-*.yml
+inventories/*/vault-ext-transit-token-*.yml
+inventories/*/minio-external-credentials-*.yml
+# Private key of a controller-side internal CA (role pki_cert) - never commit
+inventories/*/files/pki/
 # Unencrypted secrets - only vault.yml (encrypted with ansible-vault) may be committed
 inventories/*/group_vars/all/vault.yml.dec
 backups/

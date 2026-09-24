@@ -1,0 +1,55 @@
+---
+- name: Validate pki_cert_mode
+  ansible.builtin.assert:
+    that: pki_cert_mode in ['internal_ca', 'files']
+    fail_msg: "pki_cert_mode must be internal_ca or files (got {{ pki_cert_mode }})"
+    quiet: true
+  tags: [pki, always]
+
+- name: Install TLS tooling (python3-cryptography for community.crypto, ca-certificates)
+  ansible.builtin.apt:
+    name: [python3-cryptography, ca-certificates, openssl]
+    state: present
+    lock_timeout: 300
+  tags: [pki]
+
+- name: Create the certificate directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ pki_cert_group }}"
+    mode: "0750"
+  loop: "{{ [pki_cert_cert_path, pki_cert_key_path, pki_cert_ca_path] | map('dirname') | unique | list }}"
+  tags: [pki]
+
+- name: Certificate signed by the internal CA
+  ansible.builtin.import_tasks: internal_ca.yml
+  when: pki_cert_mode == 'internal_ca'
+  tags: [pki]
+
+- name: Certificate from files
+  ansible.builtin.import_tasks: files.yml
+  when: pki_cert_mode == 'files'
+  tags: [pki]
+
+- name: Trust the CA system-wide
+  ansible.builtin.copy:
+    src: "{{ pki_cert_ca_path }}"
+    remote_src: true
+    dest: /usr/local/share/ca-certificates/platform-internal-ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+  when: pki_cert_trust_ca | bool
+  # runs at the caller's next flush_handlers (vault_server / minio_server flush before using the CA)
+  notify: Update the CA trust store
+  tags: [pki]
+
+- name: Report whether the TLS material changed
+  ansible.builtin.set_fact:
+    pki_cert_changed: >-
+      {{ (_pki_key | default({})) is changed
+         or (_pki_cert | default({})) is changed
+         or (_pki_ca | default({})) is changed }}
+  tags: [pki]

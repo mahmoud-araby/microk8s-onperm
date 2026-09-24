@@ -1,0 +1,48 @@
+# {{ ansible_managed }}
+# role: vault_server - external Vault HA cluster "{{ vault_server_cluster_name }}"
+# Client endpoint: {{ vault_server_endpoint }}
+
+cluster_name  = "{{ vault_server_cluster_name }}"
+ui            = {{ vault_server_ui | bool | lower }}
+disable_mlock = {{ vault_server_disable_mlock | bool | lower }}
+log_level     = "{{ vault_server_log_level }}"
+log_format    = "{{ vault_server_log_format }}"
+
+api_addr     = "https://{{ vault_server_node_address }}:{{ vault_server_port }}"
+cluster_addr = "https://{{ vault_server_node_address }}:{{ vault_server_cluster_port }}"
+
+listener "tcp" {
+  address         = "0.0.0.0:{{ vault_server_port }}"
+  cluster_address = "0.0.0.0:{{ vault_server_cluster_port }}"
+  tls_cert_file   = "{{ vault_server_tls_dir }}/vault.crt"
+  tls_key_file    = "{{ vault_server_tls_dir }}/vault.key"
+  tls_min_version = "{{ vault_server_tls_min_version }}"
+
+  telemetry {
+    unauthenticated_metrics_access = {{ vault_server_unauthenticated_metrics | bool | lower }}
+  }
+}
+
+storage "raft" {
+  path                   = "{{ vault_server_data_dir }}"
+  node_id                = "{{ inventory_hostname }}"
+  performance_multiplier = {{ vault_server_raft_performance_multiplier }}
+{% for host in groups['vault_servers'] | sort if host != inventory_hostname %}
+
+  retry_join {
+    leader_api_addr     = "https://{{ hostvars[host]['ansible_host'] }}:{{ vault_server_port }}"
+    leader_ca_cert_file = "{{ vault_server_tls_dir }}/ca.crt"
+  }
+{% endfor %}
+}
+
+# Shamir seal (default): this Vault is the root of trust for the in-cluster Vault's transit seal.
+
+telemetry {
+  prometheus_retention_time = "{{ vault_server_telemetry_retention }}"
+  disable_hostname          = true
+}
+{% if vault_server_extra_config | length > 0 %}
+
+{{ vault_server_extra_config }}
+{% endif %}

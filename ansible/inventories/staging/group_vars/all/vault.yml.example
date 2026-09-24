@@ -50,3 +50,37 @@ vault_backup_ssh_private_key: |
   -----BEGIN OPENSSH PRIVATE KEY-----
   CHANGEME
   -----END OPENSSH PRIVATE KEY-----
+
+# Upload of the dqlite archives to the external MinIO bucket platform-dqlite (backup_s3_enabled: true).
+# Values come from the minio-external-credentials-<env>.yml written by playbooks/minio-server.yml (consumer dqlite).
+vault_backup_s3_access_key: "svc-dqlite"
+vault_backup_s3_secret_key: "CHANGEME"
+
+# --- Edge load balancers (role: loadbalancer) --------------------------------
+# VRRP PASS authentication shared by the LB pair (1-8 characters)
+vault_lb_keepalived_auth_pass: "CHANGEME"
+# Basic-auth password for the HAProxy HTML stats page (/stats); empty = page disabled,
+# /metrics (Prometheus) stays available to lb_stats_allowed_cidrs.
+vault_lb_stats_password: ""
+
+# --- External HashiCorp Vault (role: vault_server) ---------------------------
+# Filled in AFTER the first `playbooks/vault-server.yml -e vault_server_init=true` run from the
+# encrypted vault-ext-init-<env>.yml it produces. These ALWAYS stay in ansible-vault (they unseal
+# the Vault that secrets_backend=hashicorp_vault reads from).
+vault_ext_unseal_keys:
+  - "CHANGEME-ext-unseal-key-1"
+  - "CHANGEME-ext-unseal-key-2"
+  - "CHANGEME-ext-unseal-key-3"
+  - "CHANGEME-ext-unseal-key-4"
+  - "CHANGEME-ext-unseal-key-5"
+vault_ext_root_token: "CHANGEME-ext-root-token"
+# Transit auto-unseal token for the in-cluster Vault (vault_deployment_mode external|both), from the
+# encrypted vault-ext-transit-token-<env>.yml (also stored in the external Vault at secret/platform/vault-transit-token)
+vault_ext_transit_token: ""
+# Passphrase of the internal CA private key on the controller (pki_cert internal_ca mode); empty = unencrypted key
+vault_internal_ca_key_passphrase: ""
+
+# --- External MinIO (role: minio_server) -------------------------------------
+# Root credentials of the external MinIO pool (secret/platform/minio-external when secrets_backend=hashicorp_vault)
+vault_minio_external_root_user: "platform-root"
+vault_minio_external_root_password: "CHANGEME-at-least-8-chars"

@@ -30,6 +30,10 @@
       ansible.builtin.import_tasks: remote.yml
       when: backup_remote_enabled | bool
 
+    - name: S3 upload prerequisites (external MinIO, bucket platform-dqlite)
+      ansible.builtin.import_tasks: s3.yml
+      when: backup_s3_enabled | bool
+
     - name: GPG encryption key
       ansible.builtin.import_tasks: gpg.yml
       when: backup_gpg_recipient | length > 0

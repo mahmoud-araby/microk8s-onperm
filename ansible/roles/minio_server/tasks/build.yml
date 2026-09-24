@@ -1,0 +1,126 @@
+---
+# Build minio + mc once per architecture (run_once, on minio_server_build_host), cache the binaries on the
+# controller, then copy them to every node (copy compares checksums -> idempotent).
+- name: Architectures to build
+  ansible.builtin.set_fact:
+    _minio_build_archs: >-
+      {{ ansible_play_hosts | map('extract', hostvars, ['ansible_facts', 'architecture'])
+         | map('replace', 'aarch64', 'arm64') | map('replace', 'x86_64', 'amd64') | unique | list }}
+  run_once: true
+
+- name: Create the controller artifact cache
+  ansible.builtin.file:
+    path: "{{ minio_server_artifact_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Check for cached binaries
+  ansible.builtin.stat:
+    path: "{{ minio_server_artifact_dir }}/{{ item.0 }}.{{ item.1 }}.linux-{{ item.2 }}"
+    get_checksum: false
+  loop: >-
+    {{ [['minio', minio_server_release], ['mc', minio_server_mc_release]]
+       | product(_minio_build_archs) | map('flatten') | list }}
+  loop_control:
+    label: "{{ item.0 }}.{{ item.1 }}.linux-{{ item.2 }}"
+  register: _minio_cached
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build the missing binaries
+  when: _minio_cached.results | rejectattr('stat.exists') | list | length > 0
+  delegate_to: "{{ minio_server_build_host }}"
+  become: false
+  run_once: true
+  block:
+    - name: Go toolchain on the build host
+      ansible.builtin.command: "{{ minio_server_go_bin }} version"
+      register: _minio_go
+      changed_when: false
+      failed_when: false
+
+    - name: Require Go on the build host
+      ansible.builtin.assert:
+        that: _minio_go.rc == 0
+        fail_msg: >-
+          minio_server_binary_source=build needs git and Go (version from the tag's go.mod) on
+          {{ minio_server_build_host }}; or use minio_server_binary_source=url with an internal mirror.
+        quiet: true
+
+    - name: Check out the pinned tags
+      ansible.builtin.git:
+        repo: "{{ item.repo }}"
+        dest: "{{ minio_server_build_dir }}/{{ item.name }}-{{ item.version }}"
+        version: "{{ item.version }}"
+        depth: 1
+        single_branch: true
+        force: false
+      loop:
+        - {name: minio, repo: "{{ minio_server_git_url }}", version: "{{ minio_server_release }}"}
+        - {name: mc, repo: "{{ minio_server_mc_git_url }}", version: "{{ minio_server_mc_release }}"}
+      loop_control:
+        label: "{{ item.name }} {{ item.version }}"
+
+    - name: Build (static, CGO disabled, upstream ldflags)
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          CGO_ENABLED=0 GOOS=linux GOARCH={{ _arch }}
+          {{ minio_server_go_bin }} build -tags kqueue -trimpath
+          -ldflags "$({{ minio_server_go_bin }} run buildscripts/gen-ldflags.go)"
+          -o {{ minio_server_build_dir }}/out/{{ _name }}.{{ _version }}.linux-{{ _arch }} .
+        chdir: "{{ minio_server_build_dir }}/{{ _name }}-{{ _version }}"
+        creates: "{{ minio_server_build_dir }}/out/{{ _name }}.{{ _version }}.linux-{{ _arch }}"
+        executable: /bin/bash
+      vars:
+        _name: "{{ item.item.0 }}"
+        _version: "{{ item.item.1 }}"
+        _arch: "{{ item.item.2 }}"
+      loop: "{{ _minio_cached.results | rejectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item.0 }}.{{ item.item.1 }}.linux-{{ item.item.2 }}"
+
+    - name: Bring the binaries to the controller cache
+      ansible.builtin.fetch:
+        src: "{{ minio_server_build_dir }}/out/{{ item.item.0 }}.{{ item.item.1 }}.linux-{{ item.item.2 }}"
+        dest: "{{ minio_server_artifact_dir }}/"
+        flat: true
+      loop: "{{ _minio_cached.results | rejectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item.0 }}.{{ item.item.1 }}.linux-{{ item.item.2 }}"
+
+- name: Record the sha256 of the binaries (pin them for url mode / audit)
+  ansible.builtin.stat:
+    path: "{{ minio_server_artifact_dir }}/{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "minio.{{ minio_server_release }}.linux-{{ minio_server_arch }}"
+    - "mc.{{ minio_server_mc_release }}.linux-{{ minio_server_arch }}"
+  register: _minio_artifacts
+  delegate_to: localhost
+  become: false
+
+- name: Show the binary checksums
+  ansible.builtin.debug:
+    msg: "{{ _minio_artifacts.results | map(attribute='stat') | map(attribute='checksum', default='missing') | zip(_minio_artifacts.results | map(attribute='item')) | list }}"
+  run_once: true
+
+- name: Install the pinned minio binary
+  ansible.builtin.copy:
+    src: "{{ minio_server_artifact_dir }}/minio.{{ minio_server_release }}.linux-{{ minio_server_arch }}"
+    dest: "{{ minio_server_bin_dir }}/minio.{{ minio_server_release }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the pinned mc binary
+  ansible.builtin.copy:
+    src: "{{ minio_server_artifact_dir }}/mc.{{ minio_server_mc_release }}.linux-{{ minio_server_arch }}"
+    dest: "{{ minio_server_bin_dir }}/mc.{{ minio_server_mc_release }}"
+    owner: root
+    group: root
+    mode: "0755"

@@ -17,6 +17,8 @@ controller (ansible-core >= 2.16, helm, python kubernetes)
                                                              cert-manager, Vault, data services, observability,
                                                              tenants, applications
    day 2: configmaps.yml · vault-init.yml · upgrade.yml · backup.yml · add-node.yml · remove-node.yml
+   optional, outside the cluster: vault-server.yml (external Vault HA) · minio-server.yml (external MinIO)
+                                  storage-prep.yml (dedicated disks, also part of prepare-nodes / minio-server)
 ```
 
 ## Layout
@@ -24,17 +26,20 @@ controller (ansible-core >= 2.16, helm, python kubernetes)
 ```
 ansible/
 ├── ansible.cfg                  defaults to the STAGING inventory (never production by accident)
-├── requirements.yml             kubernetes.core, community.general, ansible.posix, community.crypto
+├── requirements.yml             kubernetes.core, community.general, ansible.posix, community.crypto, community.hashi_vault
 ├── filter_plugins/platform.py   ip_in_range / ip_ranges_overlap / ip_nth_in_cidr (preflight, no netaddr)
 ├── inventories/
 │   ├── production/
-│   │   ├── hosts.yml            3 masters + edge/platform/data/apps/observability pools
+│   │   ├── hosts.yml            3 masters + edge/platform/data/apps/observability/storage pools,
+│   │   │                        loadbalancers, vault_servers (3), minio_servers (4 x 4 drives)
 │   │   ├── files/               internal-ca.crt, platform-backup.pub.asc (public material only)
 │   │   └── group_vars/
 │   │       ├── all/             main, microk8s, network, os, registry, argocd, backup, configmaps,
+│   │       │                    secrets (secrets_backend + secret map, vault_deployment_mode),
 │   │       │                    vault.yml.example (-> vault.yml, ansible-vault encrypted)
-│   │       ├── microk8s_masters.yml, microk8s_workers.yml
-│   │       └── edge.yml, platform.yml, data.yml, apps.yml, observability.yml   labels / taints / sizing
+│   │       ├── microk8s_masters.yml, microk8s_workers.yml, loadbalancers.yml (+ all/loadbalancer.yml: mode, VIPs)
+│   │       ├── vault_servers.yml, minio_servers.yml              external Vault / MinIO VMs
+│   │       └── edge.yml, platform.yml, data.yml, apps.yml, observability.yml, storage.yml   labels / taints / sizing
 │   └── staging/                 same shape, smaller, masters schedulable, Argo CD non-HA
 ├── roles/
 │   ├── common                   packages, chrony, swap off, kernel modules, sysctl, limits, THP,
@@ -47,14 +52,25 @@ ansible/
 │   ├── microk8s_addons          dns, rbac, ha-cluster, metrics-server, helm3; HA CoreDNS; kubeconfig
 │   ├── argocd_bootstrap         Argo CD HA via kubernetes.core.helm (pinned), repo secret, root app
 │   ├── k8s_configmaps           "ConfigMap Ansible" (templates + layered vars -> ConfigMaps)
-│   ├── vault_init               optional: init/unseal, KV v2 `secret`, k8s auth, ESO + tenant policies
-│   ├── backup                   dqlite + PKI backup, systemd timer, GPG, off-node rsync, metrics
+│   ├── vault_init               optional: init/unseal, KV v2 `secret`, k8s auth, ESO + tenant policies,
+│   │                            transit auto-unseal Secret + recovery-key init / seal migration (external|both)
+│   ├── vault_server             optional external Vault HA on VMs: raft, TLS, hardened systemd, audit + logrotate,
+│   │                            init/unseal, transit key `autounseal-k8s` + token, KV v2 + AppRole `ansible`
+│   ├── minio_server             optional external distributed MinIO: built/pinned binaries, TLS, erasure coding,
+│   │                            backup buckets (versioning, object lock, ILM), per-consumer users -> Vault
+│   ├── storage_prep             guarded XFS prep: local-nvme (/mnt/local-nvme[/dataN]), MinIO drives (/mnt/diskN),
+│   │                            kubelite RequiresMountsFor, NFS client; Longhorn disk via role common
+│   ├── pki_cert                 helper: host key + CSR signed by the internal CA on the controller (or files)
+│   ├── backup                   dqlite + PKI backup, systemd timer, GPG, off-node rsync and/or S3 (platform-dqlite), metrics
+│   ├── loadbalancer             edge HAProxy + keepalived pair (group `loadbalancers`): L7 TLS / L4 PROXY v2 to
+│   │                            Kong + Istio internal, always-L4 k8s API + Kafka, VRRP VIPs (docs/load-balancing.md)
 │   └── upgrade                  rolling, drained snap channel refresh with Longhorn health gate
 ├── configmaps/
 │   ├── tenants/<tenant>.yml     tenant layer + deployed services (acme, globex, initech, shared)
 │   └── services/<service>.yml   service catalogue defaults (orders, payments, catalog, web)
-└── playbooks/                   site, preflight, prepare-nodes, cluster, addons, bootstrap-gitops,
-                                 configmaps, vault-init, upgrade, backup, add-node, remove-node
+└── playbooks/                   site, preflight, prepare-nodes, loadbalancers, vault-server, minio-server,
+                                 storage-prep, cluster, addons, bootstrap-gitops, configmaps, vault-init,
+                                 upgrade, backup, add-node, remove-node
 ```
 
 ## Sizing for ~1,000,000 users
@@ -72,7 +88,12 @@ over 3 failure domains (`topology_zone` -> `topology.kubernetes.io/zone`).
 | `data` | 6 | 32 / 128 GiB | 200 GB OS + 2-4 TB NVMe (`longhorn-db`) | CNPG Postgres, Redis+Sentinel, RabbitMQ, Kafka (KRaft), Micro Integrator | `workload-tier=data:NoSchedule` |
 | `apps` | 12+ (HPA/KEDA headroom, grow to 24) | 16 / 64 GiB | 200 GB | tenant + pooled .NET / Java / Python services, frontends | - |
 | `observability` | 10 | 16-32 / 64-128 GiB | 200 GB OS + 2-16 TB NVMe (5 general, 3 ES hot, 2 ES warm; see docs/capacity-planning.md) | Prometheus/Thanos, Alertmanager, Grafana, ECK Elasticsearch hot tier, Kibana, APM, OTel gateway | - |
-| **Total** | **33** | ~530 vCPU / ~2.1 TiB | | | |
+| `storage` | 4 | 16 / 64 GiB | 100 GB OS + 4x NVMe (`/mnt/local-nvme/data0..3`, `local-nvme` / `local-nvme-minio`) | in-cluster MinIO tenant `minio` (erasure coding over 16 drives) | `workload-tier=storage:NoSchedule` |
+| **Total** | **37** | ~595 vCPU / ~2.35 TiB | | | |
+
+Outside the cluster (optional, own failure domain): `vault_servers` 3 x 2 vCPU / 4 GiB / 50 GB SSD
+(raft), `minio_servers` 4 x 8 vCPU / 32 GiB with 4 data drives each (backup target, EC:4, usable
+~75% of raw), `loadbalancers` 2 x HAProxy/keepalived.
 
 Scale-out rule of thumb: add `apps` nodes when requested CPU > 65% across the pool; add `data` nodes in
 pairs; keep masters at 3 (5 only for > 150 nodes or multi-room clusters). kubelet `--max-pods` is 250 on
@@ -88,11 +109,14 @@ pip install "ansible-core>=2.16,<2.20" "kubernetes>=29.0.0" PyYAML jsonpatch
 cd ansible
 ansible-galaxy collection install -r requirements.yml -p ./collections
 # helm >= 3.14 on PATH (argocd_bootstrap), optional: kubectl
+# secrets_backend=hashicorp_vault / minio_server credential push: pip install "hvac>=2.1.0"
+# minio_server_binary_source=build (default): git + Go (version of the MinIO tag's go.mod) on the controller
 ```
 
 Nodes: Ubuntu Server 22.04/24.04 LTS, the `ansible` user with passwordless sudo and your SSH key,
 static IPs, forward/reverse DNS or rely on the `/etc/hosts` block the `common` role manages, one
-dedicated NVMe per `data`/`observability` node (`longhorn_disk_device` in `hosts.yml`).
+dedicated NVMe per `data`/`observability` node (`longhorn_disk_device` in `hosts.yml`), 4 dedicated
+NVMe per `storage` node (`local_nvme_devices`), 4 data drives per `minio_servers` VM (`minio_drives`).
 
 Secrets:
 
@@ -129,17 +153,26 @@ ansible-playbook -i inventories/production/hosts.yml playbooks/vault-init.yml \
 
 # 3. Render tenant ConfigMaps (production: gitops mode -> commit the generated files in a PR)
 ansible-playbook -i inventories/production/hosts.yml playbooks/configmaps.yml
+
+# Optional infrastructure outside the cluster (also imported by site.yml; no-op for empty groups)
+ansible-playbook -i inventories/production/hosts.yml playbooks/vault-server.yml -e vault_server_init=true --vault-id production@prompt
+ansible-playbook -i inventories/production/hosts.yml playbooks/minio-server.yml --vault-id production@prompt
+ansible-playbook -i inventories/production/hosts.yml playbooks/storage-prep.yml --limit storage
 ```
 
 Useful tags: `--tags sysctl`, `--tags firewall`, `--tags hardening`, `--tags microk8s_config`
 (kubelet args / registry mirrors), `--tags labels` (node labels/taints), `--tags etc_hosts`,
-`--tags keepalived`, `--tags argocd_root_app`, `--tags backup_now`.
+`--tags keepalived`, `--tags argocd_root_app`, `--tags backup_now`, `--tags lb_certs` / `lb_haproxy` (loadbalancers.yml).
 
 | Playbook | Hosts | Purpose |
 |----------|-------|---------|
-| `site.yml` | all | preflight + prepare-nodes + cluster + addons + bootstrap-gitops + backup |
+| `site.yml` | all | preflight + prepare-nodes + loadbalancers + vault-server + minio-server + cluster + addons + bootstrap-gitops + backup |
 | `preflight.yml` | cluster + controller | OS/arch/kernel, vCPU/RAM/disk per pool, free ports, Longhorn disk, snap store reachability, odd master count, MetalLB ranges vs node IPs/VIP, registry CA validity, controller tooling |
-| `prepare-nodes.yml` | `microk8s_cluster` | roles `common`, `hardening` |
+| `prepare-nodes.yml` | `microk8s_cluster` | roles `common`, `storage_prep`, `hardening` |
+| `storage-prep.yml` | `microk8s_cluster`, `minio_servers` | role `storage_prep` alone (e.g. after adding a disk); `-e storage_prep_force=true` to wipe |
+| `vault-server.yml` | `vault_servers` (`serial: 1`), then the first one | roles `hardening`, `vault_server`; `-e vault_server_init=true` once; then transit/KV/AppRole config |
+| `minio-server.yml` | `minio_servers` | roles `hardening`, `storage_prep`, `minio_server` (buckets, ILM, identities, credentials) |
+| `loadbalancers.yml` | `loadbalancers` (`serial: 1`) | roles `hardening`, `loadbalancer`: HAProxy (`haproxy -c` validated, hitless reload) + keepalived VIPs; `--tags lb_certs` re-syncs TLS certs (docs/load-balancing.md) |
 | `cluster.yml` | cluster | install MicroK8s everywhere, join masters `serial: 1`, workers in batches (`microk8s_worker_join_batch`, default 3), verify HA |
 | `addons.yml` | first master | addons, CoreDNS HA, kubeconfig -> `inventories/<env>/.kubeconfig` |
 | `bootstrap-gitops.yml` | controller | Argo CD HA + repo secret + `gitops/bootstrap/root-app.yaml` |
@@ -166,6 +199,7 @@ Labels/taints come from the pool's group_vars (conventions "Nodes"):
 | `data` | `workload-tier=data`, `node-role.kubernetes.io/data` | `workload-tier=data:NoSchedule` |
 | `apps` | `workload-tier=apps`, `node-role.kubernetes.io/apps` | - |
 | `observability` | `workload-tier=observability`, `node-role.kubernetes.io/observability` | - |
+| `storage` | `workload-tier=storage`, `node-role.kubernetes.io/storage` | `workload-tier=storage:NoSchedule` |
 | `microk8s_masters` | `node-role.kubernetes.io/control-plane` | `node-role.kubernetes.io/control-plane:NoSchedule` when `microk8s_dedicated_masters` (prod) |
 
 Every node also gets `topology.kubernetes.io/zone=<topology_zone>`. Stable API endpoint: keepalived
@@ -269,6 +303,175 @@ initialises vault-0 (5 shares / threshold 3), writes the keys + root token to
 `vault-tenant-auth` (charts/tenant). Every write is preceded by a read (idempotent). Move the keys into
 `vault.yml`, keep an offline copy, and revoke the root token once OIDC admin access exists.
 
+With `vault_deployment_mode: external | both` (transit auto-unseal, see below) the role first creates
+Secret `vault/vault-transit-token` (key `token`), initialises with **recovery** keys
+(`vault_recovery_keys`, 5 / 3) instead of unseal keys, and never unseals (the pods auto-unseal).
+An already initialised Shamir Vault is migrated with `-e vault_init_seal_migrate=true` (each pod in
+migration mode gets `vault operator unseal -migrate` with the old keys).
+
+## Secrets backend (`group_vars/all/secrets.yml`)
+
+`secrets_backend: ansible_vault` (default) keeps every secret in `group_vars/all/vault.yml`.
+`secrets_backend: hashicorp_vault` reads them from the **external** Vault with
+`community.hashi_vault.vault_kv2_get` lookups (AppRole `ansible`, `pip install hvac`):
+
+```bash
+export VAULT_ADDR=https://vault-ext.example.local:8200            # default when unset
+export VAULT_ROLE_ID=<role_id printed by vault-server.yml>
+export VAULT_SECRET_ID=$(vault write -f -field=secret_id auth/approle/role/ansible/secret-id)
+ansible-playbook -i inventories/production/hosts.yml playbooks/site.yml -e secrets_backend=hashicorp_vault
+```
+
+`secrets.yml` maps every secret-bearing role input to its source. Lookups are lazy: a secret is only
+fetched when a play uses it.
+
+| Role input | ansible-vault variable | External Vault (KV v2 `secret/`) |
+|------------|------------------------|----------------------------------|
+| `argocd_repo_username` / `_password` / `_ssh_private_key`, `argocd_oidc_client_secret`, `argocd_admin_password_bcrypt` | `vault_argocd_*` | `ansible/<env>/argocd`: `repo_username`, `repo_password`, `repo_ssh_private_key`, `oidc_client_secret`, `admin_password_bcrypt` |
+| `registry_username` / `registry_password` (reserved, no consumer yet) | `vault_registry_*` | `ansible/<env>/registry`: `username`, `password` |
+| `vault_init_unseal_keys`, `vault_init_root_token` | `vault_unseal_keys`, `vault_root_token` | `ansible/<env>/vault-in-cluster`: `unseal_keys`, `root_token` |
+| `vault_init_transit_token` | `vault_ext_transit_token` | `platform/vault-transit-token`: `token` (written by `vault_server`) |
+| `backup_remote_ssh_private_key` | `vault_backup_ssh_private_key` | `ansible/<env>/backup`: `ssh_private_key` |
+| `backup_s3_access_key` / `_secret_key` | `vault_backup_s3_*` | `platform/dqlite-s3`: `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY` (written by `minio_server`) |
+| `lb_keepalived_auth_pass`, `lb_stats_password` | `vault_lb_*` | `ansible/<env>/loadbalancer`: `keepalived_auth_pass`, `stats_password` |
+| `minio_server_root_user` / `_password` | `vault_minio_external_root_*` | `platform/minio-external`: `root-user`, `root-password` |
+
+These always stay in ansible-vault, because HashiCorp Vault can't hold the secrets it needs to start:
+`vault_ext_unseal_keys`, `vault_ext_root_token` and `vault_internal_ca_key_passphrase`.
+
+## External Vault and Vault deployment modes (`roles/vault_server`, optional)
+
+`vault_deployment_mode` (`group_vars/all/secrets.yml`, docs/conventions.md "External Vault (optional)"):
+
+| Mode | In-cluster Vault (`vault` ns) | External Vault (`vault_servers`) |
+|------|------------------------------|----------------------------------|
+| `in-cluster` (default) | Shamir, unsealed by `vault-init.yml` | not used |
+| `external` | seal `transit` -> auto-unseal via key `autounseal-k8s`; apps keep using it through ESO `vault-backend` | root of trust (transit), Ansible secrets source |
+| `both` | as `external` | also an ESO backend (ClusterSecretStore on `vault-ext`) for secrets that must survive the loss of the cluster |
+
+`vault-server.yml` (hosts `vault_servers`, `serial: 1`) does the following:
+
+- Installs the pinned `vault` package from the HashiCorp apt repo and holds it.
+- Builds a raft cluster with `retry_join` to every peer over TLS. The certificate comes from the internal CA
+  via `pki_cert`, with SANs `vault-ext.example.local`, the node FQDN, the node IP and 127.0.0.1.
+- Enables listener telemetry for Prometheus (`/v1/sys/metrics?format=prometheus`, unauthenticated) and the UI.
+- Runs Vault under a sandboxed systemd unit (`ProtectSystem=strict`, only `CAP_IPC_LOCK`, ...).
+- Configures ufw: 8200 from the node, admin and LB networks, 8201 between peers only.
+- Turns swap off.
+- Enables the file audit device `/var/log/vault/audit.log`, rotated by logrotate (SIGHUP).
+
+A restart seals a node, so the play handles nodes one at a time and unseals each one before moving to the next.
+
+- **Init:** only with `-e vault_server_init=true`, and only if Vault is not initialised yet. The output goes to
+  `inventories/<env>/vault-ext-init-<env>.yml`, which is ansible-vault encrypted immediately. With
+  `vault_server_init_output: print` it is printed once instead. Move the values to `vault_ext_unseal_keys` /
+  `vault_ext_root_token`. The external Vault stays Shamir-sealed: after a reboot, re-run the playbook or unseal by hand.
+- **Configuration** (first node, needs the root token):
+  - autopilot dead-server cleanup and the audit device
+  - `transit/` with key `autounseal-k8s` and policy `autounseal-k8s`
+  - a periodic orphan token for the seal. It is reused while valid and stored at
+    `secret/platform/vault-transit-token` and in the encrypted `vault-ext-transit-token-<env>.yml`.
+  - KV v2 at `secret/`
+  - AppRole `ansible`: its policy reads `secret/ansible/*` and writes `secret/platform/*`; its `secret_id` is
+    bound to the admin CIDRs. The playbook prints the role_id; issue one secret_id per controller.
+- **Endpoint:** `https://vault-ext.example.local:8200` is DNS round-robin over the nodes or a TCP VIP on the
+  `loadbalancers` pair (health check `GET /v1/sys/health`). Standby nodes forward requests to the leader.
+
+To enable transit auto-unseal of the in-cluster Vault:
+
+1. Run `vault-server.yml`; it creates the key and the token. Set `vault_deployment_mode: external` and either
+   `vault_ext_transit_token` or `secrets_backend: hashicorp_vault`.
+2. In `gitops/platform/core/vault/values.yaml`, uncomment `seal "transit"` and `extraSecretEnvironmentVars`
+   (`VAULT_TOKEN` from Secret `vault-transit-token`). The external Vault certificate must be signed by the same
+   CA as `internal-ca`, which is the case with `pki_cert` in internal_ca mode.
+3. Run `vault-init.yml -e vault_init_enabled=true`. It creates the Secret before the pods restart and initialises
+   new clusters with recovery keys. For an existing cluster, delete the pods one at a time (OnDelete), then re-run
+   with `-e vault_init_seal_migrate=true`.
+
+ExternalSecret alternative: instead of Ansible writing Secret `vault-transit-token`, create a ClusterSecretStore
+(for example `vault-external`, AppRole or token auth against `https://vault-ext.example.local:8200`) and an
+ExternalSecret in namespace `vault` that reads `secret/platform/vault-transit-token` into key `token`. Set
+`vault_init_create_transit_secret: false`. This store must not depend on the in-cluster Vault.
+
+## External MinIO (`roles/minio_server`, optional)
+
+The external MinIO is the backup target outside the cluster failure domain (docs/conventions.md "Object storage",
+docs/storage.md "Backups"). `minio-server.yml` runs three roles on `minio_servers`: `hardening`, `storage_prep`
+(XFS on `minio_drives`, mounted at `/mnt/disk1..N` with `nofail`) and `minio_server`.
+
+- **Distribution:** check MinIO's current licensing and distribution before production.
+  - The community edition (AGPLv3) has been in maintenance mode and source-only since late 2025: the dl.min.io
+    archive binaries and the public images are gone. AIStor is the commercial edition.
+  - `minio_server_binary_source: build` (default) builds `minio` `RELEASE.2025-10-15T17-29-55Z` and `mc`
+    `RELEASE.2025-08-13T08-35-41Z` from the git tags on the controller (`minio_server_build_host`, needs git and
+    Go). The binaries are cached in `ansible/.cache/minio-artifacts/` and their sha256 is printed.
+  - `minio_server_binary_source: url` downloads from an internal mirror with a pinned sha256.
+  - Ceph RGW, SeaweedFS and Garage are S3-compatible alternatives. Consumers only see the endpoint and per-bucket
+    credentials.
+- **Server setup:**
+  - user `minio-user`
+  - `/etc/default/minio` with `MINIO_VOLUMES=https://minio-{1...4}.storage.example.local:9000/mnt/disk{1...4}/minio`:
+    4 nodes x 4 drives in one 16-drive erasure set with `EC:4`. A single node uses `/mnt/disk{1...N}/minio`.
+  - TLS files in `/etc/minio/certs` (`public.crt`, `private.key`, `CAs/`)
+  - a sandboxed systemd unit with `RequiresMountsFor` on every drive
+  - Prometheus metrics with `MINIO_PROMETHEUS_AUTH_TYPE=jwt` or `public`. For jwt, a bearer token is generated once
+    with `mc admin prometheus generate` and stored at `secret/platform/minio-external-metrics`.
+  - ufw: 9000 from the node, admin and LB networks and from peers; console port 9001 from the admin networks only.
+- **Endpoint:** the role writes `minio-1..4.storage.example.local` to `/etc/hosts` on the MinIO nodes; add them to
+  DNS too. **`minio.storage.example.local:9000` must be a round-robin DNS name over all nodes, or a VIP on the
+  `loadbalancers` pair** (TCP passthrough, health check `GET /minio/health/live`). It is set as `MINIO_SERVER_URL`
+  and is a SAN on every node certificate. Every consumer uses it.
+- **Buckets and identities:** created on the first node with `mc`; the credentials exist only in the `mc` process
+  environment. Bucket names match what the GitOps manifests use (`minio_server_buckets`, `minio_server_consumers`):
+
+| Bucket | Versioning | Object lock (default retention) | ILM | User -> Vault (KV v2) keys |
+|--------|-----------|-------------------------------|-----|----------------------------|
+| `pg-backups` | yes | GOVERNANCE 30 d | noncurrent 35 d | `svc-postgres-backup` -> `platform/postgres-backup`: `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`, `ca.crt` |
+| `velero-backups` | yes | - (BSL uses `checksumAlgorithm: ""`) | noncurrent 30 d | `svc-velero` -> `platform/velero`: `s3-access-key`, `s3-secret-key` |
+| `thanos-metrics` | no (compactor rewrites) | - | - | `svc-thanos` -> `platform/thanos`: `access-key`, `secret-key` |
+| `es-snapshots` | yes | - | noncurrent 7 d | `svc-elastic-snapshots` -> `platform/elastic-snapshots`: `access-key`, `secret-key` |
+| `longhorn-backups` | yes | - | noncurrent 14 d | `svc-longhorn` -> `platform/longhorn`: `s3-access-key`, `s3-secret-key`, `s3-endpoint`, `s3-ca-cert` |
+| `platform-dqlite` | yes | GOVERNANCE 7 d | expire 30 d, noncurrent 7 d | `svc-dqlite` -> `platform/dqlite-s3`: `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`, `endpoint` |
+| `harbor-registry` | no | - | - | `svc-harbor` -> `platform/harbor-s3`: `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`, `endpoint` |
+
+- **Policies:** each user gets one policy limited to its own bucket (list, get, put, delete, multipart; no admin).
+  Object lock can only be enabled when a bucket is created; the role warns about buckets that already exist without it.
+- **Credentials:** generated once, then re-read on every run, so re-runs don't rotate them. Where they go:
+  - With `secrets_backend: hashicorp_vault` they are merged into the existing Vault secrets with
+    `community.hashi_vault.vault_kv2_write`. `minio_server_credentials_vault_url` must be the Vault that ESO reads:
+    the external one in mode `both`, otherwise point it at the in-cluster Vault.
+  - Otherwise they are written to `inventories/<env>/minio-external-credentials-<env>.yml` (ansible-vault encrypted)
+    for manual seeding with `vault kv patch -mount=secret <path> ...`.
+- **dqlite:** set `backup_s3_enabled: true` in role `backup` to upload the GPG-encrypted archives to
+  `platform-dqlite`. The upload uses `curl --aws-sigv4`, plus Content-MD5 for the object-lock bucket. Credentials
+  come from `vault_backup_s3_*` or `platform/dqlite-s3`.
+
+## Storage preparation (`roles/storage_prep`)
+
+`storage_prep` is part of `prepare-nodes.yml` (cluster nodes) and `minio-server.yml` (MinIO VMs);
+`storage-prep.yml` runs it on its own.
+
+| Input | Result | Used by |
+|-------|--------|---------|
+| `local_nvme_devices` (list, `storage` pool: 4 NVMe) | XFS, `/mnt/local-nvme/data0..3`, fstab by UUID, `noatime,nofail` | local-path provisioner, classes `local-nvme` / `local-nvme-minio` (in-cluster MinIO tenant) |
+| `local_nvme_device` (single disk, any other pool, set per host) | XFS, `/mnt/local-nvme` | class `local-nvme` (scratch, caches) |
+| `minio_drives` (`minio_servers`, optionally cluster nodes) | XFS labelled `MINIODISK<n>`, `/mnt/disk1..N` | external MinIO |
+| `longhorn_disk_device` | ext4 `/var/lib/longhorn` - role `common` (re-used, not duplicated) | Longhorn |
+| cluster nodes | `nfs-common` | csi-driver-nfs, class `nfs-rwx` |
+
+- **Never wipes data by accident:**
+  - A device is formatted only if `blkid -p` finds no signature, or finds the wanted filesystem already.
+  - A foreign filesystem, a partition table or partitions make the role fail unless `-e storage_prep_force=true`.
+  - A device that is mounted elsewhere, or holds `/`, is never touched.
+  - A device may be listed only once across `longhorn_disk_device`, `local_nvme_device(s)` and `minio_drives`.
+- **Mounts:** all mounts use `nofail`, so a dead disk does not block boot. Instead,
+  `snap.microk8s.daemon-kubelite.service` gets a drop-in with `RequiresMountsFor=/mnt/local-nvme[/dataN]`, and
+  `minio.service` requires its drives, so nothing writes volume data onto the root filesystem. The drop-in takes
+  effect at the next kubelite (re)start.
+- **NFS (`nfs-rwx`):** setting up the NFS server is out of scope. Its export `nfs.storage.example.local:/exports/k8s`
+  must be exported to the node networks (`platform_node_cidrs`) with `rw,sync,no_subtree_check,no_root_squash`,
+  because csi-driver-nfs creates the per-PVC directories as root.
+
 ## Upgrades
 
 1. Bump `microk8s_channel` by **one** minor (`1.32/stable` -> `1.33/stable`) in
@@ -285,7 +488,8 @@ Limit to a pool with `--limit data`.
 
 `backup.yml` installs `microk8s-backup.timer` on every master: `microk8s dbctl backup` (full dqlite
 datastore incl. Secrets) + a tarball of `certs/`, `credentials/`, `args/`, GPG-encrypted for
-`backup_gpg_recipient`, SHA256SUMS, rsync over SSH (pinned host key) to `backup01`, local retention,
+`backup_gpg_recipient`, SHA256SUMS, rsync over SSH (pinned host key) to `backup01` and/or (`backup_s3_enabled`)
+an S3 upload to the external MinIO bucket `platform-dqlite`, local retention,
 and `microk8s_backup_last_success` / `..._last_run_timestamp_seconds` via the node-exporter textfile
 collector (alert when stale > 26 h). Application data is protected separately (CNPG barman backups,
 Velero, Longhorn backups - GitOps).
@@ -297,7 +501,7 @@ Restore (total control-plane loss): build one master, restore the PKI tarball in
 ## Conventions check / assumptions
 
 - Node labels/taints, namespaces (`argocd`, `vault`, `external-secrets`, `tenant-<name>`, `shared-services`),
-  endpoints, MetalLB pool names (`public-pool`, `internal-pool`), storage classes (Longhorn only;
+  endpoints, MetalLB pool names (`public-pool`, `internal-pool`), storage classes (Longhorn, plus `local-nvme` on disks prepared by `storage_prep`, `nfs-rwx`, `minio-s3` from GitOps;
   `hostpath-storage` disabled) and the Git URL/revision follow `docs/conventions.md`.
 - `metallb_pools` in `network.yml` is the address plan the GitOps `IPAddressPool`s must match; Ansible
   validates it but does not deploy MetalLB.

@@ -1,6 +1,7 @@
 ---
 # OS baseline (packages, chrony, swap, kernel modules, sysctl, limits, Longhorn prerequisites,
-# firewall, journald) + CIS-inspired hardening on every cluster node.
+# firewall, journald), dedicated data disks (storage_prep: local-nvme, MinIO drives, NFS client)
+# + CIS-inspired hardening on every cluster node.
 - name: Prepare cluster nodes
   hosts: microk8s_cluster
   become: true
@@ -10,5 +11,9 @@
   roles:
     - role: common
       tags: [common]
+    - role: storage_prep
+      tags: [storage_prep]
+      vars:
+        storage_prep_longhorn: false      # role common has just prepared the Longhorn disk
     - role: hardening
       tags: [hardening]

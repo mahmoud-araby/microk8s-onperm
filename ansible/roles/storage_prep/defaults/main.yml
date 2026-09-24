@@ -1,0 +1,52 @@
+---
+# ===========================================================================
+# role: storage_prep - prepare DEDICATED data disks (docs/conventions.md "Storage classes")
+#
+#   local_nvme_devices (list, `storage` pool) -> XFS, /mnt/local-nvme/data0..N-1  local-path provisioner,
+#                                                   class `local-nvme` (in-cluster MinIO tenant drives)
+#   local_nvme_device  (single, other pools)  -> XFS, /mnt/local-nvme
+#   Both are mounted `nofail`; kubelite (snap.microk8s.daemon-kubelite.service) gets a drop-in with
+#   RequiresMountsFor=<mounts> so kubelet never starts writing volumes onto the root filesystem.
+#   minio_drives      (host/group var) -> XFS, /mnt/disk1..N        external MinIO (minio_servers) and
+#                                                                    optional extra drives on `storage` nodes
+#   longhorn_disk_device                -> handled by role common (common/tasks/storage.yml, ext4,
+#                                          /var/lib/longhorn); re-used here, never duplicated
+#   NFS client packages on Kubernetes nodes (csi-driver-nfs, class `nfs-rwx`)
+#
+# SAFETY: a device is only formatted when it is completely blank or already carries the wanted
+# filesystem. A foreign filesystem or a partition table makes the role FAIL unless
+# storage_prep_force=true. A device mounted anywhere else (or holding /) is never touched.
+# ===========================================================================
+
+storage_prep_force: false
+
+# --- local-nvme (local-path provisioner) ------------------------------------------------------------
+# Single disk (any pool) -> /mnt/local-nvme
+storage_prep_local_nvme_device: "{{ local_nvme_device | default('') }}"
+# Several disks (`storage` pool, layout expected by gitops local-path / MinIO tenant) -> /mnt/local-nvme/data<i>
+storage_prep_local_nvme_devices: "{{ local_nvme_devices | default([]) }}"
+storage_prep_local_nvme_mount: /mnt/local-nvme
+storage_prep_local_nvme_subdir_prefix: data
+storage_prep_local_nvme_fstype: xfs
+storage_prep_local_nvme_label: localnvme          # + index for the multi-disk layout (localnvme0..)
+storage_prep_local_nvme_opts: defaults,noatime,nofail
+# Drop-in for the MicroK8s kubelet so it waits for (and requires) the local-nvme mounts
+storage_prep_kubelite_unit: snap.microk8s.daemon-kubelite.service
+storage_prep_kubelite_requires_mounts: "{{ 'microk8s_cluster' in group_names }}"
+
+# --- MinIO drives -----------------------------------------------------------------------------------
+storage_prep_minio_drives: "{{ minio_drives | default([]) }}"
+storage_prep_minio_mount_prefix: /mnt/disk
+storage_prep_minio_fstype: xfs
+# XFS labels are limited to 12 characters: MINIODISK1 .. MINIODISK16
+storage_prep_minio_label_prefix: MINIODISK
+# nofail: a dead drive must not block boot; minio.service has RequiresMountsFor on every drive
+storage_prep_minio_opts: defaults,noatime,nofail
+
+# --- NFS client (csi-driver-nfs, nfs-rwx) -------------------------------------------------------------
+storage_prep_nfs_client: "{{ 'microk8s_cluster' in group_names }}"
+storage_prep_nfs_packages: [nfs-common]
+
+# --- Longhorn disk: run common's storage tasks (multipath blacklist + /var/lib/longhorn) -----------
+# prepare-nodes.yml sets this to false because role common has just run them.
+storage_prep_longhorn: "{{ 'microk8s_cluster' in group_names }}"

@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Transit auto-unseal of the in-cluster Vault (gitops/platform/core/vault, seal "transit")
+path "{{ vault_server_transit_mount }}/encrypt/{{ vault_server_transit_key }}" {
+  capabilities = ["update"]
+}
+path "{{ vault_server_transit_mount }}/decrypt/{{ vault_server_transit_key }}" {
+  capabilities = ["update"]
+}

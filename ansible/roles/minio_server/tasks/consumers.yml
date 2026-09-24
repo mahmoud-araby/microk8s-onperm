@@ -1,0 +1,207 @@
+---
+# One MinIO user + policy per consumer, restricted to the consumer's own bucket(s).
+# Secrets are generated once and then always re-read from the credential store (idempotent).
+- name: Create the policy directory
+  ansible.builtin.file:
+    path: /etc/minio/policies
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Render consumer policies
+  ansible.builtin.template:
+    src: policy-consumer.json.j2
+    dest: "/etc/minio/policies/{{ item.name }}.json"
+    owner: root
+    group: root
+    mode: "0640"
+  vars:
+    _buckets: "{{ minio_server_buckets | selectattr('consumer', 'equalto', item.name) | map(attribute='name') | list }}"
+  loop: "{{ minio_server_consumers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _minio_policy_files
+
+- name: Read consumer policies
+  ansible.builtin.command: "mc admin policy info {{ minio_server_mc_alias }} {{ item.name }} --json"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ minio_server_consumers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _minio_policy_info
+  changed_when: false
+  failed_when: false
+
+- name: Create / update consumer policies
+  ansible.builtin.command: >-
+    mc admin policy create {{ minio_server_mc_alias }} {{ item.0.item.name }} /etc/minio/policies/{{ item.0.item.name }}.json
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_policy_files.results | zip(_minio_policy_info.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item.name }}"
+  when: item.0 is changed or item.1.rc != 0
+  changed_when: true
+
+# --- Existing credentials --------------------------------------------------------------------------
+- name: Read existing credentials from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ minio_server_credentials_vault_url }}"
+    auth_method: "{{ minio_server_credentials_vault_auth_method }}"
+    role_id: "{{ minio_server_credentials_vault_role_id | default(omit, true) }}"
+    secret_id: "{{ minio_server_credentials_vault_secret_id | default(omit, true) }}"
+    token: "{{ minio_server_credentials_vault_token | default(omit, true) }}"
+    ca_cert: "{{ minio_server_credentials_vault_ca_cert | default(omit, true) }}"
+    engine_mount_point: "{{ minio_server_credentials_vault_mount }}"
+    path: "{{ item.vault_path }}"
+  loop: "{{ minio_server_consumers }}"
+  loop_control:
+    label: "{{ item.vault_path }}"
+  register: _minio_vault_existing
+  failed_when: false
+  delegate_to: localhost
+  become: false
+  when: minio_server_credentials_backend == 'hashicorp_vault'
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Read the CA certificate for consumers that need it
+  ansible.builtin.slurp:
+    src: "{{ minio_server_certs_dir }}/CAs/ca.crt"
+  register: _minio_ca_pem
+
+- name: Resolve credentials (reuse stored ones, generate the missing)
+  ansible.builtin.set_fact:
+    _minio_creds: >-
+      {{ _minio_creds | default([]) + [{
+           'name': _c.name,
+           'vault_path': _c.vault_path,
+           'existing': _existing,
+           'generated': (_existing[_c.secret_key_field] | default('')) | length == 0,
+           'access_key': _existing[_c.access_key_field] | default('svc-' ~ _c.name, true),
+           'secret_key': _existing[_c.secret_key_field] | default(lookup('ansible.builtin.password', '/dev/null',
+                                                                         length=40, chars=['ascii_letters', 'digits']), true),
+           'access_key_field': _c.access_key_field,
+           'secret_key_field': _c.secret_key_field,
+           'extra': _c.extra | default({})}] }}
+  vars:
+    _c: "{{ minio_server_consumers[_idx] }}"
+    _existing: >-
+      {{ (_minio_vault_existing.results[_idx].secret | default({}))
+         if minio_server_credentials_backend == 'hashicorp_vault'
+         else (_minio_cred_file.minio_external_credentials[_c.name].data | default({})) }}
+  loop: "{{ range(minio_server_consumers | length) | list }}"
+  loop_control:
+    loop_var: _idx
+    label: "{{ minio_server_consumers[_idx].name }}"
+  no_log: "{{ minio_server_no_log }}"
+
+# --- Users -----------------------------------------------------------------------------------------
+- name: Read consumer users
+  ansible.builtin.command: "mc admin user info {{ minio_server_mc_alias }} {{ item.access_key }} --json"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_creds }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _minio_user_info
+  changed_when: false
+  failed_when: false
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Create consumer users (or reset a secret that was lost from the store)
+  ansible.builtin.command: "mc admin user add {{ minio_server_mc_alias }} {{ _res.item.access_key }} {{ _res.item.secret_key }}"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_user_info.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res.item.name }}"
+  when: _res.rc != 0 or _res.item.generated
+  changed_when: true
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Attach each consumer policy to its user
+  ansible.builtin.command: "mc admin policy attach {{ minio_server_mc_alias }} {{ _res.item.name }} --user {{ _res.item.access_key }}"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_user_info.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res.item.name }}"
+  when: >-
+    _res.rc != 0
+    or _res.item.name not in ((_res.stdout | from_json).policyName | default('')).split(',')
+  changed_when: true
+  no_log: "{{ minio_server_no_log }}"
+
+# --- Push credentials ------------------------------------------------------------------------------
+- name: Build the secret payloads (existing keys are kept, ours are merged in)
+  ansible.builtin.set_fact:
+    _minio_payloads: >-
+      {{ _minio_payloads | default([]) + [{
+           'name': item.name,
+           'vault_path': item.vault_path,
+           'existing': item.existing,
+           'data': _data}] }}
+    _minio_file_doc: "{{ _minio_file_doc | default({}) | combine({item.name: {'vault_path': item.vault_path, 'data': _data}}) }}"
+  vars:
+    _ca: "{{ _minio_ca_pem.content | b64decode }}"
+    _extra: >-
+      {{ dict(item.extra.keys() | zip(item.extra.values()
+              | map('replace', '__CA__', _ca) | map('replace', '__ENDPOINT__', minio_server_endpoint))) }}
+    _data: >-
+      {{ item.existing | combine({item.access_key_field: item.access_key, item.secret_key_field: item.secret_key}, _extra) }}
+  loop: "{{ _minio_creds }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Write credentials to Vault (merged into the existing secret)
+  community.hashi_vault.vault_kv2_write:
+    url: "{{ minio_server_credentials_vault_url }}"
+    auth_method: "{{ minio_server_credentials_vault_auth_method }}"
+    role_id: "{{ minio_server_credentials_vault_role_id | default(omit, true) }}"
+    secret_id: "{{ minio_server_credentials_vault_secret_id | default(omit, true) }}"
+    token: "{{ minio_server_credentials_vault_token | default(omit, true) }}"
+    ca_cert: "{{ minio_server_credentials_vault_ca_cert | default(omit, true) }}"
+    engine_mount_point: "{{ minio_server_credentials_vault_mount }}"
+    path: "{{ item.vault_path }}"
+    data: "{{ item.data }}"
+  loop: "{{ _minio_payloads }}"
+  loop_control:
+    label: "{{ minio_server_credentials_vault_mount }}/{{ item.vault_path }}"
+  when:
+    - minio_server_credentials_backend == 'hashicorp_vault'
+    - item.data != item.existing
+  delegate_to: localhost
+  become: false
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Store credentials in an ansible-vault encrypted controller file
+  when:
+    - minio_server_credentials_backend != 'hashicorp_vault'
+    - _minio_file_doc != (_minio_cred_file.minio_external_credentials | default({}))
+  delegate_to: localhost
+  become: false
+  block:
+    - name: Write the credentials file (mode 0600)
+      ansible.builtin.copy:
+        dest: "{{ minio_server_credentials_file }}"
+        content: |
+          # External MinIO consumer credentials ({{ minio_server_endpoint }}).
+          # Seed each `data` map into Vault KV v2 at secret/<vault_path> (the consumers' ExternalSecrets read it):
+          #   vault kv patch -mount=secret <vault_path> KEY=VALUE ...
+          {{ {'minio_external_credentials': _minio_file_doc} | to_nice_yaml(indent=2) }}
+        mode: "0600"
+      no_log: "{{ minio_server_no_log }}"
+
+    - name: Encrypt the credentials file
+      ansible.builtin.command:
+        cmd: >-
+          ansible-vault encrypt {{ minio_server_credentials_file | quote }}
+          --encrypt-vault-id {{ minio_server_credentials_vault_id | quote }}
+      changed_when: true
+
+    - name: Tell the operator where the credentials are
+      ansible.builtin.debug:
+        msg: >-
+          Consumer credentials written to {{ minio_server_credentials_file }} (ansible-vault encrypted).
+          Seed them into Vault (paths: {{ _minio_payloads | map(attribute='vault_path') | join(', ') }})
+          or switch to secrets_backend=hashicorp_vault to push them automatically.

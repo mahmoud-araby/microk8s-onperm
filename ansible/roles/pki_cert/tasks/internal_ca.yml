@@ -1,0 +1,166 @@
+---
+# --- CA on the controller ------------------------------------------------------------------------
+- name: Check the CA on the controller
+  ansible.builtin.stat:
+    path: "{{ pki_cert_ca_cert_file }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _pki_ca_stat
+
+- name: Create a CA on the controller (pki_cert_create_ca=true, labs / staging)
+  when:
+    - not _pki_ca_stat.stat.exists
+    - pki_cert_create_ca | bool
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+    - name: Create the controller PKI directory
+      ansible.builtin.file:
+        path: "{{ pki_cert_ca_key_file | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate the CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ pki_cert_ca_key_file }}"
+        type: RSA
+        size: 4096
+        passphrase: "{{ pki_cert_ca_key_passphrase | default(omit, true) }}"
+        cipher: "{{ 'auto' if (pki_cert_ca_key_passphrase | length > 0) else omit }}"
+        mode: "0600"
+
+    - name: Generate the CA CSR
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: "{{ pki_cert_ca_key_file }}"
+        privatekey_passphrase: "{{ pki_cert_ca_key_passphrase | default(omit, true) }}"
+        common_name: "{{ pki_cert_ca_common_name }}"
+        organization_name: "{{ pki_cert_organization }}"
+        basic_constraints: ["CA:TRUE", "pathlen:0"]
+        basic_constraints_critical: true
+        key_usage: [keyCertSign, cRLSign]
+        key_usage_critical: true
+        use_common_name_for_san: false
+      register: _pki_ca_csr
+
+    - name: Self-sign the CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ pki_cert_ca_cert_file }}"
+        csr_content: "{{ _pki_ca_csr.csr }}"
+        privatekey_path: "{{ pki_cert_ca_key_file }}"
+        privatekey_passphrase: "{{ pki_cert_ca_key_passphrase | default(omit, true) }}"
+        provider: selfsigned
+        selfsigned_not_after: "+{{ pki_cert_ca_validity_days }}d"
+        mode: "0644"
+
+    - name: Warn about the generated CA
+      ansible.builtin.debug:
+        msg:
+          - "A NEW CA was generated: {{ pki_cert_ca_cert_file }} (key {{ pki_cert_ca_key_file }})."
+          - "Keep the key out of git (ansible/.gitignore) and back it up offline; distribute the"
+          - "certificate to every client (cert-manager internal-ca, Vault/ESO/CNPG/Velero CA bundles)."
+
+- name: CA certificate and key are available on the controller
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: ["{{ pki_cert_ca_cert_file }}", "{{ pki_cert_ca_key_file }}"]
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: _pki_ca_files
+
+- name: Fail without CA material
+  ansible.builtin.assert:
+    that: _pki_ca_files.results | map(attribute='stat.exists') | select | list | length == 2
+    fail_msg: >-
+      {{ pki_cert_ca_cert_file }} / {{ pki_cert_ca_key_file }} not found on the controller.
+      Provide the on-prem CA, set pki_cert_mode=files with pki_cert_src_*, or (labs) -e pki_cert_create_ca=true.
+    quiet: true
+  run_once: true
+
+# --- Host key + CSR (key never leaves the host) --------------------------------------------------
+- name: Generate the host private key
+  community.crypto.openssl_privatekey:
+    path: "{{ pki_cert_key_path }}"
+    type: "{{ pki_cert_key_type }}"
+    size: "{{ pki_cert_key_size if pki_cert_key_type == 'RSA' else omit }}"
+    owner: "{{ pki_cert_owner }}"
+    group: "{{ pki_cert_group }}"
+    mode: "{{ pki_cert_key_mode }}"
+  register: _pki_key
+
+- name: Build the certificate signing request
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ pki_cert_key_path }}"
+    common_name: "{{ pki_cert_common_name }}"
+    organization_name: "{{ pki_cert_organization }}"
+    subject_alt_name: >-
+      {{ (pki_cert_dns_names | unique | map('regex_replace', '^', 'DNS:') | list)
+         + (pki_cert_ip_addresses | unique | map('regex_replace', '^', 'IP:') | list) }}
+    key_usage: [digitalSignature, keyEncipherment]
+    key_usage_critical: true
+    extended_key_usage: [serverAuth, clientAuth]
+  register: _pki_csr
+  changed_when: false
+
+- name: Check for an existing certificate
+  ansible.builtin.stat:
+    path: "{{ pki_cert_cert_path }}"
+  register: _pki_cert_stat
+
+- name: Read the existing certificate
+  ansible.builtin.slurp:
+    src: "{{ pki_cert_cert_path }}"
+  register: _pki_cert_current
+  when: _pki_cert_stat.stat.exists
+
+- name: Extract the leaf certificate (the file also carries the CA chain)
+  ansible.builtin.set_fact:
+    _pki_leaf: >-
+      {{ (_pki_cert_current.content | b64decode
+          | regex_search('(?s)-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----') or '')
+         if _pki_cert_stat.stat.exists else '' }}
+
+- name: Check the remaining validity of the existing certificate
+  community.crypto.x509_certificate_info:
+    content: "{{ _pki_leaf }}"
+    valid_at:
+      renew: "+{{ pki_cert_renew_days }}d"
+  register: _pki_cert_info
+  delegate_to: localhost
+  become: false
+  when: _pki_leaf | length > 0
+
+- name: Sign the certificate with the internal CA (idempotent; re-issued on SAN change or near expiry)
+  community.crypto.x509_certificate_pipe:
+    content: "{{ _pki_leaf if (_pki_leaf | length > 0) else omit }}"
+    csr_content: "{{ _pki_csr.csr }}"
+    provider: ownca
+    ownca_path: "{{ pki_cert_ca_cert_file }}"
+    ownca_privatekey_path: "{{ pki_cert_ca_key_file }}"
+    ownca_privatekey_passphrase: "{{ pki_cert_ca_key_passphrase | default(omit, true) }}"
+    ownca_not_after: "+{{ pki_cert_validity_days }}d"
+    force: "{{ (_pki_leaf | length > 0) and not (_pki_cert_info.valid_at.renew | default(true)) }}"
+  register: _pki_signed
+  delegate_to: localhost
+  become: false
+
+- name: Install the certificate (leaf + CA chain)
+  ansible.builtin.copy:
+    content: "{{ _pki_signed.certificate | trim }}\n{{ lookup('ansible.builtin.file', pki_cert_ca_cert_file) | trim }}\n"
+    dest: "{{ pki_cert_cert_path }}"
+    owner: "{{ pki_cert_owner }}"
+    group: "{{ pki_cert_group }}"
+    mode: "0644"
+  register: _pki_cert
+  when: _pki_signed is changed or (_pki_leaf | length == 0)
+
+- name: Install the CA certificate
+  ansible.builtin.copy:
+    src: "{{ pki_cert_ca_cert_file }}"
+    dest: "{{ pki_cert_ca_path }}"
+    owner: "{{ pki_cert_owner }}"
+    group: "{{ pki_cert_group }}"
+    mode: "0644"
+  register: _pki_ca

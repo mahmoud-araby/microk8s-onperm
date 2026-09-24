@@ -1,0 +1,35 @@
+---
+# SSH is allowed BEFORE ufw is enabled so we never lock ourselves out.
+- name: Allow SSH from admin networks
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ minio_server_firewall_ssh_port }}"
+    proto: tcp
+    comment: ssh-admin
+  loop: "{{ minio_server_firewall_admin_cidrs }}"
+
+- name: Allow the S3 API from clients and peers (inter-node traffic uses the same port)
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ minio_server_port | string }}"
+    proto: tcp
+    comment: minio-s3
+  loop: "{{ (minio_server_firewall_client_cidrs + _minio_peers) | unique }}"
+
+- name: Allow the MinIO console from admin networks only
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ minio_server_console_port | string }}"
+    proto: tcp
+    comment: minio-console
+  loop: "{{ minio_server_firewall_admin_cidrs }}"
+
+- name: Deny incoming traffic by default and enable ufw
+  community.general.ufw:
+    state: enabled
+    default: deny
+    direction: incoming
+    logging: "low"

@@ -1,0 +1,52 @@
+# {{ ansible_managed }}
+# role: vault_server - hardened unit (overrides /usr/lib/systemd/system/vault.service)
+[Unit]
+Description=HashiCorp Vault (external cluster {{ vault_server_cluster_name }})
+Documentation=https://developer.hashicorp.com/vault/docs
+Requires=network-online.target
+After=network-online.target time-sync.target
+ConditionFileNotEmpty={{ vault_server_config_dir }}/vault.hcl
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+EnvironmentFile=-{{ vault_server_config_dir }}/vault.env
+User={{ vault_server_user }}
+Group={{ vault_server_group }}
+ExecStart=/usr/bin/vault server -config={{ vault_server_config_dir }}/vault.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+UMask=0077
+
+# --- sandboxing ---
+AmbientCapabilities=CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK
+SecureBits=keep-caps
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths={{ vault_server_data_dir }} {{ vault_server_log_dir }}
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

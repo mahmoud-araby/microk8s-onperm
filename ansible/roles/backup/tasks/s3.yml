@@ -1,0 +1,53 @@
+---
+- name: Require S3 credentials for the dqlite upload
+  ansible.builtin.assert:
+    that:
+      - backup_s3_access_key | length > 0
+      - backup_s3_secret_key | length > 0
+    fail_msg: >-
+      backup_s3_enabled needs the platform-dqlite credentials created by playbooks/minio-server.yml
+      (vault_backup_s3_access_key / vault_backup_s3_secret_key, or secret/platform/dqlite-s3 with secrets_backend=hashicorp_vault)
+    quiet: true
+  no_log: true
+
+- name: Install curl and openssl (SigV4 upload, Content-MD5)
+  ansible.builtin.apt:
+    name: [curl, openssl]
+    state: present
+    lock_timeout: 300
+
+- name: Create the backup configuration directory
+  ansible.builtin.file:
+    path: "{{ backup_s3_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install the CA of the MinIO endpoint
+  ansible.builtin.copy:
+    src: "{{ backup_s3_ca_cert_file }}"
+    dest: "{{ backup_s3_config_dir }}/s3-ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - backup_s3_ca_cert_file | length > 0
+    - backup_s3_ca_cert_file is file
+
+- name: Write the S3 credentials (root-only)
+  ansible.builtin.copy:
+    dest: "{{ backup_s3_config_dir }}/s3.env"
+    content: |
+      # Managed by Ansible (role: backup)
+      S3_ENDPOINT={{ backup_s3_endpoint | quote }}
+      S3_BUCKET={{ backup_s3_bucket | quote }}
+      S3_PREFIX={{ backup_s3_prefix | quote }}
+      S3_REGION={{ backup_s3_region | quote }}
+      S3_ACCESS_KEY={{ backup_s3_access_key | quote }}
+      S3_SECRET_KEY={{ backup_s3_secret_key | quote }}
+      S3_CACERT={{ ((backup_s3_config_dir ~ '/s3-ca.crt') if (backup_s3_ca_cert_file | length > 0 and backup_s3_ca_cert_file is file) else '') | quote }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true

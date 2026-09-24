@@ -1,0 +1,70 @@
+---
+# Bearer token (JWT signed with the root credentials) for Prometheus scraping /minio/v2/metrics/*.
+# Generated once and stored like the consumer credentials (key `bearer_token`).
+- name: Read the stored Prometheus token from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ minio_server_credentials_vault_url }}"
+    auth_method: "{{ minio_server_credentials_vault_auth_method }}"
+    role_id: "{{ minio_server_credentials_vault_role_id | default(omit, true) }}"
+    secret_id: "{{ minio_server_credentials_vault_secret_id | default(omit, true) }}"
+    token: "{{ minio_server_credentials_vault_token | default(omit, true) }}"
+    ca_cert: "{{ minio_server_credentials_vault_ca_cert | default(omit, true) }}"
+    engine_mount_point: "{{ minio_server_credentials_vault_mount }}"
+    path: "{{ minio_server_prometheus_secret_path }}"
+  register: _minio_metrics_vault
+  failed_when: false
+  delegate_to: localhost
+  become: false
+  when: minio_server_credentials_backend == 'hashicorp_vault'
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Stored Prometheus token
+  ansible.builtin.set_fact:
+    _minio_metrics_token: >-
+      {{ (_minio_metrics_vault.secret.bearer_token | default(''))
+         if minio_server_credentials_backend == 'hashicorp_vault'
+         else (_minio_cred_file.minio_external_credentials['minio-metrics'].data.bearer_token | default('')) }}
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Generate a Prometheus scrape config with a bearer token
+  ansible.builtin.command: "mc admin prometheus generate {{ minio_server_mc_alias }}"
+  environment: "{{ _minio_mc_env }}"
+  register: _minio_metrics_gen
+  changed_when: true
+  when: _minio_metrics_token | length == 0
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Keep the new token
+  ansible.builtin.set_fact:
+    _minio_metrics_token: "{{ (_minio_metrics_gen.stdout | from_yaml).scrape_configs[0].bearer_token }}"
+  when: _minio_metrics_gen is not skipped
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Write the Prometheus token to Vault
+  community.hashi_vault.vault_kv2_write:
+    url: "{{ minio_server_credentials_vault_url }}"
+    auth_method: "{{ minio_server_credentials_vault_auth_method }}"
+    role_id: "{{ minio_server_credentials_vault_role_id | default(omit, true) }}"
+    secret_id: "{{ minio_server_credentials_vault_secret_id | default(omit, true) }}"
+    token: "{{ minio_server_credentials_vault_token | default(omit, true) }}"
+    ca_cert: "{{ minio_server_credentials_vault_ca_cert | default(omit, true) }}"
+    engine_mount_point: "{{ minio_server_credentials_vault_mount }}"
+    path: "{{ minio_server_prometheus_secret_path }}"
+    data:
+      bearer_token: "{{ _minio_metrics_token }}"
+      endpoint: "{{ minio_server_endpoint }}"
+  delegate_to: localhost
+  become: false
+  when:
+    - minio_server_credentials_backend == 'hashicorp_vault'
+    - _minio_metrics_gen is not skipped
+  no_log: "{{ minio_server_no_log }}"
+
+- name: Add the Prometheus token to the controller credentials file content
+  ansible.builtin.set_fact:
+    _minio_file_doc: >-
+      {{ _minio_file_doc | default({}) | combine({'minio-metrics': {'vault_path': minio_server_prometheus_secret_path,
+                                                                    'data': {'bearer_token': _minio_metrics_token,
+                                                                             'endpoint': minio_server_endpoint}}}) }}
+  when: minio_server_credentials_backend != 'hashicorp_vault'
+  no_log: "{{ minio_server_no_log }}"

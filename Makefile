@@ -15,8 +15,9 @@ help: ## Show this help
 
 ## ---------- Cluster lifecycle (Ansible) ----------
 .PHONY: deps preflight cluster addons gitops configmaps site upgrade backup
-deps: ## Install Ansible collections
+deps: ## Install Ansible collections (+ hvac for HashiCorp Vault lookups)
 	ansible-galaxy collection install -r ansible/requirements.yml
+	python3 -m pip install --user 'hvac>=2.1'
 
 preflight: ## Validate hosts meet requirements
 	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/preflight.yml $(ANSIBLE_OPTS)
@@ -43,7 +44,7 @@ backup: ## Back up the dqlite datastore
 	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/backup.yml $(ANSIBLE_OPTS)
 
 ## ---------- Edge load balancers, external Vault / MinIO, storage ----------
-.PHONY: lb lb-certs lb-check vault-server minio-server storage-prep
+.PHONY: lb lb-certs lb-check vault-server vault-server-init vault-init-transit minio-server storage-prep
 lb: ## Deploy HAProxy + keepalived edge load balancers (L7 default, lb_mode=l4 optional)
 	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/loadbalancers.yml $(ANSIBLE_OPTS)
 
@@ -52,6 +53,21 @@ lb-certs: ## Sync TLS certificates to the load balancers (run daily)
 
 lb-check: ## Dry-run the load balancer configuration (diff only)
 	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/loadbalancers.yml --check --diff $(ANSIBLE_OPTS)
+
+vault-server: ## Install/configure the external Vault HA cluster (vault_servers)
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/vault-server.yml $(ANSIBLE_OPTS)
+
+vault-server-init: ## First-time init of the external Vault (stores keys ansible-vault encrypted)
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/vault-server.yml -e vault_server_init=true $(ANSIBLE_OPTS)
+
+vault-init-transit: ## Init in-cluster Vault with transit auto-unseal from the external Vault
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/vault-init.yml -e vault_init_enabled=true -e vault_deployment_mode=external $(ANSIBLE_OPTS)
+
+minio-server: ## Install the external MinIO backup cluster (minio_servers), buckets and consumer users
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/minio-server.yml $(ANSIBLE_OPTS)
+
+storage-prep: ## Format/mount local NVMe and MinIO drives (never wipes used disks unless storage_prep_force=true)
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/storage-prep.yml $(if $(LIMIT),--limit $(LIMIT),) $(ANSIBLE_OPTS)
 
 ## ---------- Validation ----------
 .PHONY: lint yamllint helm-lint helm-template ansible-lint validate

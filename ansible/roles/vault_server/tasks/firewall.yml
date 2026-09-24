@@ -1,0 +1,35 @@
+---
+# SSH is allowed BEFORE ufw is enabled so we never lock ourselves out.
+- name: Allow SSH from admin networks
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ vault_server_firewall_ssh_port }}"
+    proto: tcp
+    comment: ssh-admin
+  loop: "{{ vault_server_firewall_admin_cidrs }}"
+
+- name: Allow the Vault API (8200) from clients and peers
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ vault_server_port | string }}"
+    proto: tcp
+    comment: vault-api
+  loop: "{{ (vault_server_firewall_client_cidrs + _vault_server_peers) | unique }}"
+
+- name: Allow raft / request forwarding (8201) between Vault nodes only
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ vault_server_cluster_port | string }}"
+    proto: tcp
+    comment: vault-cluster
+  loop: "{{ _vault_server_peers }}"
+
+- name: Deny incoming traffic by default and enable ufw
+  community.general.ufw:
+    state: enabled
+    default: deny
+    direction: incoming
+    logging: "low"

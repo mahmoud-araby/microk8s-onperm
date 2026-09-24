@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: pki_cert
+  namespace: platform
+  author: Platform Engineering
+  description: Server TLS certificate for non-Kubernetes hosts (key generated on the host, signed by the on-prem internal CA on the controller, or copied from files)
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [pki, tls, certificates]
+dependencies: []

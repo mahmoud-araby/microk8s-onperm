@@ -38,6 +38,30 @@ vault_init_root_token: "{{ vault_root_token | default('') }}"
 vault_init_raft_manual_join: false
 vault_init_raft_leader_addr: "http://vault-0.vault-internal:8200"
 
+# --- External Vault: transit auto-unseal (docs/conventions.md "External Vault (optional)") ----
+# vault_deployment_mode (group_vars/all/secrets.yml): in-cluster (default) | external | both.
+# external / both: the in-cluster Vault uses seal "transit" against the external Vault
+# (role vault_server, key autounseal-k8s). This role then
+#   * creates Secret <vault_init_namespace>/vault-transit-token (key `token`) BEFORE the pods start
+#     (gitops/platform/core/vault/values.yaml: uncomment the seal "transit" block + extraSecretEnvironmentVars),
+#   * initialises with RECOVERY keys (-recovery-shares/-recovery-threshold) instead of unseal keys,
+#   * does not unseal (the pods auto-unseal); with vault_init_seal_migrate=true it migrates an existing
+#     Shamir-sealed Vault to transit (vault operator unseal -migrate with the old unseal keys).
+# Alternative to the Secret written here: an ExternalSecret from a ClusterSecretStore on the external
+# Vault (secret/platform/vault-transit-token) - see ansible/README.md "Vault deployment modes".
+vault_init_deployment_mode: "{{ vault_deployment_mode | default('in-cluster') }}"
+vault_init_transit_seal: "{{ vault_init_deployment_mode in ['external', 'both'] }}"
+# Token created by role vault_server (periodic, policy autounseal-k8s). With secrets_backend=hashicorp_vault
+# group_vars/all/secrets.yml resolves it from the external Vault (secret/platform/vault-transit-token).
+vault_init_transit_token: "{{ vault_ext_transit_token | default('') }}"
+vault_init_transit_secret_name: vault-transit-token
+vault_init_transit_secret_key: token
+vault_init_create_transit_secret: true
+vault_init_recovery_shares: 5
+vault_init_recovery_threshold: 3
+vault_init_seal_migrate: false
+vault_init_values_file: "{{ playbook_dir }}/../../gitops/platform/core/vault/values.yaml"
+
 # --- Configuration ------------------------------------------------------------------
 vault_init_configure: true
 # KV v2 mount used by the External Secrets ClusterSecretStore "vault-backend" (docs/conventions.md)

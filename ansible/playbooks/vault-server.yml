@@ -1,0 +1,33 @@
+---
+# OPTIONAL: standalone HashiCorp Vault HA cluster on VMs (inventory group vault_servers, raft),
+# https://vault-ext.example.local:8200 - docs/conventions.md "External Vault (optional)".
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/vault-server.yml --vault-id production@prompt
+#   first run only:  -e vault_server_init=true   (keys -> inventories/<env>/vault-ext-init-<env>.yml, encrypted)
+# Re-running is safe: nodes are handled one at a time (a restart seals a node; it is unsealed again
+# before the next one), then transit auto-unseal key/policy/token, KV v2 and AppRole `ansible` are converged.
+# The play is a no-op when vault_servers is empty.
+- name: External Vault - OS hardening, install, TLS, raft, unseal
+  hosts: vault_servers
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  roles:
+    - role: hardening
+      tags: [hardening]
+    - role: vault_server
+      tags: [vault_server]
+
+- name: External Vault - transit auto-unseal, KV v2, AppRole, audit
+  hosts: vault_servers[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Configure the external Vault
+      ansible.builtin.include_role:
+        name: vault_server
+        tasks_from: configure.yml
+        apply:
+          tags: [vault_server, vault_configure]
+      when: vault_server_configure | default(true) | bool
+      tags: [vault_server, vault_configure]

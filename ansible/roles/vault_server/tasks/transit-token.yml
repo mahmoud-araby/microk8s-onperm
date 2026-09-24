@@ -1,0 +1,86 @@
+---
+# Reuse a still-valid token (KV v2 copy or vault_ext_transit_token from vault.yml), else mint a new one.
+- name: Read the stored auto-unseal token (KV v2)
+  ansible.builtin.command: >-
+    vault kv get -format=json -mount={{ vault_server_kv_path }} {{ vault_server_transit_token_kv_path }}
+  register: _vs_tt_kv
+  changed_when: false
+  failed_when: false
+  when: vault_server_kv_enabled | bool
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Candidate token
+  ansible.builtin.set_fact:
+    _vs_tt_candidate: >-
+      {{ ((_vs_tt_kv.stdout | from_json).data.data.token | default(''))
+         if (_vs_tt_kv.rc | default(1)) == 0 else (vault_ext_transit_token | default('')) }}
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Check that the candidate token is valid and carries the auto-unseal policy
+  ansible.builtin.command: vault token lookup -format=json
+  environment:
+    VAULT_TOKEN: "{{ _vs_tt_candidate }}"
+  register: _vs_tt_lookup
+  changed_when: false
+  failed_when: false
+  when: _vs_tt_candidate | length > 0
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Decide whether a new token is needed
+  ansible.builtin.set_fact:
+    _vs_tt_needed: >-
+      {{ _vs_tt_candidate | length == 0
+         or (_vs_tt_lookup.rc | default(1)) != 0
+         or vault_server_transit_policy not in ((_vs_tt_lookup.stdout | default('{}', true) | from_json).data.policies | default([])) }}
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Mint a periodic orphan token for the in-cluster Vault seal
+  ansible.builtin.command: >-
+    vault token create -format=json -orphan
+    -policy={{ vault_server_transit_policy }}
+    -period={{ vault_server_transit_token_period }}
+    -display-name={{ vault_server_transit_key }}
+  register: _vs_tt_new
+  changed_when: true
+  when: _vs_tt_needed | bool
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Effective auto-unseal token
+  ansible.builtin.set_fact:
+    vault_server_transit_token: >-
+      {{ (_vs_tt_new.stdout | from_json).auth.client_token if (_vs_tt_needed | bool) else _vs_tt_candidate }}
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Store the new token in KV v2 (read by vault_init / ESO)
+  ansible.builtin.command:
+    cmd: "vault kv put -mount={{ vault_server_kv_path }} {{ vault_server_transit_token_kv_path }} token=-"
+    stdin: "{{ vault_server_transit_token }}"
+  when:
+    - _vs_tt_needed | bool
+    - vault_server_kv_enabled | bool
+  changed_when: true
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Store the new token in an ansible-vault encrypted controller file
+  when:
+    - _vs_tt_needed | bool
+    - vault_server_transit_token_file | length > 0
+  delegate_to: localhost
+  become: false
+  block:
+    - name: Write the token file (mode 0600)
+      ansible.builtin.copy:
+        dest: "{{ vault_server_transit_token_file }}"
+        content: |
+          # Auto-unseal token for the in-cluster Vault (external Vault {{ vault_server_endpoint }}).
+          # Copy into group_vars/all/vault.yml when secrets_backend=ansible_vault.
+          {{ {'vault_ext_transit_token': vault_server_transit_token} | to_nice_yaml }}
+        mode: "0600"
+      no_log: "{{ vault_server_no_log }}"
+
+    - name: Encrypt the token file
+      ansible.builtin.command:
+        cmd: >-
+          ansible-vault encrypt {{ vault_server_transit_token_file | quote }}
+          --encrypt-vault-id {{ vault_server_init_vault_id | quote }}
+      changed_when: true

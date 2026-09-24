@@ -31,6 +31,21 @@ backup_remote_ssh_private_key: "{{ vault_backup_ssh_private_key | default('') }}
 backup_remote_known_hosts_line: ""
 backup_remote_bwlimit_kbps: 0
 
+# --- Off-node copy to the external MinIO (S3) ---------------------------------------------
+# Bucket platform-dqlite + identity svc-dqlite are created by role minio_server (consumer `dqlite`,
+# Vault secret/platform/dqlite-s3 ACCESS_KEY_ID / ACCESS_SECRET_KEY). Uploads use curl --aws-sigv4
+# (no extra binary on the masters) with Content-MD5, as the bucket has an object-lock default retention.
+backup_s3_enabled: false
+backup_s3_endpoint: "https://minio.storage.{{ platform_internal_domain | default('example.local') }}:9000"
+backup_s3_bucket: platform-dqlite
+backup_s3_prefix: "{{ platform_cluster_name | default('cluster') }}"
+backup_s3_region: us-east-1
+backup_s3_access_key: "{{ vault_backup_s3_access_key | default('') }}"
+backup_s3_secret_key: "{{ vault_backup_s3_secret_key | default('') }}"
+# Controller-side CA that signed the MinIO certificate (empty = system trust store)
+backup_s3_ca_cert_file: "{{ registry_ca_cert_file | default('') }}"
+backup_s3_config_dir: /etc/microk8s-backup
+
 # --- Encryption (archives contain every Kubernetes Secret) -------------------------------
 backup_gpg_recipient: ""
 backup_gpg_public_key_file: ""

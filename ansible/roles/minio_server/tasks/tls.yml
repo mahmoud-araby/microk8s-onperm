@@ -1,0 +1,33 @@
+---
+- name: Create the MinIO certificate directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ minio_server_user }}"
+    group: "{{ minio_server_group }}"
+    mode: "0750"
+  loop: ["{{ minio_server_certs_dir | dirname }}", "{{ minio_server_certs_dir }}", "{{ minio_server_certs_dir }}/CAs"]
+
+# MinIO expects public.crt / private.key and trusts peers signed by certs/CAs/*.crt
+- name: Issue / install the MinIO TLS certificate
+  ansible.builtin.include_role:
+    name: pki_cert
+    apply:
+      tags: [minio_server, minio_tls, pki]
+  vars:
+    pki_cert_mode: "{{ minio_server_tls_mode }}"
+    pki_cert_cert_path: "{{ minio_server_certs_dir }}/public.crt"
+    pki_cert_key_path: "{{ minio_server_certs_dir }}/private.key"
+    pki_cert_ca_path: "{{ minio_server_certs_dir }}/CAs/ca.crt"
+    pki_cert_owner: "{{ minio_server_user }}"
+    pki_cert_group: "{{ minio_server_group }}"
+    pki_cert_common_name: "{{ minio_server_node_fqdn }}"
+    pki_cert_dns_names: >-
+      {{ [minio_server_node_fqdn, minio_server_endpoint_host, inventory_hostname, 'localhost']
+         + minio_server_tls_extra_sans }}
+    pki_cert_ip_addresses: ["{{ ansible_host }}", "127.0.0.1"]
+    pki_cert_src_cert: "{{ minio_server_tls_src_cert }}"
+    pki_cert_src_key: "{{ minio_server_tls_src_key }}"
+    pki_cert_src_ca: "{{ minio_server_tls_src_ca }}"
+
+# MinIO watches the certs directory and reloads certificates without a restart.

@@ -1,0 +1,187 @@
+---
+# Runs once on the first Vault node after every node is unsealed (play 2 of playbooks/vault-server.yml).
+# Idempotent: every write is preceded by a read and only happens when the state differs.
+- name: Configuration needs the root token
+  ansible.builtin.debug:
+    msg: >-
+      Skipping Vault configuration: no root token (vault_ext_root_token in group_vars/all/vault.yml,
+      or a fresh -e vault_server_init=true run).
+  when: _vault_server_token | default('') | length == 0
+
+- name: Configure the external Vault
+  when: _vault_server_token | default('') | length > 0
+  environment: "{{ _vault_server_env | combine({'VAULT_TOKEN': _vault_server_token}) }}"
+  block:
+    - name: Wait for an active node
+      ansible.builtin.command: vault status -format=json
+      environment: "{{ _vault_server_env }}"
+      register: _vs_status
+      changed_when: false
+      failed_when: false
+      until: _vs_status.rc == 0 and ((_vs_status.stdout | from_json).leader_address | default('') | length > 0)
+      retries: 30
+      delay: 5
+
+    # --- Raft autopilot (dead server cleanup) ------------------------------------------------
+    - name: Read the autopilot configuration
+      ansible.builtin.command: vault operator raft autopilot get-config -format=json
+      register: _vs_autopilot
+      changed_when: false
+      when: groups['vault_servers'] | length >= 3
+
+    - name: Configure autopilot
+      ansible.builtin.command: >-
+        vault operator raft autopilot set-config
+        -cleanup-dead-servers={{ vault_server_autopilot.cleanup_dead_servers }}
+        -last-contact-threshold={{ vault_server_autopilot.last_contact_threshold }}
+        -dead-server-last-contact-threshold={{ vault_server_autopilot.dead_server_last_contact_threshold }}
+        -min-quorum={{ vault_server_autopilot.min_quorum }}
+        -server-stabilization-time={{ vault_server_autopilot.server_stabilization_time }}
+      when:
+        - groups['vault_servers'] | length >= 3
+        - >-
+          ((_vs_autopilot.stdout | from_json).cleanup_dead_servers | bool) != (vault_server_autopilot.cleanup_dead_servers | bool)
+          or ((_vs_autopilot.stdout | from_json).min_quorum | int) != (vault_server_autopilot.min_quorum | int)
+      changed_when: true
+
+    # --- Audit ---------------------------------------------------------------------------------
+    - name: List audit devices
+      ansible.builtin.command: vault audit list -format=json
+      register: _vs_audit
+      changed_when: false
+      failed_when: false
+      when: vault_server_audit_enabled | bool
+
+    - name: Enable the file audit device
+      ansible.builtin.command: >-
+        vault audit enable -path=file file
+        file_path={{ vault_server_audit_log }} mode=0600
+      when:
+        - vault_server_audit_enabled | bool
+        - "'file/' not in (_vs_audit.stdout | default('{}', true) | from_json)"
+      changed_when: true
+
+    # --- Secrets engines ----------------------------------------------------------------------
+    - name: List secrets engines
+      ansible.builtin.command: vault secrets list -format=json
+      register: _vs_engines
+      changed_when: false
+
+    - name: Enable the transit engine
+      ansible.builtin.command: "vault secrets enable -path={{ vault_server_transit_mount }} transit"
+      when:
+        - vault_server_transit_enabled | bool
+        - (vault_server_transit_mount ~ '/') not in (_vs_engines.stdout | from_json)
+      changed_when: true
+
+    - name: Enable KV v2
+      ansible.builtin.command: "vault secrets enable -path={{ vault_server_kv_path }} -version=2 kv"
+      when:
+        - vault_server_kv_enabled | bool
+        - (vault_server_kv_path ~ '/') not in (_vs_engines.stdout | from_json)
+      changed_when: true
+
+    - name: Read the auto-unseal transit key
+      ansible.builtin.command: "vault read -format=json {{ vault_server_transit_mount }}/keys/{{ vault_server_transit_key }}"
+      register: _vs_transit_key
+      changed_when: false
+      failed_when: false
+      when: vault_server_transit_enabled | bool
+
+    - name: Create the auto-unseal transit key (not exportable, deletion not allowed)
+      ansible.builtin.command: "vault write -f {{ vault_server_transit_mount }}/keys/{{ vault_server_transit_key }} type=aes256-gcm96"
+      when:
+        - vault_server_transit_enabled | bool
+        - _vs_transit_key.rc != 0
+      changed_when: true
+
+    # --- Policies ------------------------------------------------------------------------------
+    - name: Build the policy list
+      ansible.builtin.set_fact:
+        _vs_policies: >-
+          {{ ([{'name': vault_server_transit_policy,
+                'hcl': lookup('ansible.builtin.template', 'policy-autounseal.hcl.j2')}] if vault_server_transit_enabled | bool else [])
+             + ([{'name': vault_server_approle_name,
+                  'hcl': lookup('ansible.builtin.template', 'policy-ansible.hcl.j2')}]
+                if (vault_server_approle_enabled | bool and vault_server_kv_enabled | bool) else []) }}
+
+    - name: Read policies
+      ansible.builtin.command: "vault policy read {{ _policy.name }}"
+      loop: "{{ _vs_policies }}"
+      loop_control:
+        loop_var: _policy
+        label: "{{ _policy.name }}"
+      register: _vs_policy_read
+      changed_when: false
+      failed_when: false
+
+    - name: Write policies that differ
+      ansible.builtin.command:
+        cmd: "vault policy write {{ _res._policy.name }} -"
+        stdin: "{{ _res._policy.hcl }}"
+      loop: "{{ _vs_policy_read.results }}"
+      loop_control:
+        loop_var: _res
+        label: "{{ _res._policy.name }}"
+      when: (_res.stdout | default('') | trim) != (_res._policy.hcl | trim)
+      changed_when: true
+
+    # --- AppRole for Ansible ----------------------------------------------------------------------
+    - name: List auth methods
+      ansible.builtin.command: vault auth list -format=json
+      register: _vs_auths
+      changed_when: false
+      when: vault_server_approle_enabled | bool
+
+    - name: Enable AppRole auth
+      ansible.builtin.command: vault auth enable approle
+      when:
+        - vault_server_approle_enabled | bool
+        - "'approle/' not in (_vs_auths.stdout | from_json)"
+      changed_when: true
+
+    - name: Read the Ansible AppRole
+      ansible.builtin.command: "vault read -format=json auth/approle/role/{{ vault_server_approle_name }}"
+      register: _vs_approle
+      changed_when: false
+      failed_when: false
+      when: vault_server_approle_enabled | bool
+
+    - name: Write the Ansible AppRole
+      ansible.builtin.command: >-
+        vault write auth/approle/role/{{ vault_server_approle_name }}
+        token_policies={{ vault_server_approle_name }}
+        token_ttl={{ vault_server_approle_token_ttl }}
+        token_max_ttl={{ vault_server_approle_token_max_ttl }}
+        secret_id_ttl={{ vault_server_approle_secret_id_ttl }}
+        {{ ('secret_id_bound_cidrs=' ~ (vault_server_approle_secret_id_bound_cidrs | join(','))) if vault_server_approle_secret_id_bound_cidrs | length > 0 else '' }}
+      when:
+        - vault_server_approle_enabled | bool
+        - >-
+          _vs_approle.rc != 0
+          or (_vs_approle.stdout | from_json).data.token_policies != [vault_server_approle_name]
+          or ((_vs_approle.stdout | from_json).data.secret_id_bound_cidrs | default([], true) | sort)
+             != (vault_server_approle_secret_id_bound_cidrs | sort)
+      changed_when: true
+
+    - name: Read the Ansible AppRole role_id (not a secret)
+      ansible.builtin.command: "vault read -format=json auth/approle/role/{{ vault_server_approle_name }}/role-id"
+      register: _vs_role_id
+      changed_when: false
+      when: vault_server_approle_enabled | bool
+
+    # --- Auto-unseal token for the in-cluster Vault -------------------------------------------
+    - name: Auto-unseal token
+      ansible.builtin.import_tasks: transit-token.yml
+      when: vault_server_transit_enabled | bool
+
+    - name: External Vault ready
+      ansible.builtin.debug:
+        msg:
+          - "Endpoint: {{ vault_server_endpoint }} (cluster {{ vault_server_cluster_name }})"
+          - "Transit auto-unseal key: {{ vault_server_transit_mount }}/keys/{{ vault_server_transit_key }} (policy {{ vault_server_transit_policy }})"
+          - "Auto-unseal token stored at: {{ (vault_server_kv_path ~ '/' ~ vault_server_transit_token_kv_path) if vault_server_kv_enabled | bool else vault_server_transit_token_file }}"
+          - "AppRole {{ vault_server_approle_name }} role_id: {{ (_vs_role_id.stdout | from_json).data.role_id if (vault_server_approle_enabled | bool) else 'n/a' }}"
+          - "Issue a secret_id for the controller: vault write -f -field=secret_id auth/approle/role/{{ vault_server_approle_name }}/secret-id"
+          - "Ansible secrets live under {{ vault_server_kv_path }}/ansible/<environment>/* (see group_vars/all/secrets.yml)"
+          - "Next: vault_deployment_mode=external|both and playbooks/vault-init.yml (creates Secret vault/vault-transit-token)."

@@ -1,0 +1,32 @@
+---
+# Storage pool: in-cluster MinIO tenant `minio` (namespace minio) on the `local-nvme` storage class
+# (local-path provisioner on /mnt/local-nvme), plus other node-bound fast scratch volumes.
+# 4 nodes, 16 vCPU / 64 GiB, 4 dedicated NVMe each. Tainted: only storage workloads (with toleration) run here.
+workload_tier: storage
+microk8s_node_labels:
+  workload-tier: storage
+  node-role.kubernetes.io/storage: ""
+microk8s_node_taints:
+  - key: workload-tier
+    value: storage
+    effect: NoSchedule
+microk8s_kubelet_args_pool:
+  --max-pods: "110"
+
+# 4 dedicated NVMe -> XFS at /mnt/local-nvme/data0 .. data3 (role storage_prep, playbooks/storage-prep.yml),
+# mounted nofail + kubelite RequiresMountsFor. Layout expected by gitops/platform/core/local-path-provisioner
+# (StorageClass local-nvme-minio: one physical disk per MinIO tenant drive). Never the OS disk; storage_prep
+# refuses devices that carry data unless -e storage_prep_force=true.
+local_nvme_devices: [/dev/nvme1n1, /dev/nvme2n1, /dev/nvme3n1, /dev/nvme4n1]
+
+# Object storage: many concurrent connections, large sequential I/O
+common_disable_thp: true
+common_sysctl_pool:
+  vm.swappiness: 1
+  vm.dirty_background_ratio: 5
+  vm.dirty_ratio: 15
+  net.core.somaxconn: 65535
+
+preflight_min_vcpus: 16
+preflight_min_memory_gb: 64
+preflight_min_root_disk_gb: 100

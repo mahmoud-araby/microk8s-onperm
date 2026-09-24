@@ -1,0 +1,8 @@
+---
+# MinIO nodes of a distributed pool are restarted together (MinIO's recommended procedure for
+# configuration changes and upgrades); the pool is briefly unavailable, clients retry.
+- name: Restart minio
+  ansible.builtin.systemd_service:
+    name: minio
+    state: restarted
+    daemon_reload: true

@@ -1,0 +1,78 @@
+---
+- name: Install prerequisites
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, jq, chrony, ufw, xfsprogs]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+
+- name: Enable chrony (erasure-coded writes and TLS need a synchronised clock)
+  ansible.builtin.systemd_service:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Create the minio-user group
+  ansible.builtin.group:
+    name: "{{ minio_server_group }}"
+    system: true
+
+- name: Create the minio-user account
+  ansible.builtin.user:
+    name: "{{ minio_server_user }}"
+    group: "{{ minio_server_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+
+- name: Binaries from an internal mirror (minio_server_binary_source=url)
+  when: minio_server_binary_source == 'url'
+  block:
+    - name: Require mirror URLs and pinned checksums
+      ansible.builtin.assert:
+        that:
+          - minio_server_binary_url | length > 0
+          - minio_server_sha256 | length == 64
+          - minio_server_mc_url | length > 0
+          - minio_server_mc_sha256 | length == 64
+        fail_msg: "minio_server_binary_source=url needs minio_server_binary_url/_sha256 and minio_server_mc_url/_mc_sha256"
+        quiet: true
+
+    - name: Download the pinned minio binary (sha256 verified)
+      ansible.builtin.get_url:
+        url: "{{ minio_server_binary_url }}"
+        dest: "{{ minio_server_bin_dir }}/minio.{{ minio_server_release }}"
+        checksum: "sha256:{{ minio_server_sha256 }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the pinned mc client (sha256 verified)
+      ansible.builtin.get_url:
+        url: "{{ minio_server_mc_url }}"
+        dest: "{{ minio_server_bin_dir }}/mc.{{ minio_server_mc_release }}"
+        checksum: "sha256:{{ minio_server_mc_sha256 }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+- name: Binaries built from the pinned git tags (minio_server_binary_source=build)
+  ansible.builtin.import_tasks: build.yml
+  when: minio_server_binary_source == 'build'
+
+- name: Point /usr/local/bin/minio at the pinned release
+  ansible.builtin.file:
+    src: "{{ minio_server_bin_dir }}/minio.{{ minio_server_release }}"
+    dest: "{{ minio_server_bin_dir }}/minio"
+    state: link
+    force: true
+  notify: Restart minio
+
+- name: Point /usr/local/bin/mc at the pinned release
+  ansible.builtin.file:
+    src: "{{ minio_server_bin_dir }}/mc.{{ minio_server_mc_release }}"
+    dest: "{{ minio_server_bin_dir }}/mc"
+    state: link
+    force: true

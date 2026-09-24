@@ -1,0 +1,28 @@
+---
+# The local-nvme mounts are `nofail` (a dead disk must not block boot); instead kubelite refuses to start
+# without them, so the local-path provisioner never writes PV data onto the root filesystem.
+- name: Create the kubelite drop-in directory
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ storage_prep_kubelite_unit }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Require the local-nvme mounts before kubelite starts
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ storage_prep_kubelite_unit }}.d/10-local-nvme-mounts.conf"
+    content: |
+      # Managed by Ansible (role: storage_prep)
+      [Unit]
+      RequiresMountsFor={{ _storage_prep_nvme_mounts | join(' ') }}
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    _storage_prep_nvme_mounts: >-
+      {{ [storage_prep_local_nvme_mount] if storage_prep_local_nvme_device | length > 0
+         else (range(storage_prep_local_nvme_devices | length)
+               | map('string') | map('regex_replace', '^', storage_prep_local_nvme_mount ~ '/' ~ storage_prep_local_nvme_subdir_prefix)
+               | list) }}
+  notify: Reload systemd

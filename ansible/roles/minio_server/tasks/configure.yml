@@ -1,0 +1,168 @@
+---
+# Runs on the first MinIO node only. Every change is preceded by a read (idempotent).
+- name: Wait until mc can administer the pool
+  ansible.builtin.command: "mc admin info {{ minio_server_mc_alias }} --json"
+  environment: "{{ _minio_mc_env }}"
+  register: _minio_info
+  changed_when: false
+  failed_when: false
+  until: _minio_info.rc == 0
+  retries: 30
+  delay: 5
+  no_log: "{{ minio_server_no_log }}"
+
+# --- Buckets -------------------------------------------------------------------------------------
+- name: List buckets
+  ansible.builtin.command: "mc ls {{ minio_server_mc_alias }} --json"
+  environment: "{{ _minio_mc_env }}"
+  register: _minio_ls
+  changed_when: false
+
+- name: Record existing buckets
+  ansible.builtin.set_fact:
+    _minio_existing_buckets: >-
+      {{ _minio_ls.stdout_lines | map('from_json') | selectattr('key', 'defined')
+         | map(attribute='key') | map('regex_replace', '/$', '') | list }}
+
+- name: Create missing buckets (object lock can only be enabled at creation)
+  ansible.builtin.command: >-
+    mc mb {{ minio_server_mc_alias }}/{{ item.name }} --region {{ minio_server_region }}
+    {{ '--with-lock' if (item.object_lock | default({}) | length > 0) else '' }}
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ minio_server_buckets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name not in _minio_existing_buckets
+  changed_when: true
+
+- name: Read bucket versioning
+  ansible.builtin.command: "mc version info {{ minio_server_mc_alias }}/{{ item.name }} --json"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ minio_server_buckets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _minio_versioning
+  changed_when: false
+
+- name: Enable versioning
+  ansible.builtin.command: "mc version enable {{ minio_server_mc_alias }}/{{ _res.item.name }}"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_versioning.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res.item.name }}"
+  when:
+    - _res.item.versioning | default(false) | bool
+    - ((_res.stdout | from_json).versioning.status | default('')) != 'Enabled'
+  changed_when: true
+
+- name: Read the default object-lock retention
+  ansible.builtin.command: "mc retention info --default {{ minio_server_mc_alias }}/{{ item.name }} --json"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ minio_server_buckets | selectattr('object_lock', 'truthy') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _minio_retention
+  changed_when: false
+  failed_when: false
+
+- name: Warn about buckets that were created without object lock
+  ansible.builtin.debug:
+    msg: >-
+      Bucket {{ _res.item.name }} has no object-lock configuration (it existed before / was created without
+      --with-lock). Object lock cannot be enabled afterwards: recreate the bucket (mc mirror) if WORM is required.
+  loop: "{{ _minio_retention.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res.item.name }}"
+  when: _res.rc != 0 or ((_res.stdout | from_json).enabled | default('')) != 'Enabled'
+
+- name: Set the default object-lock retention
+  ansible.builtin.command: >-
+    mc retention set --default {{ _res.item.object_lock.mode }} {{ _res.item.object_lock.days }}d
+    {{ minio_server_mc_alias }}/{{ _res.item.name }}
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_retention.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res.item.name }} {{ _res.item.object_lock.mode }} {{ _res.item.object_lock.days }}d"
+  when:
+    - _res.rc == 0
+    - ((_res.stdout | from_json).enabled | default('')) == 'Enabled'
+    - >-
+      ((_res.stdout | from_json).mode | default('') | upper) != (_res.item.object_lock.mode | upper)
+      or ((_res.stdout | from_json).validity | default('') | regex_replace('[^0-9]', '')) != (_res.item.object_lock.days | string)
+  changed_when: true
+
+# --- Lifecycle (ILM) -------------------------------------------------------------------------------
+- name: Read lifecycle rules
+  ansible.builtin.command: "mc ilm rule ls {{ minio_server_mc_alias }}/{{ item.name }} --json"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ minio_server_buckets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _minio_ilm
+  changed_when: false
+  failed_when: false
+
+- name: Compare lifecycle rules with the desired expiry
+  ansible.builtin.set_fact:
+    _minio_ilm_plan: >-
+      {{ _minio_ilm_plan | default([]) + [{
+           'name': _res.item.name,
+           'want': (_res.item.expire_days | default(0) | int > 0) or (_res.item.noncurrent_expire_days | default(0) | int > 0),
+           'have_rules': _rules | length > 0,
+           'match': (_rules | length == 1)
+                    and ((_rules[0].Expiration.Days | default(0) | int) == (_res.item.expire_days | default(0) | int))
+                    and ((_rules[0].NoncurrentVersionExpiration.NoncurrentDays | default(0) | int)
+                         == (_res.item.noncurrent_expire_days | default(0) | int)),
+           'expire_days': _res.item.expire_days | default(0) | int,
+           'noncurrent_expire_days': _res.item.noncurrent_expire_days | default(0) | int}] }}
+  vars:
+    _rules: >-
+      {{ ((_res.stdout | default('{}', true) | from_json).config.Rules | default([]))
+         if _res.rc == 0 else [] }}
+  loop: "{{ _minio_ilm.results }}"
+  loop_control:
+    loop_var: _res
+    label: "{{ _res.item.name }}"
+
+- name: Remove lifecycle rules that differ
+  ansible.builtin.command: "mc ilm rule rm --all --force {{ minio_server_mc_alias }}/{{ item.name }}"
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_ilm_plan }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.have_rules and not (item.want and item.match)
+  changed_when: true
+
+- name: Add expiry rules
+  ansible.builtin.command: >-
+    mc ilm rule add {{ minio_server_mc_alias }}/{{ item.name }}
+    {{ ('--expire-days ' ~ item.expire_days) if item.expire_days > 0 else '' }}
+    {{ ('--noncurrent-expire-days ' ~ item.noncurrent_expire_days) if item.noncurrent_expire_days > 0 else '' }}
+  environment: "{{ _minio_mc_env }}"
+  loop: "{{ _minio_ilm_plan }}"
+  loop_control:
+    label: "{{ item.name }} expire={{ item.expire_days }}d noncurrent={{ item.noncurrent_expire_days }}d"
+  when: item.want and not item.match
+  changed_when: true
+
+# --- Credentials ----------------------------------------------------------------------------------
+- name: Load previously stored credentials (ansible_vault backend)
+  ansible.builtin.import_tasks: store-load.yml
+
+- name: Prometheus bearer token
+  ansible.builtin.import_tasks: metrics.yml
+  when: minio_server_prometheus_auth_type == 'jwt'
+
+- name: Consumer policies, users and credentials
+  ansible.builtin.import_tasks: consumers.yml
+
+- name: External MinIO ready
+  ansible.builtin.debug:
+    msg:
+      - "Endpoint: {{ minio_server_endpoint }} (round-robin DNS / VIP over {{ groups['minio_servers'] | length }} nodes)"
+      - "MINIO_VOLUMES: {{ minio_server_volumes | trim }}"
+      - "Buckets: {{ minio_server_buckets | map(attribute='name') | join(', ') }}"
+      - "Consumers: {{ minio_server_consumers | map(attribute='name') | join(', ') }} -> {{ minio_server_credentials_backend }}"

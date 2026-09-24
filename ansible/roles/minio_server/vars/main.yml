@@ -1,0 +1,15 @@
+---
+# Role-internal values (not meant to be overridden)
+_minio_first: "{{ groups['minio_servers'] | first }}"
+_minio_peers: >-
+  {{ groups['minio_servers'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', '/32') | list }}
+_minio_drive_paths: >-
+  {{ range(1, (minio_drives | default([]) | length) + 1) | map('string')
+     | map('regex_replace', '^', minio_server_drive_mount_prefix) | list }}
+# mc talks to the local node through the system trust store (CA installed by pki_cert).
+# Credentials only live in the environment of the mc process (never in ~/.mc/config.json).
+_minio_mc_env: >-
+  {{ {'MC_HOST_' ~ minio_server_mc_alias:
+        'https://' ~ (minio_server_root_user | urlencode | replace('/', '%2F')) ~ ':' ~ (minio_server_root_password | urlencode | replace('/', '%2F'))
+        ~ '@' ~ minio_server_node_fqdn ~ ':' ~ minio_server_port,
+      'MC_CONFIG_DIR': '/root/.mc'} }}

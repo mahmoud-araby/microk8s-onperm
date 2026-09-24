@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: minio_server
+  namespace: platform
+  author: Platform Engineering
+  description: External distributed MinIO on VMs (erasure coding, TLS, systemd, metrics, firewall) with backup buckets, least-privilege consumer identities and credentials pushed to Vault
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [minio, s3, objectstorage, backup]
+dependencies: []

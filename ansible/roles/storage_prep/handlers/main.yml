@@ -1,0 +1,5 @@
+---
+# Only reloads unit definitions; kubelite picks the drop-in up at its next (re)start - never restarted here.
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true

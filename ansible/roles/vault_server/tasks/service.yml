@@ -1,0 +1,16 @@
+---
+- name: Apply pending configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Vault
+  ansible.builtin.systemd_service:
+    name: vault
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for the Vault listener
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ vault_server_port }}"
+    timeout: 60

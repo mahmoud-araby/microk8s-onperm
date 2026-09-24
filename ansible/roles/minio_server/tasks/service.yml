@@ -1,0 +1,31 @@
+---
+- name: Apply pending configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start MinIO
+  ansible.builtin.systemd_service:
+    name: minio
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for the local MinIO node to be live
+  ansible.builtin.uri:
+    url: "https://{{ minio_server_node_fqdn }}:{{ minio_server_port }}/minio/health/live"
+    ca_path: "{{ minio_server_certs_dir }}/CAs/ca.crt"
+    status_code: [200]
+  register: _minio_live
+  until: _minio_live.status == 200
+  retries: 30
+  delay: 5
+
+- name: Wait until the erasure-coded pool has write quorum
+  ansible.builtin.uri:
+    url: "https://{{ minio_server_node_fqdn }}:{{ minio_server_port }}/minio/health/cluster"
+    ca_path: "{{ minio_server_certs_dir }}/CAs/ca.crt"
+    status_code: [200]
+  register: _minio_cluster
+  until: _minio_cluster.status == 200
+  retries: 60
+  delay: 5
+  run_once: true

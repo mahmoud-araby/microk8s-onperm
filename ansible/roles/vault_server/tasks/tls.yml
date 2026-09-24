@@ -1,0 +1,28 @@
+---
+- name: Issue / install the Vault TLS certificate
+  ansible.builtin.include_role:
+    name: pki_cert
+    apply:
+      tags: [vault_server, vault_tls, pki]
+  vars:
+    pki_cert_mode: "{{ vault_server_tls_mode }}"
+    pki_cert_cert_path: "{{ vault_server_tls_dir }}/vault.crt"
+    pki_cert_key_path: "{{ vault_server_tls_dir }}/vault.key"
+    pki_cert_ca_path: "{{ vault_server_tls_dir }}/ca.crt"
+    pki_cert_owner: "{{ vault_server_user }}"
+    pki_cert_group: "{{ vault_server_group }}"
+    pki_cert_common_name: "{{ vault_server_endpoint_host }}"
+    pki_cert_dns_names: >-
+      {{ [vault_server_endpoint_host, vault_server_node_fqdn, inventory_hostname, 'localhost']
+         + vault_server_tls_extra_sans }}
+    pki_cert_ip_addresses: ["{{ vault_server_node_address }}", "127.0.0.1"]
+    pki_cert_src_cert: "{{ vault_server_tls_src_cert }}"
+    pki_cert_src_key: "{{ vault_server_tls_src_key }}"
+    pki_cert_src_ca: "{{ vault_server_tls_src_ca }}"
+
+- name: Reload Vault when the certificate changed (SIGHUP, no reseal)
+  ansible.builtin.debug:
+    msg: "TLS material changed on {{ inventory_hostname }} - Vault will reload it"
+  changed_when: true
+  when: pki_cert_changed | default(false) | bool
+  notify: Reload vault

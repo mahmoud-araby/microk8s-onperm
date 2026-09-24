@@ -1,0 +1,63 @@
+---
+# The pods read the token through extraSecretEnvironmentVars (VAULT_TOKEN) - the Secret must exist
+# before Argo CD (re)starts them, otherwise they stay in CreateContainerConfigError.
+- name: Check that the kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: _vault_transit_kubeconfig
+
+- name: Require a kubeconfig and the auto-unseal token
+  ansible.builtin.assert:
+    that:
+      - _vault_transit_kubeconfig.stat.exists
+      - vault_init_transit_token | length > 0
+    fail_msg: >-
+      vault_deployment_mode={{ vault_init_deployment_mode }} needs {{ kubeconfig_path }} and the transit token
+      created by playbooks/vault-server.yml (vault_ext_transit_token in vault.yml, or secrets_backend=hashicorp_vault).
+    quiet: true
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Ensure the Vault namespace exists (normally created by Argo CD)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ vault_init_namespace }}"
+  when: vault_init_create_transit_secret | bool
+
+- name: Create / update Secret vault-transit-token
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: "{{ vault_init_transit_secret_name }}"
+        namespace: "{{ vault_init_namespace }}"
+        labels:
+          app.kubernetes.io/name: vault
+          app.kubernetes.io/component: transit-seal
+          app.kubernetes.io/managed-by: ansible
+      data:
+        "{{ vault_init_transit_secret_key }}": "{{ vault_init_transit_token | b64encode }}"
+  when: vault_init_create_transit_secret | bool
+  no_log: "{{ vault_init_no_log }}"
+
+- name: Check that the GitOps values enable seal "transit"
+  ansible.builtin.set_fact:
+    _vault_transit_in_values: >-
+      {{ lookup('ansible.builtin.file', vault_init_values_file, errors='ignore') | default('', true)
+         is search('(?m)^\s+seal "transit"') }}
+
+- name: Remind to enable the transit seal in GitOps
+  ansible.builtin.debug:
+    msg: >-
+      {{ vault_init_values_file | basename }} does not contain an active seal "transit" stanza yet: uncomment the
+      transit block and extraSecretEnvironmentVars (VAULT_TOKEN <- Secret {{ vault_init_transit_secret_name }}) in
+      gitops/platform/core/vault/values.yaml, merge, then delete the Vault pods one by one (updateStrategy OnDelete).
+  when: not (_vault_transit_in_values | bool)

@@ -9,6 +9,10 @@
   when: vault_init_enabled | bool
   tags: [vault_init]
   block:
+    - name: Transit auto-unseal token Secret (vault_deployment_mode external | both)
+      ansible.builtin.import_tasks: transit.yml
+      when: vault_init_transit_seal | bool
+
     - name: Discover Vault server pods
       ansible.builtin.import_tasks: discover.yml
 

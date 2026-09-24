@@ -1,0 +1,114 @@
+---
+- name: Verify supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] in ['22.04', '24.04']
+    fail_msg: "{{ inventory_hostname }}: only Ubuntu 22.04 / 24.04 LTS are supported"
+    quiet: true
+  tags: [always]
+
+- name: Every data device is used for exactly one purpose
+  ansible.builtin.assert:
+    that: _storage_prep_devices | unique | length == _storage_prep_devices | length
+    fail_msg: >-
+      {{ inventory_hostname }}: the same device is listed more than once in
+      longhorn_disk_device / local_nvme_device / minio_drives: {{ _storage_prep_devices }}
+    quiet: true
+  vars:
+    _storage_prep_devices: >-
+      {{ ([longhorn_disk_device | default('')] + [storage_prep_local_nvme_device]
+          + storage_prep_local_nvme_devices + storage_prep_minio_drives)
+         | select | list }}
+  tags: [storage_prep, always]
+
+- name: Use either local_nvme_device (single disk) or local_nvme_devices (dataN layout), not both
+  ansible.builtin.assert:
+    that: storage_prep_local_nvme_device | length == 0 or storage_prep_local_nvme_devices | length == 0
+    fail_msg: "{{ inventory_hostname }}: set local_nvme_device OR local_nvme_devices"
+    quiet: true
+  tags: [storage_prep, always]
+
+- name: Install filesystem tools
+  ansible.builtin.apt:
+    name: [xfsprogs, util-linux]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  when: >-
+    storage_prep_local_nvme_device | length > 0 or storage_prep_local_nvme_devices | length > 0
+    or storage_prep_minio_drives | length > 0
+  tags: [storage_prep]
+
+- name: Install NFS client packages (csi-driver-nfs / nfs-rwx)
+  ansible.builtin.apt:
+    name: "{{ storage_prep_nfs_packages }}"
+    state: present
+    lock_timeout: 300
+  when: storage_prep_nfs_client | bool
+  tags: [storage_prep, nfs]
+
+- name: Prepare the local-nvme disk (local-path provisioner)
+  ansible.builtin.include_tasks:
+    file: disk.yml
+    apply:
+      tags: [storage_prep, local_nvme]
+  vars:
+    _disk_device: "{{ storage_prep_local_nvme_device }}"
+    _disk_mount: "{{ storage_prep_local_nvme_mount }}"
+    _disk_fstype: "{{ storage_prep_local_nvme_fstype }}"
+    _disk_label: "{{ storage_prep_local_nvme_label }}"
+    _disk_opts: "{{ storage_prep_local_nvme_opts }}"
+  when: storage_prep_local_nvme_device | length > 0
+  tags: [storage_prep, local_nvme]
+
+- name: Prepare the local-nvme disks (/mnt/local-nvme/data0..N-1, storage pool)
+  ansible.builtin.include_tasks:
+    file: disk.yml
+    apply:
+      tags: [storage_prep, local_nvme]
+  vars:
+    _disk_device: "{{ _nvme_drive }}"
+    _disk_mount: "{{ storage_prep_local_nvme_mount }}/{{ storage_prep_local_nvme_subdir_prefix }}{{ _nvme_idx }}"
+    _disk_fstype: "{{ storage_prep_local_nvme_fstype }}"
+    _disk_label: "{{ storage_prep_local_nvme_label }}{{ _nvme_idx }}"
+    _disk_opts: "{{ storage_prep_local_nvme_opts }}"
+  loop: "{{ storage_prep_local_nvme_devices }}"
+  loop_control:
+    loop_var: _nvme_drive
+    index_var: _nvme_idx
+  tags: [storage_prep, local_nvme]
+
+- name: Kubelet (kubelite) requires the local-nvme mounts
+  ansible.builtin.import_tasks: kubelite.yml
+  when:
+    - storage_prep_kubelite_requires_mounts | bool
+    - storage_prep_local_nvme_device | length > 0 or storage_prep_local_nvme_devices | length > 0
+  tags: [storage_prep, local_nvme]
+
+- name: Prepare MinIO drives (/mnt/disk1..N)
+  ansible.builtin.include_tasks:
+    file: disk.yml
+    apply:
+      tags: [storage_prep, minio_drives]
+  vars:
+    _disk_device: "{{ _minio_drive }}"
+    _disk_mount: "{{ storage_prep_minio_mount_prefix }}{{ _minio_idx + 1 }}"
+    _disk_fstype: "{{ storage_prep_minio_fstype }}"
+    _disk_label: "{{ storage_prep_minio_label_prefix }}{{ _minio_idx + 1 }}"
+    _disk_opts: "{{ storage_prep_minio_opts }}"
+  loop: "{{ storage_prep_minio_drives }}"
+  loop_control:
+    loop_var: _minio_drive
+    index_var: _minio_idx
+  tags: [storage_prep, minio_drives]
+
+- name: Longhorn disk (role common, common/tasks/storage.yml)
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: storage.yml
+    apply:
+      tags: [storage_prep, longhorn]
+  when: storage_prep_longhorn | bool
+  tags: [storage_prep, longhorn]

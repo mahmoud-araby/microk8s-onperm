@@ -1,0 +1,18 @@
+---
+# ansible_vault backend: previously generated credentials live in an encrypted controller file.
+- name: Check the controller credentials file
+  ansible.builtin.stat:
+    path: "{{ minio_server_credentials_file }}"
+  register: _minio_cred_file_stat
+  delegate_to: localhost
+  become: false
+  when: minio_server_credentials_backend != 'hashicorp_vault'
+
+- name: Load the controller credentials file (ansible-vault encrypted)
+  ansible.builtin.include_vars:
+    file: "{{ minio_server_credentials_file }}"
+    name: _minio_cred_file
+  when:
+    - minio_server_credentials_backend != 'hashicorp_vault'
+    - _minio_cred_file_stat.stat.exists
+  no_log: "{{ minio_server_no_log }}"

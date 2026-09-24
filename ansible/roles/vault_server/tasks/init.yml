@@ -1,0 +1,81 @@
+---
+- name: Read the Vault status of this node
+  ansible.builtin.command: vault status -format=json
+  environment: "{{ _vault_server_env }}"
+  register: _vault_server_status
+  changed_when: false
+  # rc 0 = unsealed, 2 = sealed / not initialised; anything else is an error
+  failed_when: _vault_server_status.rc not in [0, 2]
+  retries: 12
+  delay: 5
+  until: _vault_server_status.rc in [0, 2]
+
+- name: Initialise the cluster on the first node
+  when:
+    - inventory_hostname == _vault_server_first
+    - not ((_vault_server_status.stdout | from_json).initialized | bool)
+  block:
+    - name: Initialisation is opt-in
+      ansible.builtin.debug:
+        msg: >-
+          Vault on {{ inventory_hostname }} is NOT initialised. Re-run with -e vault_server_init=true
+          to run `vault operator init` ({{ vault_server_key_shares }} shares / threshold {{ vault_server_key_threshold }}).
+      when: not (vault_server_init | bool)
+
+    - name: Run vault operator init
+      ansible.builtin.command: >-
+        vault operator init -format=json
+        -key-shares={{ vault_server_key_shares }} -key-threshold={{ vault_server_key_threshold }}
+      environment: "{{ _vault_server_env }}"
+      register: _vault_server_init_out
+      changed_when: true
+      when: vault_server_init | bool
+      no_log: "{{ vault_server_no_log }}"
+
+    - name: Keep the new unseal keys and root token for this run
+      ansible.builtin.set_fact:
+        _vault_server_new_keys: "{{ (_vault_server_init_out.stdout | from_json).unseal_keys_b64 }}"
+        _vault_server_new_root_token: "{{ (_vault_server_init_out.stdout | from_json).root_token }}"
+      when: vault_server_init | bool
+      no_log: "{{ vault_server_no_log }}"
+
+    - name: Save the init output on the controller and encrypt it
+      when:
+        - vault_server_init | bool
+        - vault_server_init_output == 'file'
+      delegate_to: localhost
+      become: false
+      block:
+        - name: Write the init output (mode 0600)
+          ansible.builtin.copy:
+            dest: "{{ vault_server_init_output_file }}"
+            content: |
+              # External Vault ({{ vault_server_endpoint }}) init output for {{ platform_environment | default('') }}.
+              # Move these values into group_vars/all/vault.yml (ansible-vault) and keep an offline copy
+              # (split the unseal keys between key holders).
+              {{ {'vault_ext_unseal_keys': _vault_server_new_keys, 'vault_ext_root_token': _vault_server_new_root_token} | to_nice_yaml }}
+            mode: "0600"
+          no_log: "{{ vault_server_no_log }}"
+
+        - name: Encrypt the init output with ansible-vault
+          ansible.builtin.command:
+            cmd: >-
+              ansible-vault encrypt {{ vault_server_init_output_file | quote }}
+              --encrypt-vault-id {{ vault_server_init_vault_id | quote }}
+          changed_when: true
+
+    - name: Print the init output ONCE (vault_server_init_output=print)
+      ansible.builtin.debug:
+        msg:
+          - "!!! COPY THESE VALUES NOW - THEY ARE NEVER SHOWN AGAIN !!!"
+          - "vault_ext_unseal_keys: {{ _vault_server_new_keys }}"
+          - "vault_ext_root_token: {{ _vault_server_new_root_token }}"
+      when:
+        - vault_server_init | bool
+        - vault_server_init_output == 'print'
+
+- name: Effective unseal keys / root token (fresh init output of the first node, else vault.yml)
+  ansible.builtin.set_fact:
+    _vault_server_keys: "{{ hostvars[_vault_server_first]['_vault_server_new_keys'] | default(vault_server_unseal_keys, true) }}"
+    _vault_server_token: "{{ hostvars[_vault_server_first]['_vault_server_new_root_token'] | default(vault_server_root_token, true) }}"
+  no_log: "{{ vault_server_no_log }}"

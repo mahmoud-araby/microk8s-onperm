@@ -1,0 +1,9 @@
+---
+# Role-internal values (not meant to be overridden)
+_vault_server_first: "{{ groups['vault_servers'] | first }}"
+_vault_server_peers: >-
+  {{ groups['vault_servers'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', '/32') | list }}
+# Vault CLI on the node talks to its own listener (127.0.0.1 is a certificate SAN)
+_vault_server_env:
+  VAULT_ADDR: "https://127.0.0.1:{{ vault_server_port }}"
+  VAULT_CACERT: "{{ vault_server_tls_dir }}/ca.crt"

@@ -33,9 +33,41 @@
   loop: "{{ vault_init_unseal_keys[: vault_init_key_threshold | int] }}"
   loop_control:
     loop_var: _unseal_key
-  when: (_vault_pod_status.stdout | from_json).sealed | bool
+  when:
+    - (_vault_pod_status.stdout | from_json).sealed | bool
+    - not (vault_init_transit_seal | bool)
   changed_when: true
   no_log: "{{ vault_init_no_log }}"
+
+# Shamir -> transit: after the seal "transit" stanza is deployed, each pod starts in migration mode
+# and must be unsealed ONCE with the old Shamir keys and -migrate.
+- name: "Migrate the seal to transit | {{ _vault_pod }}"
+  kubernetes.core.k8s_exec:
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: "{{ vault_init_namespace }}"
+    pod: "{{ _vault_pod }}"
+    container: "{{ vault_init_container }}"
+    command: "{{ _vault_env }} vault operator unseal -migrate {{ _unseal_key }}"
+  loop: "{{ vault_init_unseal_keys[: vault_init_key_threshold | int] }}"
+  loop_control:
+    loop_var: _unseal_key
+  when:
+    - vault_init_transit_seal | bool
+    - vault_init_seal_migrate | bool
+    - (_vault_pod_status.stdout | from_json).sealed | bool
+    - (_vault_pod_status.stdout | from_json).migration | default(false) | bool
+  changed_when: true
+  no_log: "{{ vault_init_no_log }}"
+
+- name: "Sealed pod in migration mode needs vault_init_seal_migrate=true | {{ _vault_pod }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ _vault_pod }} is in seal-migration mode (Shamir -> transit). Re-run with -e vault_init_seal_migrate=true
+      and the old Shamir unseal keys (vault_unseal_keys) to complete the migration.
+  when:
+    - vault_init_transit_seal | bool
+    - not (vault_init_seal_migrate | bool)
+    - (_vault_pod_status.stdout | from_json).migration | default(false) | bool
 
 - name: "Wait until unsealed | {{ _vault_pod }}"
   kubernetes.core.k8s_exec:

@@ -1,0 +1,37 @@
+---
+- name: Require the source files
+  ansible.builtin.assert:
+    that:
+      - pki_cert_src_cert | length > 0
+      - pki_cert_src_key | length > 0
+      - pki_cert_src_ca | length > 0
+    fail_msg: "pki_cert_mode=files needs pki_cert_src_cert, pki_cert_src_key and pki_cert_src_ca (controller paths)"
+    quiet: true
+
+- name: Install the private key
+  ansible.builtin.copy:
+    src: "{{ pki_cert_src_key }}"
+    dest: "{{ pki_cert_key_path }}"
+    owner: "{{ pki_cert_owner }}"
+    group: "{{ pki_cert_group }}"
+    mode: "{{ pki_cert_key_mode }}"
+  register: _pki_key
+  no_log: true
+
+- name: Install the certificate (full chain expected)
+  ansible.builtin.copy:
+    src: "{{ pki_cert_src_cert }}"
+    dest: "{{ pki_cert_cert_path }}"
+    owner: "{{ pki_cert_owner }}"
+    group: "{{ pki_cert_group }}"
+    mode: "0644"
+  register: _pki_cert
+
+- name: Install the CA certificate
+  ansible.builtin.copy:
+    src: "{{ pki_cert_src_ca }}"
+    dest: "{{ pki_cert_ca_path }}"
+    owner: "{{ pki_cert_owner }}"
+    group: "{{ pki_cert_group }}"
+    mode: "0644"
+  register: _pki_ca

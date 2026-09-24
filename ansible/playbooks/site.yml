@@ -1,13 +1,25 @@
 ---
 # Full build of a MicroK8s HA cluster, from bare OS to Argo CD owning the platform.
 #   ansible-playbook -i inventories/production/hosts.yml playbooks/site.yml
-# Vault initialisation (vault-init.yml) and ConfigMap rendering (configmaps.yml) are run
+# In-cluster Vault initialisation (vault-init.yml) and ConfigMap rendering (configmaps.yml) are run
 # separately, after Argo CD has synced the platform.
 - name: Preflight checks
   ansible.builtin.import_playbook: preflight.yml
 
 - name: OS baseline and hardening
   ansible.builtin.import_playbook: prepare-nodes.yml
+
+- name: Edge load balancers (HAProxy + keepalived VIPs)
+  ansible.builtin.import_playbook: loadbalancers.yml
+
+# Optional infrastructure outside the cluster: every play targets a group that may be empty
+# (vault_servers / minio_servers) and is then skipped. The external Vault is only initialised with
+# -e vault_server_init=true.
+- name: External HashiCorp Vault (optional, vault_servers)
+  ansible.builtin.import_playbook: vault-server.yml
+
+- name: External MinIO backup target (optional, minio_servers)
+  ansible.builtin.import_playbook: minio-server.yml
 
 - name: MicroK8s install and HA cluster formation
   ansible.builtin.import_playbook: cluster.yml

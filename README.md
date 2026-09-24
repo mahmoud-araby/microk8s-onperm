@@ -8,7 +8,9 @@ on-prem **MicroK8s HA** cluster, sized for **~1,000,000 users**, with **multi-te
 
 | Area | Components |
 |------|-----------|
-| Cluster provisioning | Ansible: OS hardening & tuning, MicroK8s HA (dqlite), node pools/taints, upgrades, dqlite backups, **ConfigMap generation** (`k8s_configmaps` role) |
+| Cluster provisioning | Ansible: OS hardening & tuning, MicroK8s HA (dqlite), node pools/taints, disk prep, upgrades, dqlite backups, **ConfigMap generation** (`k8s_configmaps` role) |
+| Load balancing | **L7 edge load balancers** (HAProxy + keepalived VIPs: TLS, HTTP/2, host routing, rate limits) with **optional L4** passthrough (PROXY protocol / IPVS); MetalLB in-cluster L4; Kong/Istio in-cluster L7 — [docs/load-balancing.md](docs/load-balancing.md) |
+| Vault | In-cluster Vault (raft HA) and/or **external Vault cluster via Ansible** (`vault_server`): transit auto-unseal, Ansible secrets backend (`community.hashi_vault`) |
 | GitOps | Argo CD (HA) app-of-apps, AppProjects, ApplicationSets for tenants × services × versions |
 | Gateways | **Kong** external API gateway (public), **Istio internal gateway** (private), Istio egress gateway |
 | Service mesh | Istio: mTLS, **retries, timeouts, circuit breakers**, outlier detection, authorization |
@@ -17,7 +19,8 @@ on-prem **MicroK8s HA** cluster, sized for **~1,000,000 users**, with **multi-te
 | Data | **PostgreSQL** (CloudNativePG, sync replication, PgBouncer, PITR), **Redis** + Sentinel, **RabbitMQ** (quorum queues, federation), **Kafka** (Strimzi KRaft, HTTP bridge = Kafka-compatible endpoints, MirrorMaker2 replication), optional SQL Server |
 | Observability | **Prometheus** + Thanos + Alertmanager + Grafana, **Elasticsearch/Kibana logging** (Fluent Bit), **APM** (OpenTelemetry → Elastic APM), Kiali, blackbox probes, SLO burn-rate alerts |
 | Security | Vault + External Secrets, cert-manager, Keycloak (OIDC, realm per tenant), Kyverno policies, Harbor + Trivy, cosign |
-| Scaling & availability | HPA, **KEDA** (queue/lag-based), PDBs, topology spread, PriorityClasses, Velero backups, Longhorn storage, MetalLB |
+| Storage | Longhorn (block), local NVMe (`local-nvme`), NFS (`nfs-rwx`), **MinIO** object storage (in-cluster tenant + external backup cluster via Ansible), **MinIO buckets mounted into container paths** (CSI S3 or unprivileged sync), **ephemeral storage** options (emptyDir disk/memory, generic ephemeral volumes, limits) — [docs/storage.md](docs/storage.md) |
+| Scaling & availability | HPA, **KEDA** (queue/lag-based), PDBs, topology spread, PriorityClasses, Velero backups, MetalLB |
 | Workloads | Generic Helm charts (`microservice`, `frontend`, `tenant`) with **startup (init) containers, sidecars**, probes, security contexts |
 | Reference apps | `orders` (.NET 8), `payments` (Java 21 / Spring Boot), `catalog` (Python / FastAPI), `web` (React SPA) |
 | CI | GitHub Actions: build, test, SAST, Trivy, SBOM, cosign, push to Harbor, GitOps image-tag bump |
@@ -38,6 +41,7 @@ gitops/
   apps/                       Service catalogue (values per service & version) + ApplicationSets
   tenants/                    One folder per tenant: tenant.yaml + pinned service versions
 services/                     Reference microservices + docker-compose for local dev
+images/                       Platform tool images built from source (minio, mc)
 docs/                         Architecture, conventions, capacity, resilience, multi-tenancy, runbooks
 .github/                      CI workflows, dependabot, CODEOWNERS
 ```
@@ -87,5 +91,7 @@ git commit -am "onboard tenant newco" && git push   # ApplicationSets create eve
 - [Capacity planning for 1M users](docs/capacity-planning.md)
 - [Resilience: retries, timeouts, circuit breakers, startup & sidecar containers](docs/resilience.md)
 - [Multi-tenancy & multiple versions](docs/multi-tenancy.md)
+- [Storage: block, file, object (MinIO), ephemeral](docs/storage.md)
+- [Load balancing: L7 with optional L4](docs/load-balancing.md)
 - [Runbooks](docs/runbooks/)
 - Component READMEs in `ansible/`, `charts/*`, `gitops/**`, `services/`

@@ -1,0 +1,133 @@
+---
+# ===========================================================================
+# role: vault_server - standalone HashiCorp Vault HA cluster on VMs (inventory group
+# `vault_servers`, 3 nodes, integrated storage raft), OUTSIDE the Kubernetes failure domain.
+# docs/conventions.md "External Vault (optional)". Endpoint: https://vault-ext.example.local:8200
+#
+# Uses:
+#   * transit auto-unseal of the in-cluster Vault (key `autounseal-k8s`, vault_deployment_mode external|both)
+#   * Ansible secrets source (secrets_backend: hashicorp_vault, KV v2 `secret`, AppRole `ansible`)
+#   * optional External Secrets backend (ClusterSecretStore on this Vault)
+#
+# The external Vault itself is Shamir-sealed (it is the root of trust): after a reboot re-run
+# playbooks/vault-server.yml with the unseal keys (vault_ext_unseal_keys in vault.yml), or unseal by hand.
+# ===========================================================================
+
+# --- Package (HashiCorp apt repository) ----------------------------------------------------------
+# PINNED. Check https://releases.hashicorp.com/vault/ and the upgrade notes before bumping; upgrade
+# one node at a time (the play is serial: 1), standbys first, the active node last.
+# Kept equal to the in-cluster Vault image (gitops/platform/core/vault/values.yaml server.image.tag) so transit
+# auto-unseal and runbooks target one version.
+vault_server_version: "2.0.4"
+vault_server_package: vault
+vault_server_apt_key_url: https://apt.releases.hashicorp.com/gpg
+vault_server_apt_repo_url: https://apt.releases.hashicorp.com
+vault_server_apt_keyring: /usr/share/keyrings/hashicorp-archive-keyring.asc
+vault_server_hold_package: true
+
+# --- Identity / addressing -----------------------------------------------------------------------
+vault_server_user: vault
+vault_server_group: vault
+vault_server_cluster_name: "vault-ext-{{ platform_environment | default('env') }}"
+# Shared client endpoint: DNS round-robin over the nodes, or a VIP on the `loadbalancers`
+# HAProxy pair (TCP passthrough, health check GET /v1/sys/health) - see ansible/README.md.
+vault_server_endpoint_host: "vault-ext.{{ platform_internal_domain | default('example.local') }}"
+vault_server_port: 8200
+vault_server_cluster_port: 8201
+vault_server_endpoint: "https://{{ vault_server_endpoint_host }}:{{ vault_server_port }}"
+# Per-node name / address (api_addr, cluster_addr, raft retry_join)
+vault_server_node_fqdn: "{{ inventory_hostname }}.{{ platform_internal_domain | default('example.local') }}"
+vault_server_node_address: "{{ ansible_host }}"
+vault_server_manage_etc_hosts: true
+
+# --- Paths ---------------------------------------------------------------------------------------
+vault_server_config_dir: /etc/vault.d
+vault_server_data_dir: /opt/vault/data
+vault_server_tls_dir: /opt/vault/tls
+vault_server_log_dir: /var/log/vault
+vault_server_audit_log: "{{ vault_server_log_dir }}/audit.log"
+
+# --- TLS (role pki_cert: internal CA signs a host-generated key, or files) ------------------------
+vault_server_tls_mode: internal_ca          # internal_ca | files
+vault_server_tls_src_cert: ""               # files mode (controller paths)
+vault_server_tls_src_key: ""
+vault_server_tls_src_ca: ""
+vault_server_tls_min_version: tls12
+vault_server_tls_extra_sans: []
+
+# --- vault.hcl -----------------------------------------------------------------------------------
+vault_server_ui: true
+vault_server_log_level: info
+vault_server_log_format: json
+# Integrated storage: HashiCorp recommends disable_mlock=true with raft (mlock would pin the whole
+# BoltDB mmap). Swap is disabled by this role instead (vault_server_disable_swap).
+vault_server_disable_mlock: true
+vault_server_disable_swap: true
+vault_server_telemetry_retention: 30s
+# Prometheus scrapes GET /v1/sys/metrics?format=prometheus without a token
+vault_server_unauthenticated_metrics: true
+vault_server_raft_performance_multiplier: 1
+vault_server_autopilot:
+  cleanup_dead_servers: "true"
+  last_contact_threshold: 10s
+  dead_server_last_contact_threshold: 24h
+  min_quorum: 3
+  server_stabilization_time: 10s
+vault_server_extra_config: ""
+
+# --- Firewall (ufw) ------------------------------------------------------------------------------
+vault_server_firewall_enabled: true
+vault_server_firewall_admin_cidrs: "{{ platform_admin_cidrs | default([]) }}"
+# Clients of :8200 (cluster nodes for transit auto-unseal / ESO, admins, controllers, load balancers)
+vault_server_firewall_client_cidrs: "{{ (platform_node_cidrs | default([])) + (platform_admin_cidrs | default([])) }}"
+vault_server_firewall_ssh_port: "22"
+
+# --- Audit log -----------------------------------------------------------------------------------
+vault_server_audit_enabled: true
+vault_server_logrotate_days: 30
+
+# --- Initialisation (first node only, OPT-IN) ----------------------------------------------------
+# vault operator init runs ONLY with -e vault_server_init=true and only when the cluster is not
+# initialised yet. The keys + root token are written to vault_server_init_output_file on the
+# controller and immediately ansible-vault encrypted (vault_server_init_output=file), or printed
+# ONCE (vault_server_init_output=print - copy them immediately, they are never shown again).
+vault_server_init: false
+vault_server_init_output: file              # file | print
+vault_server_init_output_file: "{{ inventory_dir }}/vault-ext-init-{{ platform_environment | default('env') }}.yml"
+vault_server_init_vault_id: "{{ platform_environment | default('default') }}"
+vault_server_key_shares: 5
+vault_server_key_threshold: 3
+
+# Unseal keys / root token for later runs (ansible-vault, never from HashiCorp Vault itself)
+vault_server_unseal_keys: "{{ vault_ext_unseal_keys | default([]) }}"
+vault_server_root_token: "{{ vault_ext_root_token | default('') }}"
+vault_server_unseal: true
+
+# --- Configuration (first node, after unseal; needs the root token) -------------------------------
+vault_server_configure: true
+# Transit auto-unseal for the in-cluster Vault (gitops/platform/core/vault seal "transit")
+vault_server_transit_enabled: true
+vault_server_transit_mount: transit
+vault_server_transit_key: autounseal-k8s
+vault_server_transit_policy: autounseal-k8s
+# Periodic orphan token for the seal (renewed by the in-cluster Vault; never expires while used)
+vault_server_transit_token_period: 24h
+# Where the auto-unseal token is kept so vault_init can create Secret vault/vault-transit-token:
+#   KV v2 secret/<path> (key `token`) when the KV mount is enabled, plus an ansible-vault encrypted
+#   controller file when vault_server_transit_token_file is non-empty.
+vault_server_transit_token_kv_path: platform/vault-transit-token
+vault_server_transit_token_file: "{{ inventory_dir }}/vault-ext-transit-token-{{ platform_environment | default('env') }}.yml"
+
+# KV v2 for Ansible lookups (community.hashi_vault) and platform credentials (MinIO service accounts)
+vault_server_kv_enabled: true
+vault_server_kv_path: secret
+# AppRole `ansible`: read secret/ansible/*, write secret/platform/* (credentials pushed by roles)
+vault_server_approle_enabled: true
+vault_server_approle_name: ansible
+vault_server_approle_token_ttl: 1h
+vault_server_approle_token_max_ttl: 4h
+vault_server_approle_secret_id_ttl: 720h
+vault_server_approle_secret_id_bound_cidrs: "{{ platform_admin_cidrs | default([]) }}"
+
+# Never print secrets (unseal keys, tokens) in logs
+vault_server_no_log: true

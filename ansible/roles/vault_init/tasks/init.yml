@@ -24,16 +24,20 @@
         namespace: "{{ vault_init_namespace }}"
         pod: "{{ _vault_pods[0] }}"
         container: "{{ vault_init_container }}"
+        # transit seal: recovery keys (the pods auto-unseal); Shamir: unseal keys
         command: >-
           {{ _vault_env }} vault operator init -format=json
-          -key-shares={{ vault_init_key_shares }} -key-threshold={{ vault_init_key_threshold }}
+          {{ ('-recovery-shares=' ~ vault_init_recovery_shares ~ ' -recovery-threshold=' ~ vault_init_recovery_threshold)
+             if vault_init_transit_seal | bool
+             else ('-key-shares=' ~ vault_init_key_shares ~ ' -key-threshold=' ~ vault_init_key_threshold) }}
       register: _vault_init_out
       changed_when: true
       no_log: "{{ vault_init_no_log }}"
 
     - name: Keep the new unseal keys and root token for this run
       ansible.builtin.set_fact:
-        vault_init_unseal_keys: "{{ (_vault_init_out.stdout | from_json).unseal_keys_b64 }}"
+        vault_init_unseal_keys: "{{ (_vault_init_out.stdout | from_json).unseal_keys_b64 | default([], true) }}"
+        vault_init_recovery_keys: "{{ (_vault_init_out.stdout | from_json).recovery_keys_b64 | default([], true) }}"
         vault_init_root_token: "{{ (_vault_init_out.stdout | from_json).root_token }}"
       no_log: "{{ vault_init_no_log }}"
 
@@ -43,7 +47,9 @@
         content: |
           # Vault init output for {{ platform_environment | default('') }} - move these values into
           # group_vars/all/vault.yml (ansible-vault encrypted) and store a copy offline.
-          {{ {'vault_unseal_keys': vault_init_unseal_keys, 'vault_root_token': vault_init_root_token} | to_nice_yaml }}
+          {{ ({'vault_recovery_keys': vault_init_recovery_keys, 'vault_root_token': vault_init_root_token}
+              if vault_init_transit_seal | bool
+              else {'vault_unseal_keys': vault_init_unseal_keys, 'vault_root_token': vault_init_root_token}) | to_nice_yaml }}
         mode: "0600"
       no_log: "{{ vault_init_no_log }}"
 
@@ -58,10 +64,11 @@
 - name: Require unseal keys and a root token
   ansible.builtin.assert:
     that:
-      - vault_init_unseal_keys | length >= vault_init_key_threshold
+      - (vault_init_transit_seal | bool and not (vault_init_seal_migrate | bool))
+        or (vault_init_unseal_keys | length >= vault_init_key_threshold)
       - vault_init_root_token | length > 0
     fail_msg: >-
-      Vault is initialised but vault_unseal_keys / vault_root_token are not available.
+      Vault is initialised but vault_unseal_keys (Shamir or seal migration) / vault_root_token are not available.
       Add them to inventories/<env>/group_vars/all/vault.yml (ansible-vault).
     quiet: true
   no_log: "{{ vault_init_no_log }}"

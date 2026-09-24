@@ -2,6 +2,7 @@
 # Install with:  ansible-galaxy collection install -r requirements.yml -p ./collections
 # Controller Python requirements (same venv as ansible-core):
 #   pip install "ansible-core>=2.16,<2.20" "kubernetes>=29.0.0" "PyYAML>=6.0" "jsonpatch>=1.33"
+#   pip install "hvac>=2.1.0"        # community.hashi_vault (secrets_backend: hashicorp_vault, minio_server credential push)
 # Controller binaries: helm >= 3.14 (argocd_bootstrap), kubectl (optional, for humans).
 collections:
   - name: kubernetes.core
@@ -12,3 +13,7 @@ collections:
     version: ">=1.5.4,<3.0.0"
   - name: community.crypto
     version: ">=2.20.0,<4.0.0"
+  # External Vault lookups/modules (secrets_backend: hashicorp_vault). 7.x needs ansible-core >= 2.17;
+  # on ansible-core 2.16 install with version "<7.0.0" (ansible-galaxy does not check requires_ansible).
+  - name: community.hashi_vault
+    version: ">=6.2.0,<8.0.0"

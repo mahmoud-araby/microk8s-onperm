@@ -1,0 +1,42 @@
+---
+- name: Read the seal status
+  ansible.builtin.command: vault status -format=json
+  environment: "{{ _vault_server_env }}"
+  register: _vault_server_seal
+  changed_when: false
+  failed_when: _vault_server_seal.rc not in [0, 2]
+
+- name: Warn when this node is sealed and no unseal keys are available
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} is sealed and no unseal keys are available
+      (vault_ext_unseal_keys in group_vars/all/vault.yml). Unseal manually or re-run with the keys.
+  when:
+    - (_vault_server_seal.stdout | from_json).sealed | bool
+    - _vault_server_keys | length < vault_server_key_threshold | int
+
+# A follower with retry_join joins the raft cluster while it is being unsealed with the leader's keys.
+- name: Unseal this node
+  ansible.builtin.command: "vault operator unseal -format=json {{ _unseal_key }}"
+  environment: "{{ _vault_server_env }}"
+  loop: "{{ _vault_server_keys[: vault_server_key_threshold | int] }}"
+  loop_control:
+    loop_var: _unseal_key
+  when:
+    - (_vault_server_seal.stdout | from_json).sealed | bool
+    - _vault_server_keys | length >= vault_server_key_threshold | int
+  changed_when: true
+  no_log: "{{ vault_server_no_log }}"
+
+- name: Wait until this node is unsealed (raft join can take a moment)
+  ansible.builtin.command: vault status -format=json
+  environment: "{{ _vault_server_env }}"
+  register: _vault_server_after
+  changed_when: false
+  failed_when: false
+  until: _vault_server_after.rc == 0
+  retries: 30
+  delay: 5
+  when:
+    - (_vault_server_seal.stdout | from_json).sealed | bool
+    - _vault_server_keys | length >= vault_server_key_threshold | int

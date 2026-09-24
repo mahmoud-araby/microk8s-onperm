@@ -1,0 +1,47 @@
+---
+- name: Verify supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] in ['22.04', '24.04']
+    fail_msg: "{{ inventory_hostname }}: only Ubuntu 22.04 / 24.04 LTS are supported"
+    quiet: true
+  tags: [always]
+
+- name: Vault cluster size
+  ansible.builtin.assert:
+    that: (groups['vault_servers'] | length) in [1, 3, 5]
+    fail_msg: "vault_servers must contain 1 (lab), 3 or 5 hosts for raft quorum (found {{ groups['vault_servers'] | length }})"
+    quiet: true
+  run_once: true
+  tags: [always]
+
+- name: Install Vault from the HashiCorp apt repository
+  ansible.builtin.import_tasks: install.yml
+  tags: [vault_server, vault_install]
+
+- name: TLS certificate
+  ansible.builtin.import_tasks: tls.yml
+  tags: [vault_server, vault_tls, pki]
+
+- name: Configuration, systemd unit, audit log rotation
+  ansible.builtin.import_tasks: config.yml
+  tags: [vault_server, vault_config]
+
+- name: Host firewall
+  ansible.builtin.import_tasks: firewall.yml
+  when: vault_server_firewall_enabled | bool
+  tags: [vault_server, firewall]
+
+- name: Start Vault
+  ansible.builtin.import_tasks: service.yml
+  tags: [vault_server, vault_service]
+
+- name: Initialise the cluster (first node, opt-in)
+  ansible.builtin.import_tasks: init.yml
+  tags: [vault_server, vault_unseal]
+
+- name: Unseal this node
+  ansible.builtin.import_tasks: unseal.yml
+  when: vault_server_unseal | bool
+  tags: [vault_server, vault_unseal]

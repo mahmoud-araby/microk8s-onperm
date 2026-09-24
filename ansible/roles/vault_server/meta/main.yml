@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: vault_server
+  namespace: platform
+  author: Platform Engineering
+  description: Standalone HashiCorp Vault HA (integrated raft) on VMs - TLS, hardening, audit, init/unseal, transit auto-unseal key for the in-cluster Vault, KV v2 + AppRole for Ansible
+  license: Apache-2.0
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags: [vault, secrets, raft, transit, autounseal]
+dependencies: []

@@ -1,0 +1,56 @@
+---
+# ===========================================================================
+# role: pki_cert - server TLS certificate for a non-Kubernetes host (external Vault, external
+# MinIO). Used through include_role by vault_server / minio_server; can be used on its own.
+#
+# pki_cert_mode:
+#   internal_ca  (default) private key + CSR generated ON THE HOST (the key never leaves it),
+#                signed on the controller by the on-prem CA (same CA as the cert-manager
+#                ClusterIssuer `internal-ca`, docs/conventions.md). Renewed automatically when
+#                it expires within pki_cert_renew_days or the SANs change.
+#   files        certificate / key / CA copied from controller-side files (enterprise PKI).
+#
+# After the role, `pki_cert_changed` (bool) tells the caller whether anything changed on the host.
+# ===========================================================================
+
+pki_cert_mode: internal_ca
+
+# Destination on the host
+pki_cert_dir: /etc/pki/platform
+pki_cert_cert_path: "{{ pki_cert_dir }}/server.crt"
+pki_cert_key_path: "{{ pki_cert_dir }}/server.key"
+pki_cert_ca_path: "{{ pki_cert_dir }}/ca.crt"
+pki_cert_owner: root
+pki_cert_group: root
+pki_cert_key_mode: "0600"
+# Also add the CA to the host trust store (update-ca-certificates), e.g. for CLI clients.
+pki_cert_trust_ca: true
+
+# Subject / SANs
+pki_cert_common_name: "{{ inventory_hostname }}"
+pki_cert_dns_names: ["{{ inventory_hostname }}"]
+pki_cert_ip_addresses: ["{{ ansible_host | default('127.0.0.1') }}", "127.0.0.1"]
+pki_cert_organization: Platform Engineering
+
+# Key
+pki_cert_key_type: RSA
+pki_cert_key_size: 3072
+
+# --- internal_ca mode ----------------------------------------------------------------------------
+# Controller-side CA. The PUBLIC certificate may be committed (inventories/<env>/files/);
+# the private key must NOT (ansible/.gitignore excludes inventories/*/files/pki/).
+pki_cert_ca_cert_file: "{{ inventory_dir }}/files/internal-ca.crt"
+pki_cert_ca_key_file: "{{ inventory_dir }}/files/pki/internal-ca.key"
+pki_cert_ca_key_passphrase: "{{ vault_internal_ca_key_passphrase | default('') }}"
+# Create a new CA on the controller when the files above do not exist (labs / staging only;
+# production should use the existing on-prem CA that also backs cert-manager `internal-ca`).
+pki_cert_create_ca: false
+pki_cert_ca_common_name: "Platform Internal CA ({{ platform_environment | default('env') }})"
+pki_cert_ca_validity_days: 3650
+pki_cert_validity_days: 397
+pki_cert_renew_days: 30
+
+# --- files mode ----------------------------------------------------------------------------------
+pki_cert_src_cert: ""
+pki_cert_src_key: ""
+pki_cert_src_ca: ""

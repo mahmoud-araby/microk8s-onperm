@@ -1,0 +1,25 @@
+---
+# External HashiCorp Vault (role vault_server, playbooks/vault-server.yml) - see role defaults for all knobs.
+# docs/conventions.md "External Vault (optional)". Not Kubernetes nodes: roles common / microk8s never run here.
+vault_server_version: "2.0.4"
+vault_server_endpoint_host: "vault-ext.{{ platform_internal_domain }}"
+
+# TLS: host key + CSR, signed on the controller by the on-prem CA (same CA as cert-manager `internal-ca`,
+# so the in-cluster Vault trusts the transit endpoint through vault-server-tls/ca.crt).
+vault_server_tls_mode: internal_ca
+
+# Clients of :8200 - cluster nodes (in-cluster Vault transit seal, ESO), admins/controllers, LB pair
+vault_server_firewall_client_cidrs: "{{ platform_node_cidrs + platform_admin_cidrs + ([lb_subnet_cidr] if lb_subnet_cidr is defined else []) }}"
+
+vault_server_transit_enabled: true
+vault_server_kv_enabled: true
+vault_server_approle_enabled: true
+
+# Single node: no autopilot dead-server cleanup; labs may let Ansible create a throw-away CA.
+vault_server_autopilot:
+  cleanup_dead_servers: "false"
+  last_contact_threshold: 10s
+  dead_server_last_contact_threshold: 24h
+  min_quorum: 3
+  server_stabilization_time: 10s
+pki_cert_create_ca: true

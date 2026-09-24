@@ -1,0 +1,16 @@
+---
+# Prepare dedicated data disks (role storage_prep, guarded - never wipes a disk that carries data unless
+# -e storage_prep_force=true):
+#   local_nvme_device -> XFS /mnt/local-nvme (storage class local-nvme, local-path provisioner; `storage` pool)
+#   minio_drives      -> XFS /mnt/disk1..N   (minio_servers, optional extra drives on cluster nodes)
+#   longhorn_disk_device -> role common's Longhorn disk tasks; nfs-common on cluster nodes (nfs-rwx)
+# Already part of prepare-nodes.yml (cluster) and minio-server.yml (MinIO VMs); run alone e.g. after adding a disk:
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/storage-prep.yml --limit storage
+- name: Prepare dedicated data disks
+  hosts: microk8s_cluster:minio_servers
+  become: true
+  gather_facts: true
+  any_errors_fatal: false
+  roles:
+    - role: storage_prep
+      tags: [storage_prep]
