@@ -454,7 +454,7 @@ prometheusRule:
   restartThreshold: 3
   labels: {}
   # -- (extra) Base URL of the runbooks (adds runbook_url annotations when set).
-  runbookBaseUrl: ""
+  runbookBaseUrl: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks
 
 networkPolicy:
   enabled: true
