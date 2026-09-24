@@ -1,0 +1,105 @@
+# Dependency updates for every service and ecosystem. Minor/patch updates are grouped per service to keep the PR
+# volume manageable; majors arrive as individual PRs. Runtime majors are held back where the platform pins an LTS
+# line (.NET 8, Spring Boot 3.x).
+version: 2
+
+updates:
+  # ---------------------------------------------------------------- orders (.NET)
+  - package-ecosystem: nuget
+    directory: /services/orders-dotnet
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, dotnet, orders]
+    open-pull-requests-limit: 10
+    groups:
+      opentelemetry:
+        patterns: ["OpenTelemetry*", "Npgsql.OpenTelemetry"]
+      nuget-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # stay on the .NET 8 LTS line until the platform moves to .NET 10
+      - dependency-name: "Microsoft.*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Npgsql*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Asp.Versioning.*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Serilog.AspNetCore"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: docker
+    directory: /services/orders-dotnet
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, docker, orders]
+    ignore:
+      - dependency-name: "dotnet/*"
+        update-types: ["version-update:semver-major"]
+
+  # ---------------------------------------------------------------- payments (Java)
+  - package-ecosystem: maven
+    directory: /services/payments-java
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, java, payments]
+    open-pull-requests-limit: 10
+    groups:
+      spring:
+        patterns: ["org.springframework*"]
+      maven-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "org.springframework.boot:spring-boot-starter-parent"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: docker
+    directory: /services/payments-java
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, docker, payments]
+
+  # ---------------------------------------------------------------- catalog (Python)
+  - package-ecosystem: pip
+    directory: /services/catalog-python
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, python, catalog]
+    open-pull-requests-limit: 10
+    groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
+      pip-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /services/catalog-python
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, docker, catalog]
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-minor"]   # Python 3.12 line is pinned by the platform
+
+  # ---------------------------------------------------------------- web (npm)
+  - package-ecosystem: npm
+    directory: /services/web-frontend
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, javascript, web]
+    open-pull-requests-limit: 10
+    groups:
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
+      build-tooling:
+        patterns: ["vite", "@vitejs/*", "vitest", "typescript"]
+      npm-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /services/web-frontend
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, docker, web]
+
+  # ---------------------------------------------------------------- local dev stack
+  - package-ecosystem: docker-compose
+    directory: /services
+    schedule: {interval: monthly}
+    labels: [dependencies, docker]
+
+  # ---------------------------------------------------------------- CI (actions are pinned by commit SHA)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly, day: monday, time: "05:00", timezone: Europe/Berlin}
+    labels: [dependencies, ci]
+    groups:
+      github-actions:
+        patterns: ["*"]

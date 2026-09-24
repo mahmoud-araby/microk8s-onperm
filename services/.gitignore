@@ -1,0 +1,15 @@
+# build outputs
+**/bin/
+**/obj/
+**/target/
+**/node_modules/
+**/dist/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+**/TestResults/
+*.user
+.idea/
+.vscode/

@@ -1,0 +1,123 @@
+# Reusable: bump image.tag of one service major version in the GitOps catalogue and open a pull request.
+#   gitops/apps/<service>/values-<api_version>.yaml   (.image.tag, the only line CI edits)
+#
+# Promotion model (GitHub environments):
+#   staging    - no reviewers; the PR targets the staging branch (vars.GITOPS_STAGING_BRANCH, default "staging",
+#                tracked by the staging cluster's Argo CD) and is auto-merged once checks pass.
+#   production - the job waits for the required reviewers of the "production" environment; the PR targets
+#                main (production Argo CD) and is merged by a human after review (branch protection).
+# GITOPS_TOKEN (GitHub App / fine-grained PAT with contents+pull-requests write) is recommended so the created PR
+# triggers validate-gitops.yml - PRs opened with GITHUB_TOKEN do not start workflows.
+name: reusable-gitops-bump
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      tag:
+        description: Image tag to deploy (<semver>-<sha>)
+        required: true
+        type: string
+      api_version:
+        description: Major API version / values file suffix (v1, v2, ...)
+        required: true
+        type: string
+      environment:
+        description: GitHub environment (staging | production)
+        required: true
+        type: string
+      base_branch:
+        description: Branch the PR targets
+        required: true
+        type: string
+      auto_merge:
+        description: Enable auto-merge (squash) on the PR
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      GITOPS_TOKEN:
+        required: false
+    outputs:
+      pull-request-url:
+        value: ${{ jobs.bump.outputs.url }}
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: gitops ${{ inputs.environment }} (${{ inputs.service }} ${{ inputs.api_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment }}
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      url: ${{ steps.pr.outputs.pull-request-url }}
+    env:
+      VALUES_FILE: gitops/apps/${{ inputs.service }}/values-${{ inputs.api_version }}.yaml
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base_branch }}
+          token: ${{ secrets.GITOPS_TOKEN || github.token }}
+
+      - name: Check values file
+        run: |
+          if [ ! -f "$VALUES_FILE" ]; then
+            echo "::error::$VALUES_FILE does not exist on ${{ inputs.base_branch }} - add the major version to the catalogue first"
+            exit 1
+          fi
+          echo "current: $(grep -E '^\s*tag:' "$VALUES_FILE" | head -1)"
+
+      - name: Set image.tag (yq keeps comments and formatting)
+        uses: mikefarah/yq@c14f446382944492701b16c1ddb48bb9dbe683e3 # v4.53.6
+        with:
+          # tag is validated as <semver>-<sha> by _reusable-container.yml
+          cmd: yq -i '.image.tag = "${{ inputs.tag }}"' '${{ env.VALUES_FILE }}'
+
+      - name: Show diff
+        run: |
+          if git diff --quiet -- "$VALUES_FILE"; then
+            echo "::notice::$VALUES_FILE is already at $TAG"
+          else
+            git diff -- "$VALUES_FILE"
+          fi
+
+      - name: Open pull request
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ secrets.GITOPS_TOKEN || github.token }}
+          base: ${{ inputs.base_branch }}
+          branch: gitops/${{ inputs.environment }}/${{ inputs.service }}-${{ inputs.api_version }}
+          delete-branch: true
+          add-paths: ${{ env.VALUES_FILE }}
+          commit-message: "chore(gitops): ${{ inputs.service }} ${{ inputs.api_version }} -> ${{ inputs.tag }} (${{ inputs.environment }})"
+          title: "deploy(${{ inputs.environment }}): ${{ inputs.service }} ${{ inputs.api_version }} ${{ inputs.tag }}"
+          labels: |
+            gitops
+            ${{ inputs.environment }}
+            automated
+          body: |
+            Promotes **${{ inputs.service }} ${{ inputs.api_version }}** to `${{ inputs.tag }}` in `${{ env.VALUES_FILE }}`.
+
+            - Image: `harbor.ops.example.local/platform/${{ inputs.service }}:${{ inputs.tag }}` (Trivy-scanned, cosign-signed, SBOM attested)
+            - Source: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+            - Pipeline: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            After merge Argo CD syncs every `<tenant>-${{ inputs.service }}-${{ inputs.api_version }}` Application ring by ring
+            (RollingSync) and Argo Rollouts runs the canary with Prometheus analysis inside each release.
+            Tenants pinning `imageTag` in their descriptor are not affected.
+
+      - name: Enable auto-merge
+        if: inputs.auto_merge && steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN || github.token }}
+        run: gh pr merge --auto --squash "${{ steps.pr.outputs.pull-request-number }}" --repo "$GITHUB_REPOSITORY"

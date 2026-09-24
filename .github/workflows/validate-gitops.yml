@@ -1,0 +1,192 @@
+# Static validation of everything Argo CD / Ansible consume: YAML style, Helm charts (lint + render with the
+# charts' ci/ values), Kubernetes schema validation incl. CRDs, chart security lint, Ansible lint and a sanity
+# check of every Argo CD Application.
+name: validate-gitops
+
+on:
+  pull_request:
+    paths:
+      - gitops/**
+      - charts/**
+      - ansible/**
+      - .yamllint.yaml
+      - .github/workflows/validate-gitops.yml
+  push:
+    branches: [main]
+    paths:
+      - gitops/**
+      - charts/**
+      - ansible/**
+      - .yamllint.yaml
+      - .github/workflows/validate-gitops.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  KUBERNETES_VERSION: "1.32.0"
+  KUBECONFORM_VERSION: "0.7.0"
+  KUBE_LINTER_VERSION: "0.7.6"
+  CRDS_CATALOG: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+jobs:
+  yamllint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install yamllint
+      # Chart templates are Go templates, not YAML: excluded by .yamllint.yaml.
+      - run: yamllint -c .yamllint.yaml -f github gitops charts ansible
+
+  argocd-applications:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Every gitops/**/application.yaml parses and follows the conventions
+        shell: python
+        run: |
+          import pathlib, sys, yaml
+          errors, files = [], sorted(pathlib.Path("gitops").rglob("application.yaml"))
+          for f in files:
+              try:
+                  docs = [d for d in yaml.safe_load_all(f.read_text()) if d]
+              except yaml.YAMLError as e:
+                  errors.append(f"{f}: invalid YAML: {e}"); continue
+              for d in docs:
+                  where = f"{f}: {d.get('kind')}/{d.get('metadata', {}).get('name')}"
+                  if d.get("apiVersion") != "argoproj.io/v1alpha1" or d.get("kind") != "Application":
+                      errors.append(f"{where}: expected argoproj.io/v1alpha1 Application"); continue
+                  meta, spec = d.get("metadata") or {}, d.get("spec") or {}
+                  if meta.get("namespace") != "argocd":
+                      errors.append(f"{where}: metadata.namespace must be argocd")
+                  if "argocd.argoproj.io/sync-wave" not in (meta.get("annotations") or {}):
+                      errors.append(f"{where}: missing argocd.argoproj.io/sync-wave annotation")
+                  if not spec.get("project"):
+                      errors.append(f"{where}: spec.project is required")
+                  if not (spec.get("source") or spec.get("sources")):
+                      errors.append(f"{where}: spec.source(s) is required")
+                  if not (spec.get("destination") or {}).get("namespace") and not (spec.get("destination") or {}).get("name"):
+                      errors.append(f"{where}: spec.destination is required")
+          print(f"checked {len(files)} application.yaml files")
+          for e in errors:
+              print(f"::error::{e}")
+          sys.exit(1 if errors else 0)
+
+  helm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.17.3
+      - name: Lint and render every chart with each ci/*.yaml values file
+        run: |
+          set -euo pipefail
+          mkdir -p rendered
+          for chart in charts/*/; do
+            name=$(basename "$chart")
+            if grep -q '^dependencies:' "$chart/Chart.yaml"; then helm dependency build "$chart"; fi
+            values=("$chart"ci/*.yaml)
+            [ -e "${values[0]}" ] || values=("")
+            for v in "${values[@]}"; do
+              args=(); label=default
+              if [ -n "$v" ]; then args=(-f "$v"); label=$(basename "$v" .yaml); fi
+              echo "::group::$name ($label)"
+              helm lint --strict "$chart" "${args[@]}"
+              helm template "ci-$name" "$chart" "${args[@]}" --namespace ci-validation \
+                --kube-version "$KUBERNETES_VERSION" > "rendered/${name}-${label}.yaml"
+              echo "::endgroup::"
+            done
+          done
+          ls -l rendered
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rendered-charts
+          path: rendered
+          retention-days: 7
+
+  kubeconform:
+    runs-on: ubuntu-latest
+    needs: helm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rendered-charts
+          path: rendered
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+      - name: Validate rendered charts and raw GitOps manifests (core + CRDs catalog)
+        run: |
+          set -euo pipefail
+          # Kubernetes objects only: Applications/ApplicationSets/AppProjects and manifests/ directories.
+          # Helm values files and tenant/service descriptors are not Kubernetes objects.
+          mapfile -t files < <(
+            find rendered -name '*.yaml'
+            find gitops -name application.yaml
+            find gitops/bootstrap gitops/apps/applicationsets -name '*.yaml' ! -name values.yaml
+            find gitops -path '*/manifests/*' -name '*.yaml' ! -name kustomization.yaml
+            find gitops/tenants -path '*/configmaps/*' -name '*.yaml'
+          )
+          kubeconform -strict -summary -output text \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            -schema-location default \
+            -schema-location "$CRDS_CATALOG" \
+            -ignore-missing-schemas \
+            "${files[@]}"
+
+  chart-security:
+    runs-on: ubuntu-latest
+    needs: helm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rendered-charts
+          path: rendered
+      - name: Install kube-linter
+        run: |
+          curl -sSL "https://github.com/stackrox/kube-linter/releases/download/v${KUBE_LINTER_VERSION}/kube-linter-linux.tar.gz" \
+            | tar -xz -C /usr/local/bin kube-linter
+      - name: kube-linter (security & reliability checks on rendered charts)
+        # Default exclusions when no .kube-linter.yaml exists:
+        #  dangling-service  - Services select pods owned by Argo Rollouts (a CRD kube-linter cannot follow)
+        #  no-anti-affinity  - the charts spread replicas with topologySpreadConstraints instead
+        run: |
+          args=(--exclude dangling-service --exclude no-anti-affinity)
+          [ -f .kube-linter.yaml ] && args=(--config .kube-linter.yaml)
+          kube-linter lint "${args[@]}" rendered
+
+  ansible-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ansible
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-core ansible-lint
+      - run: ansible-galaxy collection install -r requirements.yml
+      - run: ansible-lint

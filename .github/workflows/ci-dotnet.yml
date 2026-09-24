@@ -1,0 +1,160 @@
+# orders (.NET 8): build + test -> SAST + dependency scan -> image (scan/SBOM/push/sign) -> GitOps promotion.
+name: ci-dotnet
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - services/orders-dotnet/**
+      - .github/workflows/ci-dotnet.yml
+      - .github/workflows/_reusable-container.yml
+      - .github/workflows/_reusable-gitops-bump.yml
+  pull_request:
+    paths:
+      - services/orders-dotnet/**
+      - .github/workflows/ci-dotnet.yml
+      - .github/workflows/_reusable-container.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  SERVICE_DIR: services/orders-dotnet
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ env.SERVICE_DIR }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      api_version: ${{ steps.version.outputs.api_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: ${{ env.SERVICE_DIR }}/global.json
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('services/orders-dotnet/**/*.csproj', 'services/orders-dotnet/Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - run: dotnet restore Orders.sln
+      - run: dotnet build Orders.sln -c Release --no-restore
+      - run: >
+          dotnet test Orders.sln -c Release --no-build
+          --logger "trx;LogFileName=results.trx"
+          --collect "XPlat Code Coverage"
+          --results-directory TestResults
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: orders-test-results
+          path: ${{ env.SERVICE_DIR }}/TestResults
+          retention-days: 14
+      - name: Version (from <Version> in the csproj)
+        id: version
+        run: |
+          version=$(dotnet msbuild src/Orders.Api/Orders.Api.csproj -getProperty:Version)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "api_version=v${version%%.*}" >> "$GITHUB_OUTPUT"
+
+  sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: csharp
+          build-mode: none
+          source-root: ${{ env.SERVICE_DIR }}
+          queries: security-extended
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:csharp/service:orders
+
+  dependency-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: ${{ env.SERVICE_DIR }}/global.json
+      - name: NuGet vulnerability audit (direct + transitive)
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          dotnet restore Orders.sln
+          dotnet list Orders.sln package --vulnerable --include-transitive | tee vulnerable.txt
+          if grep -qiE '\b(High|Critical)\b' vulnerable.txt; then
+            echo "::error::High/Critical vulnerable NuGet packages found"; exit 1
+          fi
+      - name: Trivy filesystem scan (secrets, Dockerfile misconfig)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.SERVICE_DIR }}
+          scanners: secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  container:
+    needs: [build-test, sast, dependency-scan]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      id-token: write
+    uses: ./.github/workflows/_reusable-container.yml
+    with:
+      service: orders
+      context: services/orders-dotnet
+      version: ${{ needs.build-test.outputs.version }}
+      push: ${{ github.event_name != 'pull_request' }}
+    secrets: inherit
+
+  gitops-staging:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [build-test, container]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/_reusable-gitops-bump.yml
+    with:
+      service: orders
+      tag: ${{ needs.container.outputs.tag }}
+      api_version: ${{ needs.build-test.outputs.api_version }}
+      environment: staging
+      base_branch: ${{ vars.GITOPS_STAGING_BRANCH || 'staging' }}
+      auto_merge: true
+    secrets: inherit
+
+  gitops-production:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [build-test, container, gitops-staging]
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/_reusable-gitops-bump.yml
+    with:
+      service: orders
+      tag: ${{ needs.container.outputs.tag }}
+      api_version: ${{ needs.build-test.outputs.api_version }}
+      environment: production
+      base_branch: ${{ vars.GITOPS_PRODUCTION_BRANCH || 'main' }}
+      auto_merge: false
+    secrets: inherit

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JSON logs to stdout (Fluent Bit -> Elasticsearch). Field names follow the platform contract. -->
+<configuration>
+  <springProperty scope="context" name="service" source="spring.application.name" defaultValue="payments"/>
+  <springProperty scope="context" name="environment" source="ENVIRONMENT" defaultValue="local"/>
+  <springProperty scope="context" name="version" source="APP_VERSION" defaultValue="dev"/>
+
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <!-- Micrometer Tracing writes traceId/spanId into the MDC; rename to the platform field names. -->
+      <mdcKeyFieldName>traceId=trace_id</mdcKeyFieldName>
+      <mdcKeyFieldName>spanId=span_id</mdcKeyFieldName>
+      <fieldNames>
+        <timestamp>@timestamp</timestamp>
+        <level>level</level>
+        <logger>logger</logger>
+        <thread>thread</thread>
+        <levelValue>[ignore]</levelValue>
+        <version>[ignore]</version>
+      </fieldNames>
+      <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+        <maxDepthPerThrowable>30</maxDepthPerThrowable>
+        <rootCauseFirst>true</rootCauseFirst>
+      </throwableConverter>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>

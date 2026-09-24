@@ -1,0 +1,32 @@
+# Code owners - reviews are requested automatically and required by branch protection on main.
+# The repository is owned by a user account; replace the handles with @<org>/<team> once it moves to an
+# organization (suggested teams: platform-team, sre-team, security-team, orders-team, payments-team,
+# catalog-team, web-team).
+
+# Default
+*                                   @mahmoud-araby
+
+# Platform (cluster provisioning, GitOps, charts)
+/ansible/                           @mahmoud-araby
+/gitops/bootstrap/                  @mahmoud-araby
+/gitops/platform/                   @mahmoud-araby
+/charts/                            @mahmoud-araby
+/docs/                              @mahmoud-araby
+
+# Service catalogue & tenants: service teams bump their own entries, platform approves tenant landing zones
+/gitops/apps/orders/                @mahmoud-araby
+/gitops/apps/payments/              @mahmoud-araby
+/gitops/apps/catalog/               @mahmoud-araby
+/gitops/apps/web/                   @mahmoud-araby
+/gitops/tenants/                    @mahmoud-araby
+
+# Services
+/services/orders-dotnet/            @mahmoud-araby
+/services/payments-java/            @mahmoud-araby
+/services/catalog-python/           @mahmoud-araby
+/services/web-frontend/             @mahmoud-araby
+/services/docker-compose.yml        @mahmoud-araby
+
+# Supply chain: CI, dependency policy and ownership rules need platform + security review
+/.github/                           @mahmoud-araby
+/.github/CODEOWNERS                 @mahmoud-araby

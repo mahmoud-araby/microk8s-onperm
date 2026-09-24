@@ -1,0 +1,11 @@
+root = true
+
+[*.cs]
+indent_style = space
+indent_size = 4
+charset = utf-8
+
+# EF Core generated migrations
+[**/Data/Migrations/*.cs]
+generated_code = true
+dotnet_analyzer_diagnostic.severity = none

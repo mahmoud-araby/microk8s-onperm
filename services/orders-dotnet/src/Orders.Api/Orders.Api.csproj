@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <AssemblyName>Orders.Api</AssemblyName>
+    <RootNamespace>Orders.Api</RootNamespace>
+    <UserSecretsId>orders-api</UserSecretsId>
+    <!-- Semantic version of the image (CI tag = <Version>-<sha>); the major selects gitops values-v<major>.yaml. -->
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Data -->
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.31" PrivateAssets="all" />
+    <PackageReference Include="StackExchange.Redis" Version="2.13.17" />
+    <!-- Messaging -->
+    <PackageReference Include="Confluent.Kafka" Version="2.15.1" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.2.2" />
+    <!-- HTTP / resilience / versioning -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="8.10.0" />
+    <PackageReference Include="Asp.Versioning.Http" Version="8.1.1" />
+    <!-- Health -->
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="9.0.0" />
+    <PackageReference Include="AspNetCore.HealthChecks.Rabbitmq" Version="9.0.0" />
+    <!-- Observability -->
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
+    <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.19.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.19.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.19.0" />
+    <PackageReference Include="Npgsql.OpenTelemetry" Version="8.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Orders.Api.Tests" />
+  </ItemGroup>
+
+</Project>

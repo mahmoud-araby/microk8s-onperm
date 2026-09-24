@@ -1,0 +1,14 @@
+{
+  "mappings": [
+    {
+      "request": { "method": "POST", "urlPath": "/v1/charges" },
+      "response": {
+        "status": 201,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": { "reference": "psp-{{randomValue length=12 type='ALPHANUMERIC'}}", "status": "captured" },
+        "transformers": ["response-template"],
+        "delayDistribution": { "type": "lognormal", "median": 80, "sigma": 0.4 }
+      }
+    }
+  ]
+}

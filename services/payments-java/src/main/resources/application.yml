@@ -1,0 +1,190 @@
+# All values can be overridden with the standard platform env vars (docs/conventions.md).
+spring:
+  application:
+    name: ${APP_NAME:payments}
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s   # < 25s drain budget of the platform contract
+  mvc:
+    problemdetails:
+      enabled: true
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+  datasource:
+    # prepareThreshold=0: compatible with PgBouncer transaction pooling (pg-main-pooler-rw)
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:payments}?prepareThreshold=0&ApplicationName=${APP_NAME:payments}
+    username: ${DB_USER:payments}
+    password: ${DB_PASSWORD:payments}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      connection-timeout: 3000
+      validation-timeout: 1000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    virtual-host: ${RABBITMQ_VHOST:/}
+    connection-timeout: 5s
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 20
+        concurrency: 2
+        max-concurrency: 8
+        default-requeue-rejected: false
+        observation-enabled: true
+    template:
+      observation-enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: ${KAFKA_CLIENT_ID:${APP_NAME:payments}}
+    # Platform listeners: SASL SCRAM-SHA-512 (SASL_PLAINTEXT or SASL_SSL); local compose: PLAINTEXT, no credentials.
+    # sasl.* entries are ignored by the client unless the protocol is SASL_*. For SASL_SSL mount the Strimzi cluster
+    # CA and set SPRING_KAFKA_SSL_TRUST_STORE_TYPE=PEM + SPRING_KAFKA_SSL_TRUST_STORE_LOCATION=file:/path/ca.crt.
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+    properties:
+      "[sasl.mechanism]": ${KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
+      "[sasl.jaas.config]": org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME:}" password="${KAFKA_PASSWORD:}";
+    consumer:
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      # used by the DeadLetterPublishingRecoverer
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+    listener:
+      ack-mode: record
+      observation-enabled: true
+    template:
+      observation-enabled: true
+
+server:
+  port: 8080
+  shutdown: graceful
+  tomcat:
+    basedir: /tmp/tomcat   # read-only root filesystem: only /tmp is writable
+
+payments:
+  tenant-id: ${TENANT_ID:shared}
+  rabbit:
+    exchange: orders.events
+    routing-key: order.created
+    queue: payments.order-created
+    dead-letter-exchange: payments.dlx
+    dead-letter-queue: payments.order-created.dlq
+  kafka:
+    # Topic and consumer group carry the tenant prefix (Kafka ACLs), e.g. "acme.orders-events".
+    orders-topic: ${KAFKA_ORDERS_TOPIC:${KAFKA_TOPIC_PREFIX:platform.}orders-events}
+    group-id: ${KAFKA_CONSUMER_GROUP:${KAFKA_TOPIC_PREFIX:platform.}${APP_NAME:payments}}
+  provider:
+    # External PSP reached via the Istio egress gateway (hybrid ServiceEntry); Istio originates TLS.
+    base-url: ${PAYMENT_PROVIDER_URL:http://payment-provider.partner.example.com}
+    connect-timeout: 1s
+    read-timeout: 2500ms
+
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: health,prometheus,info
+      path-mapping:
+        prometheus: metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        live:
+          include: livenessState,ping
+        ready:
+          include: readinessState,db,rabbit
+        startup:
+          include: livenessState,db
+  metrics:
+    tags:
+      service: ${APP_NAME:payments}
+      version: ${APP_VERSION:dev}
+      tenant: ${TENANT_ID:shared}
+      environment: ${ENVIRONMENT:local}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  tracing:
+    enabled: ${TRACING_ENABLED:true}   # false when the chart injects the OTel Java agent (it then owns tracing + MDC)
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    # OTLP/HTTP (http/protobuf) to the collector's :4318, as injected by charts/microservice.
+    tracing:
+      transport: http
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/traces
+    metrics:
+      export:
+        # Prometheus scraping of /metrics is the primary path (and the chart's Java agent exports OTLP metrics);
+        # enable to push Micrometer metrics via OTLP as well.
+        enabled: ${OTLP_METRICS_ENABLED:false}
+        url: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/metrics
+        step: 30s
+
+resilience4j:
+  retry:
+    instances:
+      paymentProvider:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        enable-randomized-wait: true      # exponential backoff with jitter
+        randomized-wait-factor: 0.5
+        ignore-exceptions:
+          - com.example.platform.payments.provider.PaymentDeclinedException
+  circuitbreaker:
+    instances:
+      paymentProvider:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        ignore-exceptions:
+          - com.example.platform.payments.provider.PaymentDeclinedException
+  timelimiter:
+    instances:
+      paymentProvider:
+        timeout-duration: 3s
+        cancel-running-future: true
+  thread-pool-bulkhead:
+    instances:
+      paymentProvider:
+        core-thread-pool-size: 8
+        max-thread-pool-size: 16
+        queue-capacity: 50
+        context-propagators:
+          - com.example.platform.payments.config.ObservationContextPropagator
+
+logging:
+  level:
+    root: INFO
+    com.example.platform: ${LOG_LEVEL:INFO}
