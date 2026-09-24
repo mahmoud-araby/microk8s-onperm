@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # ---- build ---------------------------------------------------------------------------------------------------------
 # Node 22 LTS (Node 20 reached end-of-life in April 2026).
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:25-alpine AS build
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
