@@ -1,0 +1,71 @@
+# kubernetes-csi/csi-driver-nfs chart 4.13.4. Driver name nfs.csi.k8s.io.
+# The StorageClass nfs-rwx is in manifests/storageclass.yaml (chart storageClass.create stays false).
+
+# MicroK8s kubelet root (same as Longhorn kubeletRootDir / Velero podVolumePath).
+kubeletDir: /var/snap/microk8s/common/var/lib/kubelet
+
+driver:
+  name: nfs.csi.k8s.io
+  mountPermissions: 0
+
+feature:
+  enableFSGroupPolicy: true
+  enableInlineVolume: false         # tenants must not mount arbitrary NFS servers through inline CSI volumes
+
+controller:
+  replicas: 2
+  strategyType: RollingUpdate
+  runOnControlPlane: false
+  # VolumeSnapshot CRDs + snapshot-controller are not installed on this cluster. Enable together with
+  # externalSnapshotter.enabled and manifests/optional/volumesnapshotclass.yaml (docs/storage.md).
+  enableSnapshotter: false
+  defaultOnDeletePolicy: retain     # also enforced per StorageClass (onDelete: retain)
+  nodeSelector:
+    workload-tier: platform
+  priorityClassName: platform-critical
+  tolerations: []
+  # hostNetwork with fixed health ports: never two replicas on one node.
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: csi-nfs-controller
+
+node:
+  priorityClassName: system-node-critical
+  # NFS volumes may be used on the apps, data and storage pools (and platform tooling).
+  # Edge nodes run gateways only.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: workload-tier
+                operator: In
+                values: [apps, data, storage, platform, observability]
+  tolerations:
+    - key: workload-tier
+      operator: Equal
+      value: data
+      effect: NoSchedule
+    - key: workload-tier
+      operator: Equal
+      value: storage
+      effect: NoSchedule
+    - key: workload-tier
+      operator: Equal
+      value: observability
+      effect: NoSchedule
+    - key: CriticalAddonsOnly
+      operator: Exists
+
+externalSnapshotter:
+  enabled: false
+
+volumeSnapshotClass:
+  create: false
+
+storageClass:
+  create: false

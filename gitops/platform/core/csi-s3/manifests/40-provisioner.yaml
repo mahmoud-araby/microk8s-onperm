@@ -1,0 +1,95 @@
+# Controller (external-provisioner + driver in controller mode), vendored from chart csi-s3 0.43.7
+# (templates/provisioner.yaml). Creates/deletes the per-PV prefix in bucket platform-pvc. One replica
+# (upstream has no leader election); a restart only delays provisioning, never affects mounted volumes.
+kind: Service
+apiVersion: v1
+metadata:
+  name: csi-s3-provisioner
+  namespace: csi-s3
+  labels:
+    app: csi-s3-provisioner
+spec:
+  selector:
+    app: csi-s3-provisioner
+  ports:
+    - name: csi-s3-dummy
+      port: 65535
+---
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: csi-s3-provisioner
+  namespace: csi-s3
+  labels:
+    app.kubernetes.io/name: csi-s3
+    app.kubernetes.io/component: provisioner
+    app.kubernetes.io/part-of: platform-core
+spec:
+  serviceName: "csi-provisioner-s3"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csi-s3-provisioner
+  template:
+    metadata:
+      labels:
+        app: csi-s3-provisioner
+        app.kubernetes.io/name: csi-s3
+        app.kubernetes.io/component: provisioner
+    spec:
+      serviceAccountName: csi-s3-provisioner-sa
+      priorityClassName: platform-critical              # PATCH
+      nodeSelector:                                     # PATCH
+        workload-tier: platform
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+        - key: CriticalAddonsOnly
+          operator: Exists
+      containers:
+        - name: csi-provisioner
+          image: cr.yandex/crp9ftr22d26age3hulg/yandex-cloud/csi-s3/csi-provisioner:v6.2.0 # pin: verify latest before upgrade
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=4"
+          env:
+            - name: ADDRESS
+              value: /var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi/csi.sock
+          imagePullPolicy: "IfNotPresent"
+          resources:                                    # PATCH
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi
+        - name: csi-s3
+          image: cr.yandex/crp9ftr22d26age3hulg/yandex-cloud/csi-s3/csi-s3-driver:0.43.7 # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--nodeid=$(NODE_ID)"
+            - "--v=4"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi/csi.sock
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SSL_CERT_DIR                         # PATCH: trust internal CA (minio-go client)
+              value: /etc/ssl/certs:/etc/csi-s3/internal-ca
+          resources:                                    # PATCH
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi
+            - name: internal-ca                          # PATCH
+              mountPath: /etc/csi-s3/internal-ca
+              readOnly: true
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: internal-ca                              # PATCH
+          secret:
+            secretName: internal-ca

@@ -1,0 +1,54 @@
+# CSI S3 driver (yandex-cloud/k8s-csi-s3, driver name ru.yandex.s3.csi, FUSE mounter GeeseFS): mounts MinIO
+# buckets / prefixes as ReadWriteMany volumes. StorageClass minio-s3 (dynamic, one prefix per PV in bucket
+# platform-pvc) + static PVs for tenant buckets (docs/storage.md "Static bucket mount (exact spec)").
+#
+# Plain manifests VENDORED from chart csi-s3 0.43.7 (https://yandex-cloud.github.io/k8s-csi-s3/charts,
+# pin: verify latest before upgrade) because the chart cannot express what this cluster needs:
+#   - MicroK8s kubelet root /var/snap/microk8s/common/var/lib/kubelet (chart: kubeletPath - supported)
+#   - trust of the internal CA for https://minio.minio.svc.cluster.local (extra volume + SSL_CERT_DIR - not supported)
+#   - node pool placement, priority classes, resources, OnDelete update strategy (not supported)
+# To upgrade: helm template the new chart version, re-apply the patches marked "PATCH" in manifests/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: csi-s3
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: csi-s3
+  sources:
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/csi-s3/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: core
+        istio-injection: disabled
+        # node plugin: privileged + SYS_ADMIN, /dev/fuse, bidirectional mount propagation.
+        # Privileged is confined to this namespace; tenants only reference the StorageClass / PVs.
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

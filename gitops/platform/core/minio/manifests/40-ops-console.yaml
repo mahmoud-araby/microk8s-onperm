@@ -1,0 +1,44 @@
+# MinIO console on the Istio internal gateway (ops tooling is never public; one VirtualService per host -
+# owned here, listed in core/istio/manifests/ops-virtualservices.yaml header). The console listens with TLS
+# (internal-ca) on 9443; the gateway re-encrypts and verifies it with ca.crt of istio-internal/upstream-ca.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ops-minio-console
+  namespace: istio-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/component: ops-ui
+spec:
+  hosts:
+    - minio-console.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: minio-console
+      route:
+        - destination:
+            host: minio-console.minio.svc.cluster.local
+            port:
+              number: 9443
+      # object browser uploads/downloads: no route timeout, no retries of non-idempotent requests
+      retries:
+        attempts: 0
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ops-minio-console-tls
+  namespace: istio-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  host: minio-console.minio.svc.cluster.local
+  exportTo: ["."]
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      credentialName: upstream-ca
+      sni: minio-console.minio.svc.cluster.local

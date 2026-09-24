@@ -1,0 +1,59 @@
+# In-cluster MinIO Tenant "minio" (namespace minio): S3 API https://minio.minio.svc.cluster.local (Service
+# "minio", port 443 - contract in docs/conventions.md), console https://minio-console.ops.example.local.
+# 4 servers x 4 drives on the storage pool (local-nvme-minio), erasure coding EC:4, TLS from internal-ca.
+# Backups are NOT stored here - they go to the external MinIO minio.storage.example.local (docs/storage.md).
+# manifests/optional/ (public S3 on s3.example.com through Kong) is NOT synced.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minio
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: minio
+  sources:
+    - repoURL: https://operator.min.io
+      chart: tenant
+      targetRevision: 7.1.1 # pin: verify latest before upgrade (server image pinned in values.yaml)
+      helm:
+        releaseName: minio
+        valueFiles:
+          - $values/gitops/platform/core/minio/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/minio/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: core
+        # Not meshed: MinIO terminates TLS itself and must stay reachable by non-mesh clients (csi-s3
+        # FUSE mounts, Velero, operator). Meshed clients pass TLS through their sidecar.
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

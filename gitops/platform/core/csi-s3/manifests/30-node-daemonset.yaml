@@ -1,0 +1,156 @@
+# Node plugin, vendored from chart csi-s3 0.43.7 (templates/csi-s3.yaml) rendered with
+# kubeletPath=/var/snap/microk8s/common/var/lib/kubelet. Changes are marked "PATCH".
+#
+# GeeseFS runs INSIDE this pod: every StorageClass / static PV passes "--no-systemd" in its mount options
+# (pkg/mounter/geesefs.go). The upstream default starts GeeseFS as a host systemd unit, which on this cluster
+# cannot resolve *.svc.cluster.local and does not trust the internal CA. Consequence: restarting this pod
+# breaks the FUSE mounts of the pods on that node ("transport endpoint is not connected") - hence
+# updateStrategy OnDelete: upgrade node by node after draining (docs/storage.md "Operations").
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: csi-s3
+  namespace: csi-s3
+  labels:
+    app.kubernetes.io/name: csi-s3
+    app.kubernetes.io/component: node
+    app.kubernetes.io/part-of: platform-core
+spec:
+  selector:
+    matchLabels:
+      app: csi-s3
+  updateStrategy:
+    type: OnDelete                                     # PATCH
+  template:
+    metadata:
+      labels:
+        app: csi-s3
+        app.kubernetes.io/name: csi-s3
+        app.kubernetes.io/component: node
+    spec:
+      priorityClassName: system-node-critical          # PATCH
+      # PATCH: pools that run workloads with S3 mounts (edge / control-plane-only nodes excluded).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-tier
+                    operator: In
+                    values: [apps, data, storage, platform, observability]
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 300
+        - key: workload-tier                             # PATCH
+          operator: Equal
+          value: data
+          effect: NoSchedule
+        - key: workload-tier                             # PATCH
+          operator: Equal
+          value: storage
+          effect: NoSchedule
+        - key: workload-tier                             # PATCH
+          operator: Equal
+          value: observability
+          effect: NoSchedule
+      serviceAccountName: csi-s3
+      containers:
+        - name: driver-registrar
+          image: cr.yandex/crp9ftr22d26age3hulg/yandex-cloud/csi-s3/csi-node-driver-registrar:v2.16.0 # pin: verify latest before upgrade
+          args:
+            - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+            - "--v=4"
+            - "--csi-address=$(ADDRESS)"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: DRIVER_REG_SOCK_PATH
+              value: /var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi/csi.sock
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:                                    # PATCH
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration/
+        - name: csi-s3
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+          image: cr.yandex/crp9ftr22d26age3hulg/yandex-cloud/csi-s3/csi-s3-driver:0.43.7 # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--nodeid=$(NODE_ID)"
+            - "--v=4"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # PATCH: GeeseFS inherits the driver's environment (fuseMount -> cmd.Environ()); Go reads the
+            # system bundle AND every file in these directories.
+            - name: SSL_CERT_DIR
+              value: /etc/ssl/certs:/etc/csi-s3/internal-ca
+            - name: PLUGIN_DIR                           # PATCH: only used in systemd mode
+              value: /var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi
+          # PATCH: GeeseFS processes live in this container. Budget = sum of --memory-limit of the mounts
+          # on the node (512 MiB each by default in minio-s3) + overhead.
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {memory: 8Gi}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: stage-dir
+              mountPath: /var/snap/microk8s/common/var/lib/kubelet/plugins/kubernetes.io/csi
+              mountPropagation: "Bidirectional"
+            - name: pods-mount-dir
+              mountPath: /var/snap/microk8s/common/var/lib/kubelet/pods
+              mountPropagation: "Bidirectional"
+            - name: fuse-device
+              mountPath: /dev/fuse
+            - name: systemd-control
+              mountPath: /run/systemd
+            - name: internal-ca                          # PATCH
+              mountPath: /etc/csi-s3/internal-ca
+              readOnly: true
+      volumes:
+        - name: registration-dir
+          hostPath:
+            path: /var/snap/microk8s/common/var/lib/kubelet/plugins_registry/
+            type: DirectoryOrCreate
+        - name: plugin-dir
+          hostPath:
+            path: /var/snap/microk8s/common/var/lib/kubelet/plugins/ru.yandex.s3.csi
+            type: DirectoryOrCreate
+        - name: stage-dir
+          hostPath:
+            path: /var/snap/microk8s/common/var/lib/kubelet/plugins/kubernetes.io/csi
+            type: DirectoryOrCreate
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/snap/microk8s/common/var/lib/kubelet/pods
+            type: Directory
+        - name: fuse-device
+          hostPath:
+            path: /dev/fuse
+        - name: systemd-control
+          hostPath:
+            path: /run/systemd
+            type: DirectoryOrCreate
+        - name: internal-ca                              # PATCH
+          secret:
+            secretName: internal-ca

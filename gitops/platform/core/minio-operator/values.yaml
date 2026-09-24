@@ -1,0 +1,50 @@
+# minio/operator chart 7.1.1.
+operator:
+  env:
+    - name: OPERATOR_STS_ENABLED
+      value: "on"
+    # Sidecar image the operator injects into Tenant pods (config reload / readiness). Pinned explicitly to the
+    # operator's compiled-in default (pkg/resources/statefulsets/minio-sidecar.go).
+    - name: OPERATOR_SIDECAR_IMAGE
+      value: quay.io/minio/operator-sidecar:v7.0.1 # pin: verify latest before upgrade
+  image:
+    repository: quay.io/minio/operator
+    tag: v7.1.1 # pin: verify latest before upgrade
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  nodeSelector:
+    workload-tier: platform
+  priorityClassName: platform-critical
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+  # The chart default selects the label "name: minio-operator", which the pods do not carry (no-op);
+  # select the labels the chart actually sets.
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: operator
+              app.kubernetes.io/instance: minio-operator
+          topologyKey: kubernetes.io/hostname
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 500Mi
+    limits:
+      memory: 512Mi

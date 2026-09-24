@@ -1,0 +1,149 @@
+# minio/tenant chart 7.1.1 -> Tenant CR minio.min.io/v2 "minio" (reconciled by core/minio-operator).
+tenant:
+  name: minio
+
+  # Community MinIO is distributed as source only (docs/storage.md "MinIO distribution status"): the image is
+  # built by CI from the AGPL source tag and pushed to Harbor. RELEASE.2025-10-15T17-29-55Z is the last tag of
+  # github.com/minio/minio. Swap for an AIStor image (commercial licence) by changing repository/tag.
+  image:
+    repository: harbor.ops.example.local/platform/minio
+    tag: RELEASE.2025-10-15T17-29-55Z # pin: verify latest before upgrade
+    pullPolicy: IfNotPresent
+
+  # Root credentials: Secret minio-env-configuration (key config.env, "export MINIO_ROOT_USER=..." lines),
+  # rendered by ExternalSecret from Vault secret/platform/minio (manifests/00-externalsecrets.yaml).
+  configSecret:
+    name: minio-env-configuration
+    existingSecret: true
+    accessKey: ""
+    secretKey: ""
+
+  pools:
+    - name: pool-0
+      servers: 4
+      volumesPerServer: 4
+      # 4 x 8 TB NVMe per storage node; PVC size is informational for local-path (no quota) but must not
+      # exceed the disk. PVC names data0..data3-minio-pool-0-<n> -> /mnt/local-nvme/data0..3 (one disk each).
+      size: 7000Gi
+      storageClassName: local-nvme-minio
+      nodeSelector:
+        workload-tier: storage
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: storage
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  v1.min.io/tenant: minio
+      # Spread across racks/zones when nodes carry topology.kubernetes.io/zone (soft: on-prem racks may not).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              v1.min.io/tenant: minio
+      # Storage node: 16 vCPU / 64 GB, MinIO is the only workload.
+      resources:
+        requests:
+          cpu: "4"
+          memory: 32Gi
+        limits:
+          memory: 48Gi
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containerSecurityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+
+  mountPath: /export
+  subPath: /data
+
+  # ServiceMonitor in manifests/30-monitoring.yaml (no scrape annotations, no Prometheus additionalScrapeConfigs).
+  metrics:
+    enabled: false
+  prometheusOperator: false
+
+  # TLS from cert-manager (manifests/05-certificate.yaml, ClusterIssuer internal-ca); no operator auto-cert.
+  certificate:
+    externalCaCertSecret: []
+    externalCertSecret:
+      - name: minio-tls
+        type: cert-manager.io/v1
+    requestAutoCert: false
+
+  features:
+    bucketDNS: false
+    enableSFTP: false
+    domains:
+      console: https://minio-console.ops.example.local
+
+  # Platform buckets, created once by the operator. Versioning / lifecycle rules: manifests/50-bootstrap-job.yaml.
+  # Per-tenant buckets (<tenant>-*) and users are created by the tenant landing zone (charts/tenant).
+  buckets:
+    - name: platform-app-assets
+    - name: platform-pvc          # csi-s3 StorageClass minio-s3 (one prefix per PV)
+    - name: shared-files
+
+  users: []
+
+  podManagementPolicy: Parallel
+
+  exposeServices:
+    minio: false
+    console: false
+
+  # Service "minio" (443 -> 9000). Kong (optional public S3) targets the Service, not pod IPs, over HTTPS.
+  serviceMetadata:
+    # The operator sets ONLY these labels on Service "minio" (selected by the ServiceMonitor).
+    minioServiceLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/component: s3-api
+      app.kubernetes.io/part-of: platform-core
+    minioServiceAnnotations:
+      ingress.kubernetes.io/service-upstream: "true"
+      konghq.com/protocol: https
+
+  env:
+    # Erasure coding: 16 drives in one erasure set, 4 parity -> usable = raw x 12/16 = 75 %; tolerates the loss
+    # of 4 drives (= one whole storage node) for reads AND writes.
+    - name: MINIO_STORAGE_CLASS_STANDARD
+      value: "EC:4"
+    - name: MINIO_STORAGE_CLASS_RRS
+      value: "EC:2"
+    # Metrics without bearer token (scraped in-cluster only; NetworkPolicy limits who can reach :9000).
+    - name: MINIO_PROMETHEUS_AUTH_TYPE
+      value: public
+    # Console usage graphs read from Prometheus.
+    - name: MINIO_PROMETHEUS_URL
+      value: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+    - name: MINIO_PROMETHEUS_JOB_ID
+      value: minio
+    # Incomplete multipart uploads are cleaned up by the server (MinIO has no AbortIncompleteMultipartUpload ILM action).
+    - name: MINIO_API_STALE_UPLOADS_EXPIRY
+      value: 24h
+    - name: MINIO_BROWSER_SESSION_DURATION
+      value: 12h
+
+  priorityClassName: platform-critical
+
+ingress:
+  api:
+    enabled: false
+  console:
+    enabled: false

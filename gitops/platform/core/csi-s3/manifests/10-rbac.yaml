@@ -1,0 +1,65 @@
+# Vendored from chart csi-s3 0.43.7 (templates/csi-s3.yaml, templates/provisioner.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-s3
+  namespace: csi-s3
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-s3
+rules: []
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-s3
+subjects:
+  - kind: ServiceAccount
+    name: csi-s3
+    namespace: csi-s3
+roleRef:
+  kind: ClusterRole
+  name: csi-s3
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-s3-provisioner-sa
+  namespace: csi-s3
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-s3-external-provisioner-runner
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: csi-s3-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: csi-s3-provisioner-sa
+    namespace: csi-s3
+roleRef:
+  kind: ClusterRole
+  name: csi-s3-external-provisioner-runner
+  apiGroup: rbac.authorization.k8s.io

@@ -12,7 +12,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: Platform core - networking, security, delivery (Istio, Kong, MetalLB, cert-manager, Longhorn, Vault, ESO, Keycloak, Kyverno, Rollouts, KEDA, Velero, Harbor, Argo CD)
+  description: Platform core - networking, security, delivery, storage (Istio, Kong, MetalLB, cert-manager, Longhorn, local-path, NFS/S3 CSI, MinIO, Vault, ESO, Keycloak, Kyverno, Rollouts, KEDA, Velero, Harbor, Argo CD)
   sourceRepos:
     - https://github.com/mahmoud-araby/microk8s-onperm.git
     - https://argoproj.github.io/argo-helm                        # argo-cd, argo-rollouts
@@ -29,6 +29,9 @@ spec:
     - https://vmware-tanzu.github.io/helm-charts                  # velero
     - https://helm.goharbor.io
     - https://prometheus-community.github.io/helm-charts          # prometheus-operator-crds (wave -20)
+    - https://operator.min.io                                     # minio operator + tenant charts
+    - https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+    - https://github.com/rancher/local-path-provisioner.git       # chart from git tag (not published to a Helm repo)
   destinations:
     - {server: https://kubernetes.default.svc, namespace: argocd}
     - {server: https://kubernetes.default.svc, namespace: argo-rollouts}
@@ -47,6 +50,11 @@ spec:
     - {server: https://kubernetes.default.svc, namespace: velero}
     - {server: https://kubernetes.default.svc, namespace: harbor}
     - {server: https://kubernetes.default.svc, namespace: keda}
+    - {server: https://kubernetes.default.svc, namespace: local-path-storage}
+    - {server: https://kubernetes.default.svc, namespace: csi-nfs}
+    - {server: https://kubernetes.default.svc, namespace: csi-s3}
+    - {server: https://kubernetes.default.svc, namespace: minio-operator}
+    - {server: https://kubernetes.default.svc, namespace: minio}
     - {server: https://kubernetes.default.svc, namespace: legacy-vms}        # hybrid: WorkloadEntries for on-prem VMs
     - {server: https://kubernetes.default.svc, namespace: kube-system}
   clusterResourceWhitelist:

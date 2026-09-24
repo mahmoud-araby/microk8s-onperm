@@ -1,0 +1,54 @@
+# Rancher local-path-provisioner: node-local hostPath volumes on the dedicated NVMe disk(s) mounted at
+# /mnt/local-nvme by the Ansible role storage_prep. StorageClasses (docs/storage.md):
+#   local-nvme        general node-bound volumes (scratch, caches, generic ephemeral volumes)
+#   local-nvme-minio  MinIO drives: PVC dataN-* lands on /mnt/local-nvme/dataN (one physical NVMe per MinIO drive)
+# The chart is not published to a Helm repository by upstream; it is taken from the upstream git tag.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: local-path-provisioner
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-15"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  sources:
+    - repoURL: https://github.com/rancher/local-path-provisioner.git
+      path: deploy/chart/local-path-provisioner
+      targetRevision: v0.0.37 # pin: verify latest before upgrade (chart 0.0.37 = image v0.0.37)
+      helm:
+        releaseName: local-path-provisioner
+        valueFiles:
+          - $values/gitops/platform/core/local-path-provisioner/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: core
+        istio-injection: disabled
+        # helper pods mount hostPath /mnt/local-nvme to create/delete volume directories
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

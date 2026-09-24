@@ -1,0 +1,35 @@
+# minio-s3: dynamic S3-backed ReadWriteMany volumes (FUSE / GeeseFS). Every PV becomes the prefix
+# platform-pvc/<pv-name>/ (volumeHandle "platform-pvc/pvc-<uid>", verified in pkg/driver/controllerserver.go).
+# Credentials are the platform user "csi-s3" (bucket platform-pvc only) and never reach tenant namespaces;
+# isolation between PVs is enforced by Kubernetes PVC binding. Deleting the PVC deletes the prefix.
+#
+# Why not the tenant's own credentials (Secret tenant-s3-credentials via ${pvc.namespace} templating)?
+# The driver derives the bucket/prefix from the PV name (pvc-<uid>): without "bucket" it creates a bucket per
+# PV (tenant users may only use <tenant>-* buckets), with "bucket" all tenants would need rights on one shared
+# bucket. Tenant-owned buckets are mounted with STATIC PVs that reference tenant-s3-credentials instead
+# (docs/storage.md "Static bucket mount (exact spec)").
+#
+# NOT for databases or anything needing POSIX locks / atomic rename / fsync durability (docs/storage.md).
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: minio-s3
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: ru.yandex.s3.csi
+parameters:
+  mounter: geesefs
+  # --no-systemd is REQUIRED on this cluster (see 30-node-daemonset.yaml).
+  options: "--no-systemd --memory-limit 512 --dir-mode 0777 --file-mode 0666"
+  bucket: platform-pvc
+  csi.storage.k8s.io/provisioner-secret-name: csi-s3-platform
+  csi.storage.k8s.io/provisioner-secret-namespace: csi-s3
+  csi.storage.k8s.io/controller-publish-secret-name: csi-s3-platform
+  csi.storage.k8s.io/controller-publish-secret-namespace: csi-s3
+  csi.storage.k8s.io/node-stage-secret-name: csi-s3-platform
+  csi.storage.k8s.io/node-stage-secret-namespace: csi-s3
+  csi.storage.k8s.io/node-publish-secret-name: csi-s3-platform
+  csi.storage.k8s.io/node-publish-secret-namespace: csi-s3
+reclaimPolicy: Delete
+volumeBindingMode: Immediate

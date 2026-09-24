@@ -3,11 +3,13 @@
 # The "shared" landing zone owns namespace shared-services (+ its quota / limit range).
 #
 # Guard rails:
-# - The only cluster-scoped kind allowed is Namespace (tenant-<name>).
+# - Cluster-scoped kinds allowed: Namespace (tenant-<name>) and PersistentVolume (static CSI S3 bucket mounts,
+#   driver ru.yandex.s3.csi, named <tenant>-<name>; docs/storage.md "Static bucket mount (exact spec)").
 # - Namespaced kinds are whitelisted: a tenant landing zone may create quotas, RBAC, network/mesh policy,
 #   ExternalSecrets, Kong consumers and the per-tenant data CRs (CNPG Database + role Job, Strimzi
 #   KafkaTopic/KafkaUser, RabbitMQ Vhost/User/Permission/...) inside data-postgres / data-kafka /
-#   data-rabbitmq - but never Deployments/StatefulSets there.
+#   data-rabbitmq - but never Deployments/StatefulSets there. In namespace minio: the per-tenant bucket/user
+#   provisioning Jobs (Argo CD hooks, + their ExternalSecret) that use Secret minio/minio-provisioner-credentials.
 #   Extend this list when charts/tenant renders a new kind.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
@@ -29,14 +31,17 @@ spec:
     - {server: https://kubernetes.default.svc, namespace: data-postgres}
     - {server: https://kubernetes.default.svc, namespace: data-kafka}
     - {server: https://kubernetes.default.svc, namespace: data-rabbitmq}
+    - {server: https://kubernetes.default.svc, namespace: minio}             # bucket/user provisioning Jobs only
   clusterResourceWhitelist:
     - {group: '', kind: Namespace}
+    - {group: '', kind: PersistentVolume}                     # static S3 bucket mounts (csi-s3)
   namespaceResourceWhitelist:
     - {group: '', kind: ResourceQuota}
     - {group: '', kind: LimitRange}
     - {group: '', kind: ServiceAccount}
     - {group: '', kind: ConfigMap}
     - {group: '', kind: Secret}
+    - {group: '', kind: PersistentVolumeClaim}                # claims bound to the static S3 PVs
     - {group: rbac.authorization.k8s.io, kind: Role}
     - {group: rbac.authorization.k8s.io, kind: RoleBinding}
     - {group: networking.k8s.io, kind: NetworkPolicy}

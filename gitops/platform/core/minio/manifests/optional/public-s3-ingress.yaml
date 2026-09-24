@@ -1,0 +1,56 @@
+# OPTIONAL - not synced (the minio Application does not recurse into manifests/optional/).
+# Public S3 endpoint https://s3.example.com through Kong (public VIP), e.g. for pre-signed URLs handed to
+# browsers / partners. Enable only with a security review: it exposes the S3 API (authentication is still
+# S3 SigV4). To enable: move this file to ../ (and add s3.example.com to DNS / the L7 LB).
+#  - Kong terminates TLS with a Let's Encrypt certificate and re-encrypts to Service minio:443 (annotations
+#    ingress.kubernetes.io/service-upstream + konghq.com/protocol=https are set on the Service by the Tenant
+#    serviceMetadata). The upstream certificate (internal-ca) also lists s3.example.com.
+#  - preserve-host is REQUIRED: SigV4 signatures include the Host header (pre-signed URLs are generated for
+#    https://s3.example.com, path-style).
+#  - No request/response size limit or buffering: large multipart uploads.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: minio-public-s3
+  namespace: minio
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    konghq.com/protocols: https
+    konghq.com/https-redirect-status-code: "301"
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "true"
+    konghq.com/read-timeout: "600000"
+    konghq.com/write-timeout: "600000"
+    konghq.com/plugins: minio-public-s3-rate-limit
+spec:
+  ingressClassName: kong
+  tls:
+    - hosts: [s3.example.com]
+      secretName: minio-public-s3-tls
+  rules:
+    - host: s3.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: minio
+                port:
+                  number: 443
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: minio-public-s3-rate-limit
+  namespace: minio
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: rate-limiting
+config:
+  second: 200
+  minute: 6000
+  limit_by: ip
+  policy: local
+  fault_tolerant: true
+  hide_client_headers: true

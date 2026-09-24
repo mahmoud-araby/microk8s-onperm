@@ -1,0 +1,92 @@
+# Ingress isolation for namespace minio. NetworkPolicies match POD ports: S3 API 9000 (Service minio:443 ->
+# 9000, headless minio-hl:9000) and console 9443 (Service minio-console:9443).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: minio
+  labels:
+    app.kubernetes.io/part-of: platform-core
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# MinIO server <-> server (erasure set traffic on 9000) and the provisioning Jobs in this namespace
+# (bootstrap Job, per-tenant bucket/user Jobs from charts/tenant).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: minio
+  labels:
+    app.kubernetes.io/part-of: platform-core
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-s3-clients
+  namespace: minio
+  labels:
+    app.kubernetes.io/part-of: platform-core
+spec:
+  podSelector:
+    matchLabels:
+      v1.min.io/tenant: minio
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # tenant namespaces (label set by charts/tenant)
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.example.com/tenant
+                operator: Exists
+        # data-* namespaces (managedNamespaceMetadata of the data Applications sets category=data)
+        - namespaceSelector:
+            matchLabels:
+              platform.example.com/category: data
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - shared-services
+                  - csi-s3            # GeeseFS FUSE mounts + provisioner (in-pod, --no-systemd)
+                  - velero
+                  - harbor
+                  - monitoring        # Prometheus scrape of /minio/v2/metrics/*
+                  - istio-internal    # console + S3 through the internal gateway
+                  - kong              # optional public S3 (s3.example.com)
+                  - minio-operator    # operator admin API + STS
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-console
+  namespace: minio
+  labels:
+    app.kubernetes.io/part-of: platform-core
+spec:
+  podSelector:
+    matchLabels:
+      v1.min.io/tenant: minio
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-internal
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: minio-operator
+      ports:
+        - protocol: TCP
+          port: 9443

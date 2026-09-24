@@ -1,0 +1,112 @@
+# rancher/local-path-provisioner chart (git tag v0.0.37, deploy/chart/local-path-provisioner).
+# Host layout contract with the Ansible role storage_prep (docs/storage.md, "Node disk layout"):
+#   apps / data nodes : one NVMe (or LVM LV) formatted XFS, mounted at /mnt/local-nvme
+#   storage nodes     : 4 NVMe, each formatted XFS and mounted at /mnt/local-nvme/data0 ... /mnt/local-nvme/data3
+replicaCount: 1
+
+image:
+  repository: docker.io/rancher/local-path-provisioner
+  tag: v0.0.37 # pin: verify latest before upgrade
+  pullPolicy: IfNotPresent
+
+# Helper pod that runs the setup/teardown scripts on the node (mkdir / rm -rf of the volume directory).
+helperImage:
+  repository: docker.io/library/busybox
+  tag: 1.37.0 # pin: verify latest before upgrade (never "latest")
+
+# nodePathMap must be empty when storageClassConfigs is used (they are mutually exclusive).
+nodePathMap: []
+
+storageClassConfigs:
+  # General node-local class: fastest option, node-bound (the pod is pinned to the node of its volume).
+  local-nvme:
+    storageClass:
+      create: true
+      defaultClass: false
+      defaultVolumeType: hostPath
+      reclaimPolicy: Delete
+      volumeBindingMode: WaitForFirstConsumer
+      annotations:
+        argocd.argoproj.io/sync-wave: "1"
+    nodePathMap:
+      - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+        paths:
+          - /mnt/local-nvme
+  # MinIO drives. The MinIO operator names the PVCs data<N>-minio-pool-0-<ordinal>; the first five characters
+  # ("data0" ... "data3") select the per-disk mount point, so the 4 volumes of a MinIO server always sit on 4
+  # different physical NVMe disks. The pattern does not start with <namespace>/<name>/, hence the
+  # allowUnsafePathPattern annotation (the rendered path is still relative and validated by the provisioner).
+  # Only the MinIO Tenant may use this class.
+  local-nvme-minio:
+    storageClass:
+      create: true
+      defaultClass: false
+      defaultVolumeType: hostPath
+      reclaimPolicy: Retain
+      volumeBindingMode: WaitForFirstConsumer
+      pathPattern: "{{ slice .PVC.Name 0 5 }}/{{ .PVC.Namespace }}/{{ .PVC.Name }}"
+      annotations:
+        argocd.argoproj.io/sync-wave: "1"
+        allowUnsafePathPattern: "true"
+    nodePathMap:
+      - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+        paths:
+          - /mnt/local-nvme
+
+# The provisioner itself runs on the platform pool.
+nodeSelector:
+  workload-tier: platform
+priorityClassName: platform-critical
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+helperPod:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 128Mi
+
+configmap:
+  name: local-path-config
+  setup: |-
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    set -eu
+    rm -rf "$VOL_DIR"
+  helperPod:
+    name: helper-pod
+    # Helper pods run on the node that owns the volume: allow the tainted storage and data pools
+    # (apps nodes are not tainted).
+    tolerations:
+      - key: workload-tier
+        operator: Equal
+        value: storage
+        effect: NoSchedule
+      - key: workload-tier
+        operator: Equal
+        value: data
+        effect: NoSchedule
+    priorityClassName: system-node-critical
+
+health:
+  enabled: true

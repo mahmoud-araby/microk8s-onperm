@@ -1,0 +1,14 @@
+# OPTIONAL - not synced (the Application does not recurse into manifests/optional/).
+# Prerequisites: VolumeSnapshot CRDs + snapshot-controller (values: externalSnapshotter.enabled: true)
+# and controller.enableSnapshotter: true. csi-driver-nfs snapshots are tar.gz archives of the
+# volume directory written to the same NFS export - a convenience, not a backup (use Velero/Kopia).
+# To enable: move this file to ../ and flip the two values above in one merge request.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: nfs-rwx-snapclass
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+driver: nfs.csi.k8s.io
+deletionPolicy: Retain
+parameters: {}

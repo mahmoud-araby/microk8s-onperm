@@ -1,0 +1,20 @@
+# The operator talks to the Tenant over TLS (https://minio.minio.svc.cluster.local) and trusts every CA found
+# in Secrets named "operator-ca-tls*" in its own namespace (pkg/controller/operator.go,
+# fetchTransportCACertificates; keys ca.crt / tls.crt / public.crt). The Tenant certificate is issued by
+# ClusterIssuer internal-ca, whose public certificate is published to Vault by core/external-secrets.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: operator-ca-tls-internal-ca
+  namespace: minio-operator
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+  target:
+    name: operator-ca-tls-internal-ca
+    creationPolicy: Owner
+  data:
+    - secretKey: ca.crt
+      remoteRef: {key: platform/internal-ca-public, property: ca.crt}

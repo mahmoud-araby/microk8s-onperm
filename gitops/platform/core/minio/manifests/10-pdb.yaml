@@ -1,0 +1,15 @@
+# EC:4 over 16 drives (4 per server): one server down = 4 drives offline = still read AND write quorum
+# (write quorum 12 of 16). Never allow a second server to be drained at the same time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: minio-pool-0
+  namespace: minio
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      v1.min.io/tenant: minio
+      v1.min.io/pool: pool-0

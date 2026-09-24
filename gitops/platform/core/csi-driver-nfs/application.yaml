@@ -1,0 +1,55 @@
+# csi-driver-nfs (kubernetes-csi) + StorageClass nfs-rwx (ReadWriteMany shared files on the on-prem NFS
+# export nfs.storage.example.local:/exports/k8s). manifests/optional/ is NOT synced (see docs/storage.md).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: csi-driver-nfs
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-15"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: csi-nfs
+  sources:
+    - repoURL: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+      chart: csi-driver-nfs
+      targetRevision: 4.13.4 # pin: verify latest before upgrade (image nfsplugin v4.13.4)
+      helm:
+        releaseName: csi-driver-nfs
+        valueFiles:
+          - $values/gitops/platform/core/csi-driver-nfs/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/csi-driver-nfs/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: core
+        istio-injection: disabled
+        # node plugin: privileged, hostNetwork, bidirectional mount propagation into the kubelet dir
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

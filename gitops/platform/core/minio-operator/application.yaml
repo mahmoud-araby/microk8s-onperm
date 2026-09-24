@@ -1,0 +1,56 @@
+# MinIO Operator (CRDs Tenant / PolicyBinding, operator + STS service). The Tenant itself is the "minio" app
+# (wave -5). Upstream status (checked 2026-09-24, details in docs/storage.md "MinIO distribution status"):
+# chart operator 7.1.1 is the last release of https://operator.min.io; the community operator repository has
+# had no release since and the community MinIO server is source-only.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minio-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: minio-operator
+  sources:
+    - repoURL: https://operator.min.io
+      chart: operator
+      targetRevision: 7.1.1 # pin: verify latest before upgrade (image quay.io/minio/operator:v7.1.1)
+      helm:
+        releaseName: minio-operator
+        valueFiles:
+          - $values/gitops/platform/core/minio-operator/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/minio-operator/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: core
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

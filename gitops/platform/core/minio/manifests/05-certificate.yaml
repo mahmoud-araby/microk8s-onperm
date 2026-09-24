@@ -1,0 +1,38 @@
+# Server certificate of the Tenant (Tenant.spec.externalCertSecret, type cert-manager.io/v1 -> the operator
+# mounts tls.crt/tls.key as public.crt/private.key). Covers the S3 Service, the headless per-pod names used
+# between MinIO servers (minio-pool-0-<n>.minio-hl.minio.svc.cluster.local), the console Service and the
+# external names (the Istio internal gateway and Kong re-encrypt to MinIO and verify this certificate).
+# Secret minio-tls also carries ca.crt (internal CA): provisioning Jobs in this namespace mount it to trust MinIO.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: minio-tls
+  namespace: minio
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"      # before the Tenant (pods mount the secret)
+spec:
+  secretName: minio-tls
+  commonName: minio.minio.svc.cluster.local
+  dnsNames:
+    - minio
+    - minio.minio
+    - minio.minio.svc
+    - minio.minio.svc.cluster.local
+    - minio-hl.minio.svc.cluster.local
+    - "*.minio-hl.minio.svc.cluster.local"
+    - "*.minio-hl.minio.svc"
+    - minio-console.minio.svc
+    - minio-console.minio.svc.cluster.local
+    - minio-console.ops.example.local
+    - s3.example.com
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, client auth, digital signature, key encipherment]
+  issuerRef:
+    name: internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

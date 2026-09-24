@@ -1,0 +1,13 @@
+# Vendored from chart csi-s3 0.43.7 (templates/driver.yaml).
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: ru.yandex.s3.csi
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+  # PATCH (upstream: File). GeeseFS does not persist ownership/permissions; with "File" the kubelet would
+  # walk the whole bucket to apply fsGroup on every mount. Access is governed by --dir-mode/--file-mode.
+  fsGroupPolicy: None
+  volumeLifecycleModes:
+    - Persistent
