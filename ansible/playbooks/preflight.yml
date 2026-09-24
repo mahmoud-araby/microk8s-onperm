@@ -41,7 +41,7 @@
           {{ preflight_min_memory_gb }} GiB / {{ preflight_min_root_disk_gb }} GiB
       vars:
         _root: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') | first }}"
-      ignore_errors: "{{ not (preflight_strict | default(true) | bool) }}"
+      ignore_errors: "{{ not (preflight_strict | default(true) | bool) }}"  # noqa: ignore-errors - non-strict preflight reports and continues
       tags: [preflight, sizing]
 
     - name: Dedicated Longhorn disk exists and is not mounted elsewhere
@@ -145,7 +145,7 @@
       ansible.builtin.assert:
         that: groups['data'] | length >= 3
         fail_msg: "The data pool needs at least 3 nodes"
-      ignore_errors: "{{ not (preflight_strict | default(true) | bool) }}"
+      ignore_errors: "{{ not (preflight_strict | default(true) | bool) }}"  # noqa: ignore-errors - non-strict preflight reports and continues
       tags: [preflight, topology]
 
     - name: Node IPs are unique

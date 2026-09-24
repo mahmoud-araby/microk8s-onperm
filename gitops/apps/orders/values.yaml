@@ -91,3 +91,10 @@ rollout:
 
 nodeSelector:
   workload-tier: apps
+
+apm:
+  enabled: true
+  agentInjection:
+    # orders ships the OpenTelemetry .NET SDK itself (services/orders-dotnet); injecting the auto-instrumentation
+    # agent on top would load a second, older OpenTelemetry into the same process.
+    dotnet: false

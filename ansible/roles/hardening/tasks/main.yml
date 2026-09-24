@@ -4,7 +4,7 @@
   when: hardening_ssh_enabled | bool
   tags: [hardening, ssh]
 
-- name: auditd
+- name: Auditd
   ansible.builtin.import_tasks: auditd.yml
   when: hardening_auditd_enabled | bool
   tags: [hardening, auditd]

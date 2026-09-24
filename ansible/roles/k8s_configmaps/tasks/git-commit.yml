@@ -1,12 +1,12 @@
 ---
 - name: Stage generated ConfigMaps
-  ansible.builtin.command:
+  ansible.builtin.command:  # noqa: command-instead-of-module - ansible.builtin.git cannot stage/commit
     cmd: git add -A -- tenants/
     chdir: "{{ k8s_configmaps_gitops_root }}"
   changed_when: false
 
 - name: Check for staged changes
-  ansible.builtin.command:
+  ansible.builtin.command:  # noqa: command-instead-of-module - ansible.builtin.git cannot stage/commit
     cmd: git diff --cached --quiet -- tenants/
     chdir: "{{ k8s_configmaps_gitops_root }}"
   register: _k8s_cm_git_diff
@@ -14,7 +14,7 @@
   failed_when: _k8s_cm_git_diff.rc not in [0, 1]
 
 - name: Commit generated ConfigMaps (never pushes)
-  ansible.builtin.command:
+  ansible.builtin.command:  # noqa: command-instead-of-module - ansible.builtin.git cannot stage/commit
     cmd: git commit -m "{{ k8s_configmaps_git_commit_message }}" -- tenants/
     chdir: "{{ k8s_configmaps_gitops_root }}"
   when: _k8s_cm_git_diff.rc == 1

@@ -135,6 +135,11 @@ jobs:
           curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
             | tar -xz -C /usr/local/bin kubeconform
       - name: Validate rendered charts and raw GitOps manifests (core + CRDs catalog)
+        env:
+          # The public CRDs catalog lags the operator versions pinned here (Strimzi 1.x Kafka.spec.kafka.rack.type /
+          # perBrokerAnnotationsTemplate, RabbitMQ cluster-operator 2.19 autoEnableAllFeatureFlags). These kinds are
+          # validated against the pinned operators' own CRDs instead of the catalog.
+          KUBECONFORM_SKIP: Kafka,RabbitmqCluster
         run: |
           set -euo pipefail
           # Kubernetes objects only: Applications/ApplicationSets/AppProjects and manifests/ directories.
@@ -151,6 +156,7 @@ jobs:
             -schema-location default \
             -schema-location "$CRDS_CATALOG" \
             -ignore-missing-schemas \
+            -skip "$KUBECONFORM_SKIP" \
             "${files[@]}"
 
   chart-security:

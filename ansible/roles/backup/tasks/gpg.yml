@@ -23,7 +23,7 @@
     mode: "0600"
   register: _backup_gpg_key
 
-- name: Import the backup GPG public key
+- name: Import the backup GPG public key  # noqa: no-handler - must run before the recipient check below
   ansible.builtin.command: gpg --batch --import /root/.microk8s-backup.pub.asc
   when: _backup_gpg_key is changed
   changed_when: true

@@ -8,5 +8,8 @@ mock_roles: []
 skip_list:
   # Jinja templates for Kubernetes / app configs intentionally use long lines
   - yaml[line-length]
+  # Role-internal scratch variables (register/set_fact) use a leading underscore (e.g. _vault_pods)
+  # instead of the role prefix; public role inputs in defaults/ are prefixed.
+  - var-naming[no-role-prefix]
 warn_list:
   - experimental

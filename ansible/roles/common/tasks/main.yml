@@ -48,7 +48,7 @@
   ansible.builtin.import_tasks: storage.yml
   tags: [common, storage, longhorn]
 
-- name: journald
+- name: Journald
   ansible.builtin.import_tasks: journald.yml
   tags: [common, journald]
 

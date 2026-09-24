@@ -10,7 +10,7 @@
   changed_when: false
   failed_when: _vault_pod_status.rc | default(1) not in [0, 2]
 
-- name: "Join {{ _vault_pod }} to the raft cluster (manual join mode)"
+- name: "Join the raft cluster (manual join mode) | {{ _vault_pod }}"
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ kubeconfig_path }}"
     namespace: "{{ vault_init_namespace }}"
@@ -30,14 +30,14 @@
     pod: "{{ _vault_pod }}"
     container: "{{ vault_init_container }}"
     command: "{{ _vault_env }} vault operator unseal {{ _unseal_key }}"
-  loop: "{{ vault_init_unseal_keys[:vault_init_key_threshold | int] }}"
+  loop: "{{ vault_init_unseal_keys[: vault_init_key_threshold | int] }}"
   loop_control:
     loop_var: _unseal_key
   when: (_vault_pod_status.stdout | from_json).sealed | bool
   changed_when: true
   no_log: "{{ vault_init_no_log }}"
 
-- name: "Wait until {{ _vault_pod }} is unsealed"
+- name: "Wait until unsealed | {{ _vault_pod }}"
   kubernetes.core.k8s_exec:
     kubeconfig: "{{ kubeconfig_path }}"
     namespace: "{{ vault_init_namespace }}"

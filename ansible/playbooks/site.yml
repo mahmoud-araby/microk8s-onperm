@@ -18,5 +18,5 @@
 - name: Argo CD bootstrap (GitOps hand-over)
   ansible.builtin.import_playbook: bootstrap-gitops.yml
 
-- name: dqlite backups
+- name: Dqlite backups
   ansible.builtin.import_playbook: backup.yml
