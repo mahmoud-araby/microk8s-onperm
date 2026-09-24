@@ -1,0 +1,14 @@
+tenant: {name: acme, displayName: ACME Corp, tier: dedicated, environment: production, releaseRing: early}
+quota: {cpu: "40", memory: 80Gi, pods: "300", pvcs: "20", storage: 500Gi, loadBalancers: "0", limitsMemory: 160Gi}
+rbac: {adminGroups: [acme-admins], developerGroups: [acme-devs], viewerGroups: [acme-viewers]}
+data:
+  postgres: {enabled: true, databases: [orders, catalog, {name: payments, connectionLimit: 100}]}
+  redis: {db: 1, keyPrefix: "acme:"}
+  rabbitmq: {enabled: true, vhost: acme, users: [orders, payments], vhostLimits: {connections: 2000, queues: 500}}
+  kafka:
+    enabled: true
+    users: [orders, payments, catalog]
+    topics:
+      - {name: orders-events, partitions: 12, replicas: 3}
+      - {name: payments-events, partitions: 12, replicas: 3, config: {retention.ms: "1209600000"}}
+keycloak: {realm: acme}

@@ -1,0 +1,70 @@
+{{- if include "tenant.landingZone" . }}
+{{- $ns := include "tenant.namespace" . }}
+{{- $q := .Values.quota }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ $q.cpu | quote }}
+    requests.memory: {{ $q.memory | quote }}
+    {{- with $q.limitsCpu }}
+    limits.cpu: {{ . | quote }}
+    {{- end }}
+    {{- with $q.limitsMemory }}
+    limits.memory: {{ . | quote }}
+    {{- end }}
+    pods: {{ $q.pods | quote }}
+    persistentvolumeclaims: {{ $q.pvcs | quote }}
+    requests.storage: {{ $q.storage | quote }}
+    services.loadbalancers: {{ $q.loadBalancers | quote }}
+    services.nodeports: {{ $q.nodePorts | quote }}
+    {{- range $k, $v := $q.objectCounts }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+    {{- range $q.deniedStorageClasses }}
+    {{ . }}.storageclass.storage.k8s.io/persistentvolumeclaims: "0"
+    {{- end }}
+{{- if $q.deniedPriorityClasses }}
+---
+# Tenants may not schedule pods with platform/data PriorityClasses (noisy-neighbour + preemption guard).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-denied-priority-classes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values:
+          {{- toYaml $q.deniedPriorityClasses | nindent 10 }}
+{{- end }}
+{{- if ne (toString $q.appsHighPods) "" }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-apps-high-pods
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  hard:
+    pods: {{ $q.appsHighPods | quote }}
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values: [apps-high]
+{{- end }}
+{{- end }}

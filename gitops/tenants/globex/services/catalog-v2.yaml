@@ -1,0 +1,18 @@
+# Service-version descriptor - one file per deployed <service>-<version> for this tenant. Read by the git-files
+# generator of gitops/apps/applicationsets/services.yaml -> Application "<tenant>-<service>-<version>".
+# Keys: service, version, language, chart (microservice|frontend), ring (canary|early|general, optional),
+# imageTag (optional pin, overrides gitops/apps/<service>/values-<version>.yaml), replicas (optional
+# minimum replicas), values (optional chart overrides, highest precedence).
+# globex is the early adopter of catalog v2 (beta). As the canary-ring tenant, its release of every
+# catalog v2 image is synced first; the in-release Argo Rollouts canary uses extra analysis strictness.
+service: catalog
+version: v2
+language: python
+chart: microservice
+ring: canary
+values:
+  rollout:
+    canary:
+      analysis:
+        successRate: 0.995
+        p95LatencyMs: 200

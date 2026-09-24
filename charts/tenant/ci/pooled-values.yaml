@@ -1,0 +1,10 @@
+tenant: {name: initech, displayName: Initech, tier: shared, environment: production}
+rbac: {adminGroups: [], developerGroups: [], viewerGroups: []}
+data:
+  postgres: {enabled: false}
+  redis: {db: 0, keyPrefix: "initech:"}
+  rabbitmq: {enabled: false}
+  kafka: {enabled: false}
+externalSecrets: {secrets: []}
+kong: {consumer: {rateLimit: {minute: 6000, hour: 200000}}}
+keycloak: {realm: initech}

@@ -1,0 +1,17 @@
+# Service-version descriptor - one file per deployed <service>-<version> for this tenant. Read by the git-files
+# generator of gitops/apps/applicationsets/services.yaml -> Application "<tenant>-<service>-<version>".
+# Keys: service, version, language, chart (microservice|frontend), ring (canary|early|general, optional),
+# imageTag (optional pin, overrides gitops/apps/<service>/values-<version>.yaml), replicas (optional
+# minimum replicas), values (optional chart overrides, highest precedence).
+# acme is migrating from orders v1 to v2 (both run side by side: /orders/v1 and /orders/v2 on
+# acme.api.example.com). Remove this file once acme's clients are off v1 (target 2027-Q1).
+service: orders
+version: v1
+language: dotnet
+chart: microservice
+ring: early
+values:
+  autoscaling:
+    hpa:
+      minReplicas: 2
+      maxReplicas: 10

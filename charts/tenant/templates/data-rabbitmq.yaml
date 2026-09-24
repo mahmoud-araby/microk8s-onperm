@@ -1,0 +1,175 @@
+{{- if .Values.data.rabbitmq.enabled }}
+{{- $r := .Values.data.rabbitmq }}
+{{- $name := include "tenant.name" . }}
+{{- $vhost := default $name $r.vhost }}
+{{- $ref := dict "name" $r.clusterName }}
+# Tenant vhost: the unit of isolation on the shared RabbitMQ cluster (queues, exchanges, permissions).
+apiVersion: rabbitmq.com/v1beta1
+kind: Vhost
+metadata:
+  name: {{ $name }}
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  name: {{ $vhost | quote }}
+  defaultQueueType: {{ $r.defaultQueueType }}
+  tags: [{{ printf "tenant-%s" $name | quote }}]
+  {{- with $r.vhostLimits }}
+  vhostLimits:
+    {{- range $k, $v := . }}
+    {{ $k }}: {{ $v | int64 }}
+    {{- end }}
+  {{- end }}
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+{{- range $svc := $r.users }}
+{{- $user := printf "%s-%s" $name $svc }}
+---
+# Credentials for RabbitMQ user {{ $user }} (password shared with the {{ $svc }} release via Vault).
+apiVersion: {{ $.Values.externalSecrets.apiVersion }}
+kind: ExternalSecret
+metadata:
+  name: {{ $user }}-rabbitmq
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  refreshInterval: {{ $.Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $.Values.externalSecrets.clusterSecretStore }}
+  target:
+    name: {{ $user }}-rabbitmq
+    creationPolicy: Owner
+    template:
+      data:
+        username: {{ $user | quote }}
+        password: "{{ "{{" }} .password {{ "}}" }}"
+  data:
+    - secretKey: password
+      remoteRef:
+        key: {{ printf "tenants/%s/%s" $name $svc }}
+        property: RABBITMQ_PASSWORD
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: {{ $user }}
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  tags: []
+  importCredentialsSecret:
+    name: {{ $user }}-rabbitmq
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: {{ $user }}
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  vhost: {{ $vhost | quote }}
+  userReference:
+    name: {{ $user }}
+  permissions:
+    configure: ".*"
+    write: ".*"
+    read: ".*"
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+{{- end }}
+{{- if $r.dlx.enabled }}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata:
+  name: {{ $name }}-dlx
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  name: {{ $r.dlx.exchange }}
+  vhost: {{ $vhost | quote }}
+  type: topic
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata:
+  name: {{ $name }}-dead-letters
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  name: {{ $r.dlx.queue }}
+  vhost: {{ $vhost | quote }}
+  type: quorum
+  durable: true
+  autoDelete: false
+  arguments:
+    x-max-length: {{ $r.dlx.maxLength | int64 }}
+    x-overflow: drop-head
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: {{ $name }}-dlx-dead-letters
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  vhost: {{ $vhost | quote }}
+  source: {{ $r.dlx.exchange }}
+  destination: {{ $r.dlx.queue }}
+  destinationType: queue
+  routingKey: "#"
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+---
+# Every queue of the vhost (except the DLQ itself and amq.*) dead-letters to the tenant DLX; quorum queues
+# additionally get a delivery-limit so poison messages stop redelivering.
+apiVersion: rabbitmq.com/v1beta1
+kind: Policy
+metadata:
+  name: {{ $name }}-quorum-dlx
+  namespace: {{ $r.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  name: quorum-dlx
+  vhost: {{ $vhost | quote }}
+  pattern: {{ printf "^(?!amq\\.|%s$).*" $r.dlx.queue | quote }}
+  applyTo: queues
+  priority: 0
+  definition:
+    {{- $def := dict "dead-letter-exchange" $r.dlx.exchange "delivery-limit" ($r.dlx.deliveryLimit | int64) }}
+    {{- toYaml (merge (deepCopy $r.policyDefinition) $def) | nindent 4 }}
+  rabbitmqClusterReference:
+    {{- toYaml $ref | nindent 4 }}
+{{- end }}
+{{- end }}

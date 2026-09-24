@@ -1,0 +1,20 @@
+# orders v1 - legacy API (/orders/v1). In maintenance: security fixes only; sunset planned (see README).
+image:
+  # Bumped by CI (.github/workflows) on every merge to the v1 maintenance branch.
+  tag: "1.8.3"
+
+config:
+  Orders__Api__Deprecated: "true"
+  # RFC 8594 headers returned on every v1 response.
+  Orders__Api__SunsetDate: "2027-03-31"
+  Orders__Features__PartialShipments: "false"
+  Orders__Features__OutboxRelay: "false"
+
+# v1 is smaller now that most traffic moved to v2.
+autoscaling:
+  hpa:
+    minReplicas: 2
+    maxReplicas: 20
+
+pdb:
+  minAvailable: 1

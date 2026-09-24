@@ -1,0 +1,8 @@
+# web v1 - current SPA generation (React 19). Bumped by CI on every merge to main.
+image:
+  tag: "1.30.2"
+
+runtimeConfig:
+  features:
+    newCheckout: false
+    facetedSearch: false

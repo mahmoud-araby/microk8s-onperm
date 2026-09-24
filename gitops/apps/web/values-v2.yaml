@@ -1,0 +1,12 @@
+# web v2 - redesigned SPA using orders v2 + catalog v2 facets. Not yet pinned by any tenant.
+image:
+  tag: "2.0.0-beta.1"
+
+runtimeConfig:
+  apiVersions:
+    orders: v2
+    payments: v1
+    catalog: v2
+  features:
+    newCheckout: true
+    facetedSearch: true

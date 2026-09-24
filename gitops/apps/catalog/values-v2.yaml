@@ -1,0 +1,20 @@
+# catalog v2 - faceted search + new product schema (/catalog/v2). Early adopters only (globex, canary ring).
+image:
+  tag: "2.0.0-beta.4"
+
+config:
+  CATALOG_FEATURES_SEARCH_BACKEND: postgres-fts
+  CATALOG_FEATURES_FACETS: "true"
+  CACHE_TTL_SECONDS: "120"
+
+# Slower, more cautious in-version canary while v2 is beta.
+rollout:
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: {duration: 10m}
+      - setWeight: 30
+      - pause: {duration: 15m}
+      - setWeight: 60
+      - pause: {duration: 15m}
+      - setWeight: 100

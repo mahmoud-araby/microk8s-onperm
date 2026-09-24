@@ -1,0 +1,64 @@
+# =============================================================================
+# web - SPA frontend, service-wide defaults. Chart: charts/frontend (nginx, runtime config.js per tenant).
+# Tenant wiring (tenant, hosts, runtimeConfig.apiBaseUrl/authUrl/tenantId) is injected by the services
+# ApplicationSet, so one image serves every tenant without a rebuild.
+# =============================================================================
+name: web
+
+image:
+  registry: harbor.ops.example.local
+  repository: platform/web
+
+replicaCount: 3
+
+runtimeConfig:
+  apiBaseUrl: https://api.example.com
+  authUrl: https://keycloak.example.com/realms/shared
+  tenantId: ""
+  # API major versions the SPA calls (must be deployed for the tenant - see gitops/tenants/<t>/services/).
+  apiVersions:
+    orders: v2
+    payments: v1
+    catalog: v1
+
+hosts: [app.example.com]
+
+kong:
+  enabled: true
+  rateLimit:
+    minute: 6000
+
+tls:
+  enabled: true
+  issuer: letsencrypt-prod
+
+cache:
+  htmlMaxAge: 0
+  assetsMaxAge: 31536000
+
+securityHeaders:
+  csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://*.example.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+rollout:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+autoscaling:
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 30
+    cpu: 70
+
+pdb:
+  enabled: true
+  minAvailable: "50%"
+
+nodeSelector:
+  workload-tier: apps

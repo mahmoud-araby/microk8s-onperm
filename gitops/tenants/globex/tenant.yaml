@@ -1,0 +1,51 @@
+# Tenant descriptor (see acme/tenant.yaml for the field reference).
+# globex is the platform's canary tenant: its releases sync first in every progressive rollout and it
+# runs early-access majors (catalog v2).
+name: globex
+displayName: Globex Corporation
+tier: dedicated
+environment: production
+namespace: tenant-globex
+releaseRing: canary
+quota:
+  cpu: "24"
+  memory: 48Gi
+  pods: "200"
+  pvcs: "10"
+  storage: 200Gi
+  loadBalancers: "0"
+  limitsMemory: 96Gi
+
+values:
+  rbac:
+    adminGroups: [globex-admins]
+    developerGroups: [globex-devs]
+    viewerGroups: [globex-viewers, globex-auditors]
+  istio:
+    injection: true
+    mtls: STRICT
+  data:
+    postgres:
+      enabled: true
+      databases: [orders, payments, catalog]
+    redis:
+      db: 2
+      keyPrefix: "globex:"
+    rabbitmq:
+      enabled: true
+      vhost: globex
+      users: [orders, payments]
+    kafka:
+      enabled: true
+      users: [orders, payments, catalog]
+      topics:
+        - {name: orders-events, partitions: 12, replicas: 3}
+        - {name: payments-events, partitions: 6, replicas: 3}
+        - {name: inventory-events, partitions: 6, replicas: 3}
+  kong:
+    consumer:
+      rateLimit:
+        minute: 15000
+        hour: 500000
+  keycloak:
+    realm: globex

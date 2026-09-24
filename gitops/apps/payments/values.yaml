@@ -1,0 +1,118 @@
+# =============================================================================
+# payments - service-wide defaults. Chart: charts/microservice. Source: services/payments-java.
+# Consumes order.created from RabbitMQ (queue payments.order-created) and orders-events from Kafka, calls the
+# external PSP through the Istio egress gateway. Scales on RabbitMQ queue depth (KEDA).
+# =============================================================================
+language: java
+
+image:
+  registry: harbor.ops.example.local
+  repository: platform/payments
+
+dependencies:
+  postgres:
+    enabled: true
+    pooler: true
+  rabbitmq:
+    enabled: true
+  kafka:
+    enabled: true
+  redis:
+    enabled: false
+
+startup:
+  waitForDependencies: true
+  # Flyway runs inside the app on startup (spring.flyway.enabled); no separate migration container.
+  migrations:
+    enabled: false
+
+config:
+  SPRING_PROFILES_ACTIVE: production
+  DB_POOL_SIZE: "20"
+  KAFKA_ORDERS_TOPIC: "{{ .Values.dependencies.kafka.topicPrefix }}orders-events"
+  # Consumer groups must carry the tenant prefix (Kafka ACL) and be unique per major version.
+  PAYMENTS_KAFKA_GROUPID: "{{ .Values.dependencies.kafka.topicPrefix }}payments-{{ .Values.service.version }}"
+  # The OTel Java agent is injected by the chart -> disable Micrometer tracing to avoid double spans.
+  TRACING_ENABLED: "false"
+  PAYMENT_PROVIDER_URL: http://payment-provider.partner.example.com
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    memory: 1536Mi
+
+tuning:
+  java:
+    maxRAMPercentage: 75
+
+autoscaling:
+  hpa:
+    enabled: false
+  # KEDA replaces the HPA: scale on the depth of the tenant's payments queue (+ CPU as a floor signal).
+  keda:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 80
+    pollingInterval: 10
+    cooldownPeriod: 300
+    cpu: 70
+    # Vault secret/tenants/<tenant>/payments must contain RABBITMQ_URI
+    # (amqp://<tenant>-payments:<password>@rabbitmq.data-rabbitmq.svc.cluster.local:5672/<vhost>).
+    triggerAuthentication:
+      enabled: true
+      secretTargetRef:
+        - {parameter: host, key: RABBITMQ_URI}
+    triggers:
+      - type: rabbitmq
+        metadata:
+          protocol: amqp
+          queueName: payments.order-created
+          vhostName: "{{ .Values.dependencies.rabbitmq.vhost }}"
+          mode: QueueLength
+          # Target messages per replica (~2 s of work at 8 consumers x 20 prefetch).
+          value: "200"
+          activationValue: "0"
+        authenticationRef:
+          name: "{{ .Values.service.name }}-{{ .Values.service.version }}-keda"
+
+pdb:
+  enabled: true
+  minAvailable: "50%"
+
+kong:
+  enabled: true
+  auth: jwt
+  rateLimit:
+    enabled: true
+    minute: 3000
+    policy: redis
+
+istio:
+  # Payment captures are not idempotent at the transport level: no automatic retries on 5xx.
+  timeout: 8s
+  retries:
+    attempts: 1
+    perTryTimeout: 8s
+    retryOn: "connect-failure,refused-stream"
+
+rollout:
+  enabled: true
+  canary:
+    # Slower canary for money-moving code.
+    steps:
+      - setWeight: 5
+      - pause: {duration: 5m}
+      - setWeight: 20
+      - pause: {duration: 10m}
+      - setWeight: 50
+      - pause: {duration: 10m}
+      - setWeight: 100
+    analysis:
+      enabled: true
+      successRate: 0.995
+      p95LatencyMs: 800
+
+nodeSelector:
+  workload-tier: apps

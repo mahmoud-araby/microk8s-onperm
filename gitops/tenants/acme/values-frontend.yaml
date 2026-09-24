@@ -1,0 +1,4 @@
+# Tenant-wide overrides for every charts/frontend release of tenant "acme" (required when the tenant has services; may be {}).
+runtimeConfig:
+  supportEmail: support@acme.example.com
+  locale: en-US

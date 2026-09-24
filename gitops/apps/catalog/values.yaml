@@ -1,0 +1,87 @@
+# =============================================================================
+# catalog - service-wide defaults. Chart: charts/microservice. Source: services/catalog-python.
+# Read-heavy (browse/search ~60% of all API traffic): Redis cache-aside, Postgres reads via the pooler,
+# inventory events from Kafka.
+# =============================================================================
+language: python
+
+image:
+  registry: harbor.ops.example.local
+  repository: platform/catalog
+
+dependencies:
+  postgres:
+    enabled: true
+    pooler: true
+  redis:
+    enabled: true
+  kafka:
+    enabled: true
+  rabbitmq:
+    enabled: false
+
+startup:
+  waitForDependencies: true
+  migrations:
+    enabled: true
+    command: ["python", "-m", "app.migrate"]
+
+config:
+  LOG_LEVEL: INFO
+  CACHE_TTL_SECONDS: "300"
+  DB_POOL_SIZE: "10"
+  DB_MAX_OVERFLOW: "5"
+  BULKHEAD_MAX_CONCURRENCY: "15"
+  KAFKA_ENABLED: "true"
+  KAFKA_INVENTORY_TOPIC: "{{ .Values.dependencies.kafka.topicPrefix }}inventory-events"
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 384Mi
+  limits:
+    memory: 768Mi
+
+tuning:
+  python:
+    # 2 * 0.5 cores + 1
+    webConcurrency: 2
+
+autoscaling:
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 80
+    cpu: 60
+    memory: 0
+
+pdb:
+  enabled: true
+  minAvailable: "50%"
+
+kong:
+  enabled: true
+  auth: jwt
+  rateLimit:
+    enabled: true
+    minute: 12000
+    policy: redis
+
+istio:
+  # GET-only read paths: retries are safe.
+  timeout: 5s
+  retries:
+    attempts: 3
+    perTryTimeout: 1500ms
+    retryOn: "5xx,reset,connect-failure,refused-stream,retriable-4xx,gateway-error"
+
+rollout:
+  enabled: true
+  canary:
+    analysis:
+      enabled: true
+      successRate: 0.99
+      p95LatencyMs: 250
+
+nodeSelector:
+  workload-tier: apps

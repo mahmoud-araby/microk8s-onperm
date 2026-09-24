@@ -1,0 +1,39 @@
+{{- if include "tenant.landingZone" . }}
+{{- $l := .Values.limitRange }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: tenant-limits
+  namespace: {{ include "tenant.namespace" . }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      {{- if or $l.defaultCpu $l.defaultMemory }}
+      default:
+        {{- with $l.defaultCpu }}
+        cpu: {{ . | quote }}
+        {{- end }}
+        {{- with $l.defaultMemory }}
+        memory: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+      defaultRequest:
+        cpu: {{ $l.defaultRequestCpu | quote }}
+        memory: {{ $l.defaultRequestMemory | quote }}
+      {{- if or $l.maxCpu $l.maxMemory }}
+      max:
+        {{- with $l.maxCpu }}
+        cpu: {{ . | quote }}
+        {{- end }}
+        {{- with $l.maxMemory }}
+        memory: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+    {{- with $l.maxStorage }}
+    - type: PersistentVolumeClaim
+      max:
+        storage: {{ . | quote }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,74 @@
+{{- $name := include "tenant.name" . }}
+{{- $e := .Values.endpoints }}
+{{- $d := .Values.data }}
+# Everything a workload of this tenant needs to find the platform (non-secret). Mount with envFrom or read
+# from tooling; microservice releases receive the same values through their chart values.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tenant.objectPrefix" . }}tenant-platform-endpoints
+  namespace: {{ include "tenant.namespace" . }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    {{- include "tenant.annotations" . | nindent 4 }}
+data:
+  TENANT_ID: {{ $name | quote }}
+  TENANT_DISPLAY_NAME: {{ .Values.tenant.displayName | default $name | quote }}
+  TENANT_TIER: {{ .Values.tenant.tier | quote }}
+  TENANT_NAMESPACE: {{ include "tenant.namespace" . | quote }}
+  ENVIRONMENT: {{ .Values.tenant.environment | quote }}
+  API_HOST: {{ include "tenant.apiHost" . | quote }}
+  APP_HOST: {{ include "tenant.appHost" . | quote }}
+  # --- PostgreSQL (CloudNativePG pg-main) ---
+  DB_HOST: {{ $e.postgres.pooler | quote }}
+  DB_HOST_RW: {{ $e.postgres.rw | quote }}
+  DB_HOST_RO: {{ $e.postgres.ro | quote }}
+  DB_PORT: {{ $e.postgres.port | quote }}
+  {{- if $d.postgres.enabled }}
+  {{- range (include "tenant.postgresDatabases" . | fromYaml).items }}
+  DB_NAME_{{ .name | upper | replace "-" "_" }}: {{ .db | quote }}
+  {{- end }}
+  {{- end }}
+  # --- Redis (logical isolation: db index + key prefix) ---
+  REDIS_HOST: {{ $e.redis.host | quote }}
+  REDIS_PORT: {{ $e.redis.port | quote }}
+  REDIS_SENTINEL: {{ $e.redis.sentinel | quote }}
+  REDIS_SENTINEL_MASTER: {{ $e.redis.sentinelMaster | quote }}
+  REDIS_DB: {{ $d.redis.db | quote }}
+  REDIS_KEY_PREFIX: {{ default (printf "%s:" $name) $d.redis.keyPrefix | quote }}
+  # --- RabbitMQ ---
+  RABBITMQ_HOST: {{ $e.rabbitmq.host | quote }}
+  RABBITMQ_PORT: {{ $e.rabbitmq.port | quote }}
+  RABBITMQ_MANAGEMENT_PORT: {{ $e.rabbitmq.managementPort | quote }}
+  {{- if $d.rabbitmq.enabled }}
+  RABBITMQ_VHOST: {{ default $name $d.rabbitmq.vhost | quote }}
+  {{- if $d.rabbitmq.dlx.enabled }}
+  RABBITMQ_DLX: {{ $d.rabbitmq.dlx.exchange | quote }}
+  {{- end }}
+  {{- end }}
+  # --- Kafka (Strimzi) ---
+  KAFKA_BOOTSTRAP_SERVERS: {{ $e.kafka.bootstrap | quote }}
+  KAFKA_BOOTSTRAP_SERVERS_TLS: {{ $e.kafka.bootstrapTls | quote }}
+  KAFKA_BRIDGE_URL: {{ $e.kafka.bridge | quote }}
+  {{- if $d.kafka.enabled }}
+  KAFKA_TOPIC_PREFIX: {{ printf "%s." $name | quote }}
+  KAFKA_CONSUMER_GROUP_PREFIX: {{ printf "%s." $name | quote }}
+  KAFKA_SASL_MECHANISM: {{ ternary "SCRAM-SHA-512" "" (eq $d.kafka.authentication "scram-sha-512") | quote }}
+  {{- end }}
+  # --- Integration / telemetry / identity ---
+  MICRO_INTEGRATOR_URL: {{ $e.microIntegrator.http | quote }}
+  MICRO_INTEGRATOR_URL_TLS: {{ $e.microIntegrator.https | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ $e.otel.http | quote }}
+  OTEL_EXPORTER_OTLP_GRPC_ENDPOINT: {{ $e.otel.grpc | quote }}
+  ELASTICSEARCH_URL: {{ $e.elasticsearch | quote }}
+  ELASTIC_APM_SERVER_URL: {{ $e.apm | quote }}
+  PROMETHEUS_URL: {{ $e.prometheus | quote }}
+  KEYCLOAK_URL: {{ $e.keycloak | quote }}
+  KEYCLOAK_REALM: {{ include "tenant.realm" . | quote }}
+  OIDC_ISSUER: {{ include "tenant.issuer" . | quote }}
+  VAULT_ADDR: {{ $e.vault | quote }}
+  VAULT_SECRET_PATH: {{ printf "secret/tenants/%s" $name | quote }}
+  {{- range $k, $v := $e.extra }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

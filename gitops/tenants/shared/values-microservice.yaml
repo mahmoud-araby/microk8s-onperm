@@ -1,0 +1,11 @@
+# Tenant-wide overrides for every charts/microservice release in the shared pool (shared-services).
+# Applied after gitops/apps/<service>/values*.yaml and before the descriptor's own `values:`.
+# Pooled releases serve many tenants: raise per-route Kong limits (per-tenant limits are enforced by each
+# pooled tenant's Kong consumer, see charts/tenant kong.consumer).
+dependencies:
+  redis:
+    db: 0
+kong:
+  rateLimit:
+    # limit_by consumer -> per pooled tenant, per route.
+    limitBy: consumer

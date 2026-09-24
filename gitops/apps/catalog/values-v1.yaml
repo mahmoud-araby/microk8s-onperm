@@ -1,0 +1,6 @@
+# catalog v1 - current stable API (/catalog/v1).
+image:
+  tag: "1.21.0"
+
+config:
+  CATALOG_FEATURES_SEARCH_BACKEND: postgres

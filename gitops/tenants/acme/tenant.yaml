@@ -1,0 +1,65 @@
+# =============================================================================
+# Tenant descriptor - read by the git-files generator of gitops/apps/applicationsets/tenants.yaml,
+# which creates Application "tenant-acme" (charts/tenant, project "tenants", wave 10).
+# Top-level keys are generator parameters (keep them all - missingkey=error); `values:` is passed verbatim
+# to charts/tenant as helm.valuesObject and wins over the top-level summary keys.
+# =============================================================================
+name: acme
+displayName: ACME Corp
+# dedicated: namespace tenant-acme + own releases on acme.api.example.com
+tier: dedicated
+environment: production
+namespace: tenant-acme
+# Progressive-sync ring for the tenant landing zone (canary | early | general).
+releaseRing: early
+quota:
+  cpu: "40"
+  memory: 80Gi
+  pods: "300"
+  pvcs: "20"
+  storage: 500Gi
+  loadBalancers: "0"
+  limitsMemory: 160Gi
+
+values:
+  limitRange:
+    defaultMemory: 512Mi
+    defaultRequestCpu: 100m
+    defaultRequestMemory: 128Mi
+  rbac:
+    adminGroups: [acme-admins]
+    developerGroups: [acme-devs]
+    viewerGroups: [acme-viewers]
+  istio:
+    injection: true
+    mtls: STRICT
+  networkPolicy:
+    enabled: true
+  data:
+    postgres:
+      enabled: true
+      # -> databases/owners acme_orders, acme_payments, acme_catalog
+      databases: [orders, payments, catalog]
+    redis:
+      db: 1
+      keyPrefix: "acme:"
+    rabbitmq:
+      enabled: true
+      vhost: acme
+      users: [orders, payments]
+    kafka:
+      enabled: true
+      users: [orders, payments, catalog]
+      topics:
+        - {name: orders-events, partitions: 24, replicas: 3}
+        - {name: payments-events, partitions: 12, replicas: 3}
+        - {name: inventory-events, partitions: 12, replicas: 3}
+  externalSecrets:
+    enabled: true
+  kong:
+    consumer:
+      rateLimit:
+        minute: 30000
+        hour: 900000
+  keycloak:
+    realm: acme

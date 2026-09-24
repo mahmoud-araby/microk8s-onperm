@@ -1,0 +1,889 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "charts/tenant values",
+  "description": "Tenant landing zone. Interface: docs/chart-interfaces.md#chartstenant",
+  "type": "object",
+  "required": [
+    "tenant",
+    "quota",
+    "limitRange",
+    "rbac",
+    "istio",
+    "networkPolicy",
+    "data",
+    "externalSecrets",
+    "keycloak"
+  ],
+  "properties": {
+    "tenant": {
+      "type": "object",
+      "required": [
+        "name",
+        "tier",
+        "environment"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z]([a-z0-9-]{0,18}[a-z0-9])?$",
+          "description": "Tenant id (DNS label, max 20 chars)"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "dedicated",
+            "shared"
+          ]
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$"
+        },
+        "landingZone": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "protectNamespace": {
+          "type": "boolean"
+        },
+        "releaseRing": {
+          "type": "string",
+          "enum": [
+            "canary",
+            "early",
+            "general"
+          ]
+        },
+        "costCenter": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "podSecurity": {
+      "type": "object",
+      "properties": {
+        "enforce": {
+          "type": "string",
+          "enum": [
+            "privileged",
+            "baseline",
+            "restricted"
+          ]
+        },
+        "audit": {
+          "type": "string",
+          "enum": [
+            "privileged",
+            "baseline",
+            "restricted"
+          ]
+        },
+        "warn": {
+          "type": "string",
+          "enum": [
+            "privileged",
+            "baseline",
+            "restricted"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "quota": {
+      "type": "object",
+      "required": [
+        "cpu",
+        "memory",
+        "pods",
+        "pvcs",
+        "storage",
+        "loadBalancers"
+      ],
+      "properties": {
+        "cpu": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "memory": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "pods": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "pvcs": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "loadBalancers": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "limitsMemory": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "limitsCpu": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "nodePorts": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "objectCounts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "integer",
+              "number"
+            ]
+          }
+        },
+        "deniedStorageClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deniedPriorityClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "appsHighPods": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        }
+      }
+    },
+    "limitRange": {
+      "type": "object",
+      "properties": {
+        "defaultCpu": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "defaultMemory": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "defaultRequestCpu": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "defaultRequestMemory": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "maxCpu": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "maxMemory": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        },
+        "maxStorage": {
+          "type": [
+            "string",
+            "integer",
+            "number"
+          ]
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "adminGroups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "developerGroups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "viewerGroups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "groupPrefix": {
+          "type": "string"
+        },
+        "platformAdminGroups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deliveryRole": {
+          "type": "boolean"
+        }
+      }
+    },
+    "istio": {
+      "type": "object",
+      "properties": {
+        "injection": {
+          "type": "boolean"
+        },
+        "mtls": {
+          "type": "string",
+          "enum": [
+            "STRICT",
+            "PERMISSIVE"
+          ]
+        },
+        "sidecar": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "egressHosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "extraEgressHosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "outboundTrafficPolicy": {
+              "type": "string",
+              "enum": [
+                "REGISTRY_ONLY",
+                "ALLOW_ANY"
+              ]
+            }
+          }
+        },
+        "authorization": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "allowedNamespaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "metricsNamespaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "metricsPaths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "extraAllowedNamespaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingressNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "egressNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extraEgressNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extraEgress": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "dns": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "podSelector": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "postgres": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "databases": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]*$"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "name"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]*$"
+                      },
+                      "vaultPath": {
+                        "type": "string"
+                      },
+                      "passwordKey": {
+                        "type": "string"
+                      },
+                      "connectionLimit": {
+                        "type": "integer",
+                        "minimum": -1
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "cluster": {
+              "type": "string"
+            },
+            "reclaimPolicy": {
+              "type": "string",
+              "enum": [
+                "retain",
+                "delete"
+              ]
+            },
+            "connectionLimit": {
+              "type": "integer",
+              "minimum": -1
+            },
+            "roleManagement": {
+              "type": "string",
+              "enum": [
+                "job",
+                "managed"
+              ]
+            },
+            "roleJob": {
+              "type": "object",
+              "properties": {
+                "adminSecret": {
+                  "type": "string"
+                },
+                "host": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": [
+                    "integer",
+                    "string"
+                  ]
+                },
+                "sslmode": {
+                  "type": "string",
+                  "enum": [
+                    "disable",
+                    "allow",
+                    "prefer",
+                    "require",
+                    "verify-ca",
+                    "verify-full"
+                  ]
+                },
+                "image": {
+                  "type": "object",
+                  "required": [
+                    "repository",
+                    "tag"
+                  ],
+                  "properties": {
+                    "registry": {
+                      "type": "string"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "tag": {
+                      "type": [
+                        "string",
+                        "number"
+                      ]
+                    }
+                  }
+                },
+                "waitSeconds": {
+                  "type": "integer",
+                  "minimum": 10
+                },
+                "resources": {
+                  "type": "object"
+                },
+                "nodeSelector": {
+                  "type": "object"
+                },
+                "tolerations": {
+                  "type": "array"
+                }
+              }
+            },
+            "encoding": {
+              "type": "string"
+            },
+            "locale": {
+              "type": "string"
+            }
+          }
+        },
+        "redis": {
+          "type": "object",
+          "properties": {
+            "db": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 15
+            },
+            "keyPrefix": {
+              "type": "string"
+            }
+          }
+        },
+        "rabbitmq": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "vhost": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "clusterName": {
+              "type": "string"
+            },
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            },
+            "defaultQueueType": {
+              "type": "string",
+              "enum": [
+                "quorum",
+                "classic",
+                "stream"
+              ]
+            },
+            "dlx": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exchange": {
+                  "type": "string"
+                },
+                "queue": {
+                  "type": "string"
+                },
+                "deliveryLimit": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "maxLength": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "policyDefinition": {
+              "type": "object"
+            },
+            "vhostLimits": {
+              "type": "object"
+            }
+          }
+        },
+        "kafka": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "topics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9._-]+$"
+                  },
+                  "partitions": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "replicas": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "config": {
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "apiVersion": {
+              "type": "string",
+              "enum": [
+                "kafka.strimzi.io/v1",
+                "kafka.strimzi.io/v1beta2"
+              ]
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "clusterName": {
+              "type": "string"
+            },
+            "topicConfig": {
+              "type": "object"
+            },
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            },
+            "authentication": {
+              "type": "string",
+              "enum": [
+                "scram-sha-512",
+                "tls",
+                "tls-external"
+              ]
+            },
+            "quotas": {
+              "type": "object",
+              "properties": {
+                "producerByteRate": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "consumerByteRate": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "requestPercentage": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "controllerMutationRate": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "externalSecrets": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "apiVersion": {
+          "type": "string"
+        },
+        "secretStore": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "server": {
+              "type": "string"
+            },
+            "mountPath": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "serviceAccount": {
+              "type": "string"
+            },
+            "caProvider": {
+              "type": "object"
+            }
+          }
+        },
+        "clusterSecretStore": {
+          "type": "string"
+        },
+        "refreshInterval": {
+          "type": "string"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "path"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "kong": {
+      "type": "object",
+      "properties": {
+        "consumer": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "ingressClass": {
+              "type": "string"
+            },
+            "rateLimit": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "second": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "minute": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "hour": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "policy": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "cluster",
+                    "redis"
+                  ]
+                },
+                "redis": {
+                  "type": "object",
+                  "properties": {
+                    "host": {
+                      "type": "string"
+                    },
+                    "port": {
+                      "type": "integer"
+                    },
+                    "database": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "passwordSecret": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "jwtCredential": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "vaultPath": {
+                  "type": "string"
+                },
+                "publicKeyProperty": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "keycloak": {
+      "type": "object",
+      "properties": {
+        "realm": {
+          "type": "string"
+        },
+        "issuerBase": {
+          "type": "string",
+          "pattern": "^https?://"
+        }
+      }
+    },
+    "endpoints": {
+      "type": "object"
+    }
+  }
+}

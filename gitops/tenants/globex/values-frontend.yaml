@@ -1,0 +1,3 @@
+# Tenant-wide overrides for charts/frontend releases of tenant "globex" (none deployed yet; kept so a
+# web-<version>.yaml descriptor can be added without further changes).
+{}

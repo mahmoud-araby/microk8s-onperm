@@ -1,0 +1,70 @@
+# Pool descriptor for the shared-services namespace. Not a customer: it is the landing zone that hosts the
+# pooled releases (gitops/tenants/shared/services/*) used by every shared-tier tenant (e.g. initech).
+# Releases here run with tenant "" (pooled) and resolve the tenant per request from X-Tenant-ID / the JWT.
+name: shared
+displayName: Shared services pool
+tier: shared
+environment: production
+namespace: shared-services
+releaseRing: general
+quota:
+  cpu: "200"
+  memory: 400Gi
+  pods: "2000"
+  pvcs: "20"
+  storage: 500Gi
+  loadBalancers: "0"
+  limitsMemory: 800Gi
+
+values:
+  tenant:
+    # The pool owns its namespace even though tier=shared.
+    landingZone: true
+  quota:
+    objectCounts:
+      services: "300"
+      configmaps: "1000"
+      secrets: "1000"
+  rbac:
+    adminGroups: []
+    developerGroups: [platform-devs]
+    viewerGroups: [platform-viewers]
+  istio:
+    injection: true
+    mtls: STRICT
+  data:
+    postgres:
+      enabled: true
+      # -> shared_orders, shared_payments, shared_catalog (rows carry tenant_id; RLS in the services)
+      databases:
+        - {name: orders, connectionLimit: 600}
+        - {name: payments, connectionLimit: 400}
+        - {name: catalog, connectionLimit: 600}
+    redis:
+      db: 0
+      keyPrefix: "shared:"
+    rabbitmq:
+      enabled: true
+      vhost: shared
+      users: [orders, payments]
+    kafka:
+      enabled: true
+      users: [orders, payments, catalog]
+      quotas:
+        producerByteRate: 52428800
+        consumerByteRate: 104857600
+        requestPercentage: 100
+        controllerMutationRate: 10
+      topics:
+        - {name: orders-events, partitions: 48, replicas: 3}
+        - {name: payments-events, partitions: 24, replicas: 3}
+        - {name: inventory-events, partitions: 24, replicas: 3}
+  externalSecrets:
+    secrets:
+      - {name: shared-common-secrets, path: common}
+  kong:
+    # Pooled tenants each get their own consumer from their own tenant.yaml.
+    consumer:
+      enabled: false
+  keycloak:
+    realm: shared

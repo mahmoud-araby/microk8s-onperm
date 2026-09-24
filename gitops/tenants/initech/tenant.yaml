@@ -1,0 +1,40 @@
+# Tenant descriptor (see acme/tenant.yaml for the field reference).
+# initech is a POOLED tenant: no namespace and no releases of its own. It is served by the releases in
+# shared-services (api.example.com, tenant resolved from the JWT claim "tenant"); its data lives in the
+# shared databases/vhost/topics, partitioned by tenant_id. charts/tenant renders only per-tenant objects
+# into shared-services: Kong consumer + rate limit (noisy-neighbour control), JWT credential, endpoints
+# ConfigMap. Do NOT add a services/ directory for a shared-tier tenant.
+name: initech
+displayName: Initech
+tier: shared
+environment: production
+namespace: shared-services
+releaseRing: general
+# Pooled tenants have no namespace quota; capacity is governed by the shared-services quota + Kong limits.
+quota: {}
+
+values:
+  rbac:
+    adminGroups: []
+    developerGroups: []
+    viewerGroups: []
+  data:
+    postgres:
+      enabled: false
+    redis:
+      db: 0
+      keyPrefix: "initech:"
+    rabbitmq:
+      enabled: false
+    kafka:
+      enabled: false
+  externalSecrets:
+    enabled: true
+    secrets: []
+  kong:
+    consumer:
+      rateLimit:
+        minute: 3000
+        hour: 100000
+  keycloak:
+    realm: initech

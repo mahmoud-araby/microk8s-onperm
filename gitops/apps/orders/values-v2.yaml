@@ -1,0 +1,15 @@
+# orders v2 - current API (/orders/v2): partial shipments, outbox-based Kafka events.
+image:
+  # Bumped by CI on every merge to main.
+  tag: "2.4.1"
+
+config:
+  Orders__Api__Deprecated: "false"
+  Orders__Features__PartialShipments: "true"
+  Orders__Features__OutboxRelay: "true"
+  Orders__Outbox__BatchSize: "500"
+
+autoscaling:
+  hpa:
+    minReplicas: 3
+    maxReplicas: 60

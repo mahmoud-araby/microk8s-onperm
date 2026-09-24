@@ -1,0 +1,14 @@
+# Service-version descriptor - one file per deployed <service>-<version> for this tenant. Read by the git-files
+# generator of gitops/apps/applicationsets/services.yaml -> Application "<tenant>-<service>-<version>".
+# Keys: service, version, language, chart (microservice|frontend), ring (canary|early|general, optional),
+# imageTag (optional pin, overrides gitops/apps/<service>/values-<version>.yaml), replicas (optional
+# minimum replicas), values (optional chart overrides, highest precedence).
+# Template: copy/rename per service version the tenant consumes (e.g. catalog-v1.yaml, payments-v1.yaml).
+service: orders
+version: v2
+language: dotnet
+chart: microservice
+ring: general
+# imageTag: "2.4.1"     # optional pin
+# replicas: 3           # optional minimum replicas
+values: {}

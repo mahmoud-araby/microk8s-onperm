@@ -1,0 +1,19 @@
+apiVersion: v2
+name: tenant
+description: >-
+  Tenant landing zone - namespace tenant-<name> (or a pooled tenant inside shared-services), quotas,
+  LimitRange, RBAC for Keycloak OIDC groups, NetworkPolicies, Istio mTLS/authz/Sidecar, Vault-backed
+  secrets, Kong consumer + rate limit, and per-tenant data provisioning (CNPG databases, RabbitMQ vhost,
+  Kafka topics/users with prefix ACLs).
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.29.0-0"
+keywords: [multi-tenancy, landing-zone, istio, cloudnative-pg, rabbitmq, strimzi, external-secrets, kong]
+home: https://github.com/mahmoud-araby/microk8s-onperm
+sources:
+  - https://github.com/mahmoud-araby/microk8s-onperm/tree/main/charts/tenant
+maintainers:
+  - name: platform-team
+annotations:
+  platform.example.com/interface: docs/chart-interfaces.md#chartstenant

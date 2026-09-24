@@ -1,0 +1,8 @@
+# payments v2 - async refunds + new PSP contract (/payments/v2). Not yet pinned by any tenant: add
+# gitops/tenants/<tenant>/services/payments-v2.yaml to opt a tenant in (start with a canary-ring tenant).
+image:
+  tag: "2.0.0-rc.3"
+
+config:
+  PAYMENTS_FEATURES_3DS2: "true"
+  PAYMENTS_FEATURES_REFUNDS_ASYNC: "true"

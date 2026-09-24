@@ -1,0 +1,10 @@
+tenant: {name: shared, displayName: Shared services pool, tier: shared, namespace: shared-services, landingZone: true}
+quota: {cpu: "200", memory: 400Gi, pods: "2000", pvcs: "20", storage: 500Gi}
+rbac: {adminGroups: [], developerGroups: [platform-devs], viewerGroups: [platform-viewers]}
+data:
+  postgres: {enabled: true, databases: [orders, payments, catalog], roleManagement: managed}
+  redis: {db: 0, keyPrefix: "shared:"}
+  rabbitmq: {enabled: true, vhost: shared, users: [orders, payments]}
+  kafka: {enabled: true, users: [orders, payments, catalog], topics: [{name: orders-events, partitions: 48, replicas: 3}]}
+kong: {consumer: {enabled: false}}
+keycloak: {realm: shared}

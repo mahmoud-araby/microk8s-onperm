@@ -1,0 +1,30 @@
+{{- if include "tenant.landingZone" . }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "tenant.namespace" . }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+    {{- if .Values.istio.injection }}
+    istio-injection: enabled
+    {{- else }}
+    istio-injection: disabled
+    {{- end }}
+    pod-security.kubernetes.io/enforce: {{ .Values.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce-version: {{ .Values.podSecurity.version }}
+    pod-security.kubernetes.io/audit: {{ .Values.podSecurity.audit }}
+    pod-security.kubernetes.io/audit-version: {{ .Values.podSecurity.version }}
+    pod-security.kubernetes.io/warn: {{ .Values.podSecurity.warn }}
+    pod-security.kubernetes.io/warn-version: {{ .Values.podSecurity.version }}
+    platform.example.com/release-ring: {{ .Values.tenant.releaseRing }}
+  annotations:
+    {{- include "tenant.annotations" . | nindent 4 }}
+    platform.example.com/oidc-issuer: {{ include "tenant.issuer" . | quote }}
+    platform.example.com/api-host: {{ include "tenant.apiHost" . | quote }}
+    platform.example.com/vault-path: {{ printf "secret/tenants/%s" (include "tenant.name" .) | quote }}
+    argocd.argoproj.io/sync-wave: "-10"
+    {{- if .Values.tenant.protectNamespace }}
+    # Never deleted by Argo CD (app deletion or prune); see gitops/tenants/README.md "Decommission".
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+    {{- end }}
+{{- end }}

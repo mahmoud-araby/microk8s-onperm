@@ -1,0 +1,34 @@
+Tenant "{{ include "tenant.name" . }}" ({{ .Values.tenant.displayName }}) - tier {{ .Values.tenant.tier }}, environment {{ .Values.tenant.environment }}
+{{- if include "tenant.landingZone" . }}
+
+Landing zone namespace: {{ include "tenant.namespace" . }}
+  - ResourceQuota tenant-quota: cpu={{ .Values.quota.cpu }} memory={{ .Values.quota.memory }} pods={{ .Values.quota.pods }} storage={{ .Values.quota.storage }}
+  - Pod Security: {{ .Values.podSecurity.enforce }} | Istio injection: {{ .Values.istio.injection }} | mTLS: {{ .Values.istio.mtls }}
+  - NetworkPolicies: {{ ternary "default deny + platform allow-list" "disabled" .Values.networkPolicy.enabled }}
+  - RBAC (OIDC groups, prefix "{{ .Values.rbac.groupPrefix }}"): admin={{ join "," .Values.rbac.adminGroups }} edit={{ join "," .Values.rbac.developerGroups }} view={{ join "," .Values.rbac.viewerGroups }}
+{{- else }}
+
+Pooled tenant: served by the releases in {{ include "tenant.namespace" . }} (tenant resolved from the JWT claim "tenant").
+Per-tenant objects in {{ include "tenant.namespace" . }} are prefixed "{{ include "tenant.objectPrefix" . }}".
+{{- end }}
+
+Public API host : https://{{ include "tenant.apiHost" . }}/<service>/<version>/...
+OIDC issuer     : {{ include "tenant.issuer" . }}
+Vault path      : secret/tenants/{{ include "tenant.name" . }}/<service>
+Endpoints       : kubectl -n {{ include "tenant.namespace" . }} get configmap {{ include "tenant.objectPrefix" . }}tenant-platform-endpoints -o yaml
+{{- if .Values.data.postgres.enabled }}
+
+PostgreSQL (cluster {{ .Values.data.postgres.cluster }}, role management: {{ .Values.data.postgres.roleManagement }}):
+{{- range (include "tenant.postgresDatabases" . | fromYaml).items }}
+  - database/owner {{ .db }}  (password: secret/{{ .vaultPath }} key {{ .passwordKey }})
+{{- end }}
+{{- end }}
+{{- if .Values.data.rabbitmq.enabled }}
+RabbitMQ vhost  : {{ default (include "tenant.name" .) .Values.data.rabbitmq.vhost }}{{ with .Values.data.rabbitmq.users }} users: {{ range . }}{{ include "tenant.name" $ }}-{{ . }} {{ end }}{{ end }}
+{{- end }}
+{{- if .Values.data.kafka.enabled }}
+Kafka prefix    : {{ include "tenant.name" . }}.  topics: {{ range .Values.data.kafka.topics }}{{ include "tenant.name" $ }}.{{ .name }} {{ end }}
+{{- end }}
+Redis           : db {{ .Values.data.redis.db }}, key prefix "{{ .Values.data.redis.keyPrefix }}"
+
+Seed Vault before the first sync (see charts/tenant/README.md "Vault layout").

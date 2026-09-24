@@ -1,0 +1,106 @@
+{{- if .Values.kong.consumer.enabled }}
+{{- $name := include "tenant.name" . }}
+{{- $ns := include "tenant.namespace" . }}
+{{- $c := .Values.kong.consumer }}
+{{- $rlName := printf "tenant-%s-rate-limit" $name }}
+{{- $credName := printf "tenant-%s-jwt" $name }}
+{{- if $c.rateLimit.enabled }}
+# Per-tenant rate limit: attached to the tenant consumer, so it applies to the tenant across all routes
+# (shared and dedicated) - in addition to each release's per-route limit.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $rlName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: {{ $c.ingressClass }}
+plugin: rate-limiting
+config:
+  {{- if $c.rateLimit.second }}
+  second: {{ $c.rateLimit.second | int64 }}
+  {{- end }}
+  {{- if $c.rateLimit.minute }}
+  minute: {{ $c.rateLimit.minute | int64 }}
+  {{- end }}
+  {{- if $c.rateLimit.hour }}
+  hour: {{ $c.rateLimit.hour | int64 }}
+  {{- end }}
+  limit_by: consumer
+  policy: {{ $c.rateLimit.policy }}
+  {{- if eq $c.rateLimit.policy "redis" }}
+  redis:
+    host: {{ $c.rateLimit.redis.host }}
+    port: {{ $c.rateLimit.redis.port | int64 }}
+    database: {{ $c.rateLimit.redis.database | int64 }}
+  {{- end }}
+  fault_tolerant: true
+  hide_client_headers: false
+{{- with $c.rateLimit.redis.passwordSecret }}
+{{- if .name }}
+configPatches:
+  - path: /redis/password
+    valueFrom:
+      secretKeyRef:
+        name: {{ .name }}
+        key: {{ .key }}
+{{- end }}
+{{- end }}
+---
+{{- end }}
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  name: tenant-{{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: {{ $c.ingressClass }}
+    {{- if $c.rateLimit.enabled }}
+    konghq.com/plugins: {{ $rlName }}
+    {{- end }}
+username: tenant-{{ $name }}
+custom_id: {{ $name | quote }}
+{{- if $c.jwtCredential.enabled }}
+credentials:
+  - {{ $credName }}
+---
+# JWT credential: key = Keycloak realm issuer (jwt plugin key_claim_name: iss), RS256 realm public key.
+apiVersion: {{ .Values.externalSecrets.apiVersion }}
+kind: ExternalSecret
+metadata:
+  name: {{ $credName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    {{- if and (include "tenant.landingZone" .) .Values.externalSecrets.secretStore.enabled }}
+    kind: SecretStore
+    name: {{ .Values.externalSecrets.secretStore.name }}
+    {{- else }}
+    kind: ClusterSecretStore
+    name: {{ .Values.externalSecrets.clusterSecretStore }}
+    {{- end }}
+  target:
+    name: {{ $credName }}
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          konghq.com/credential: jwt
+          platform.example.com/tenant: {{ $name }}
+      data:
+        key: {{ include "tenant.issuer" . | quote }}
+        algorithm: RS256
+        rsa_public_key: "{{ "{{" }} .publicKey {{ "}}" }}"
+  data:
+    - secretKey: publicKey
+      remoteRef:
+        key: {{ default (printf "tenants/%s/keycloak" $name) $c.jwtCredential.vaultPath }}
+        property: {{ $c.jwtCredential.publicKeyProperty }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,4 @@
+# Tenant-wide overrides for charts/frontend releases in the shared pool (app.example.com).
+runtimeConfig:
+  # The pooled SPA asks for the organisation at login and substitutes {tenant} in authUrl.
+  realmDiscovery: true

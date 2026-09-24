@@ -1,0 +1,21 @@
+# Generated/maintained by the Ansible role k8s_configmaps (make configmaps ENV=<env> MODE=gitops) and synced by
+# the tenants ApplicationSet as an extra directory source (gitops/tenants/<tenant>/configmaps).
+# Every tenant keeps at least this file so the directory source always exists.
+# Pooled tenant: lives in shared-services, so the name is prefixed with the tenant (tenant-<name>-...).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-initech-feature-flags
+  labels:
+    app.kubernetes.io/name: tenant-feature-flags
+    app.kubernetes.io/part-of: platform
+    app.kubernetes.io/managed-by: ansible
+    platform.example.com/tenant: initech
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+data:
+  checkout.newFlow: "false"
+  orders.partialShipments: "true"
+  catalog.facetedSearch: "false"
+  payments.refundsAsync: "false"
+  ui.theme: default

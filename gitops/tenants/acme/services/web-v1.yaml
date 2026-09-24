@@ -1,0 +1,18 @@
+# Service-version descriptor - one file per deployed <service>-<version> for this tenant. Read by the git-files
+# generator of gitops/apps/applicationsets/services.yaml -> Application "<tenant>-<service>-<version>".
+# Keys: service, version, language, chart (microservice|frontend), ring (canary|early|general, optional),
+# imageTag (optional pin, overrides gitops/apps/<service>/values-<version>.yaml), replicas (optional
+# minimum replicas), values (optional chart overrides, highest precedence).
+# Frontend at https://acme.app.example.com (runtime config points to acme.api.example.com + realm acme).
+service: web
+version: v1
+language: static
+chart: frontend
+ring: early
+values:
+  runtimeConfig:
+    theme: acme
+    apiVersions:
+      orders: v2
+      payments: v1
+      catalog: v1

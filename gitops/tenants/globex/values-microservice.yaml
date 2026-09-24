@@ -1,0 +1,13 @@
+# Tenant-wide overrides for every charts/microservice release of tenant "globex" (required when the tenant has services; may be {}).
+# Applied by gitops/apps/applicationsets/services.yaml after gitops/apps/<service>/values*.yaml and before
+# the descriptor's own `values:`.
+# Keep it consistent with tenant.yaml (data.redis.db / keyPrefix).
+dependencies:
+  redis:
+    # Logical Redis database of the tenant (data.redis.db in tenant.yaml).
+    db: 2
+
+environment: production
+
+podLabels:
+  platform.example.com/cost-center: globex

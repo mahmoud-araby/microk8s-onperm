@@ -1,0 +1,3 @@
+# Tenant-wide overrides for charts/frontend releases of this tenant (required when the tenant runs a
+# frontend; may be {}).
+{}

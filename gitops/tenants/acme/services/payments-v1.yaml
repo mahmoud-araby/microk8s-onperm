@@ -1,0 +1,17 @@
+# Service-version descriptor - one file per deployed <service>-<version> for this tenant. Read by the git-files
+# generator of gitops/apps/applicationsets/services.yaml -> Application "<tenant>-<service>-<version>".
+# Keys: service, version, language, chart (microservice|frontend), ring (canary|early|general, optional),
+# imageTag (optional pin, overrides gitops/apps/<service>/values-<version>.yaml), replicas (optional
+# minimum replicas), values (optional chart overrides, highest precedence).
+service: payments
+version: v1
+language: java
+chart: microservice
+ring: early
+# Pinned: acme change freeze during its PCI-DSS audit (until 2026-10-15). Delete the line to follow
+# gitops/apps/payments/values-v1.yaml again.
+imageTag: "1.11.4"
+values:
+  autoscaling:
+    keda:
+      maxReplicas: 40

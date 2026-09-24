@@ -1,0 +1,76 @@
+{{- if include "tenant.landingZone" . }}
+{{- $ns := include "tenant.namespace" . }}
+# Namespace-wide mTLS mode.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  mtls:
+    mode: {{ .Values.istio.mtls }}
+{{- if .Values.istio.sidecar.enabled }}
+---
+# Limits the Envoy config pushed to this namespace to the hosts it may call (memory + isolation).
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        {{- range (concat .Values.istio.sidecar.egressHosts .Values.istio.sidecar.extraEgressHosts | uniq) }}
+        - {{ . | quote }}
+        {{- end }}
+  outboundTrafficPolicy:
+    mode: {{ .Values.istio.sidecar.outboundTrafficPolicy }}
+{{- end }}
+{{- if .Values.istio.authorization.enabled }}
+---
+# Default deny: an ALLOW-less, empty-spec policy denies every request to workloads in the namespace ...
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-nothing
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec: {}
+---
+# ... except from the tenant's own namespace and the platform gateways (identities via mTLS).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-tenant-and-gateways
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces:
+              - {{ $ns | quote }}
+              {{- range (concat .Values.istio.authorization.allowedNamespaces .Values.istio.authorization.extraAllowedNamespaces | uniq) }}
+              - {{ . | quote }}
+              {{- end }}
+    {{- with .Values.istio.authorization.metricsNamespaces }}
+    - from:
+        - source:
+            namespaces:
+              {{- toYaml . | nindent 14 }}
+      to:
+        - operation:
+            methods: [GET]
+            paths:
+              {{- toYaml $.Values.istio.authorization.metricsPaths | nindent 14 }}
+    {{- end }}
+{{- end }}
+{{- end }}

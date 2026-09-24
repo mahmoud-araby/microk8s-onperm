@@ -1,0 +1,8 @@
+# payments v1 - only major version so far (/payments/v1).
+image:
+  # Bumped by CI on every merge to main.
+  tag: "1.12.0"
+
+config:
+  PAYMENTS_FEATURES_3DS2: "true"
+  PAYMENTS_FEATURES_REFUNDS_ASYNC: "false"

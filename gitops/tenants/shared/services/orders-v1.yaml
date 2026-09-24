@@ -1,0 +1,12 @@
+# Service-version descriptor - one file per deployed <service>-<version> for this tenant. Read by the git-files
+# generator of gitops/apps/applicationsets/services.yaml -> Application "<tenant>-<service>-<version>".
+# Keys: service, version, language, chart (microservice|frontend), ring (canary|early|general, optional),
+# imageTag (optional pin, overrides gitops/apps/<service>/values-<version>.yaml), replicas (optional
+# minimum replicas), values (optional chart overrides, highest precedence).
+# Pooled release in shared-services, served on api.example.com/orders/v1 for every shared-tier tenant
+# (tenant from the JWT claim -> X-Tenant-ID). Rows are partitioned by tenant_id in shared_orders.
+service: orders
+version: v1
+language: dotnet
+chart: microservice
+ring: general

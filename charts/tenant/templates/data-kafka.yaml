@@ -1,0 +1,101 @@
+{{- if .Values.data.kafka.enabled }}
+{{- $k := .Values.data.kafka }}
+{{- $name := include "tenant.name" . }}
+{{- $prefix := printf "%s." $name }}
+{{- range $k.topics }}
+---
+apiVersion: {{ $k.apiVersion }}
+kind: KafkaTopic
+metadata:
+  # metadata.name must be unique in data-kafka; the real topic name is spec.topicName.
+  name: {{ printf "%s-%s" $name .name | replace "." "-" | replace "_" "-" | lower }}
+  namespace: {{ $k.namespace }}
+  labels:
+    strimzi.io/cluster: {{ $k.clusterName }}
+    {{- include "tenant.labels" $ | nindent 4 }}
+spec:
+  topicName: {{ printf "%s%s" $prefix .name | quote }}
+  partitions: {{ .partitions | default 12 | int64 }}
+  replicas: {{ .replicas | default 3 | int64 }}
+  config:
+    {{- toYaml (merge (deepCopy (.config | default dict)) $k.topicConfig) | nindent 4 }}
+{{- end }}
+{{- range $svc := $k.users }}
+{{- $user := printf "%s-%s" $name $svc }}
+{{- if eq $k.authentication "scram-sha-512" }}
+---
+# SCRAM password for Kafka user {{ $user }} (shared with the {{ $svc }} release via Vault key KAFKA_PASSWORD).
+apiVersion: {{ $.Values.externalSecrets.apiVersion }}
+kind: ExternalSecret
+metadata:
+  name: {{ $user }}-kafka-password
+  namespace: {{ $k.namespace }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  refreshInterval: {{ $.Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: {{ $.Values.externalSecrets.clusterSecretStore }}
+  target:
+    name: {{ $user }}-kafka-password
+    creationPolicy: Owner
+  data:
+    - secretKey: password
+      remoteRef:
+        key: {{ printf "tenants/%s/%s" $name $svc }}
+        property: KAFKA_PASSWORD
+{{- end }}
+---
+apiVersion: {{ $k.apiVersion }}
+kind: KafkaUser
+metadata:
+  name: {{ $user }}
+  namespace: {{ $k.namespace }}
+  labels:
+    strimzi.io/cluster: {{ $k.clusterName }}
+    {{- include "tenant.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  authentication:
+    type: {{ $k.authentication }}
+    {{- if eq $k.authentication "scram-sha-512" }}
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: {{ $user }}-kafka-password
+          key: password
+    {{- end }}
+  authorization:
+    type: simple
+    acls:
+      # Topics: produce/consume/create only inside the tenant prefix.
+      - resource: {type: topic, name: {{ $prefix | quote }}, patternType: prefix}
+        operations: [Read, Write, Create, Describe, DescribeConfigs]
+        host: "*"
+      # Consumer groups must be named "<tenant>.<something>".
+      - resource: {type: group, name: {{ $prefix | quote }}, patternType: prefix}
+        operations: [Read, Describe]
+        host: "*"
+      # Transactional producers (exactly-once) use ids "<tenant>.<something>".
+      - resource: {type: transactionalId, name: {{ $prefix | quote }}, patternType: prefix}
+        operations: [Write, Describe]
+        host: "*"
+      - resource: {type: cluster}
+        operations: [IdempotentWrite]
+        host: "*"
+  {{- with $k.quotas }}
+  quotas:
+    {{- range $q, $v := . }}
+    {{- if eq $q "controllerMutationRate" }}
+    {{ $q }}: {{ $v }}
+    {{- else }}
+    {{ $q }}: {{ $v | int64 }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

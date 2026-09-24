@@ -1,0 +1,183 @@
+# =============================================================================
+# Service releases: one Application "<tenant>-<service>-<version>" per descriptor file
+# gitops/tenants/<tenant>/services/<service>-<version>.yaml (tenant = path segment 2).
+# Synced by the bootstrap Application "tenants-and-apps"; generated Applications carry sync-wave 20.
+#
+# Helm values precedence (low -> high):
+#   charts/<chart>/values.yaml
+#   gitops/apps/<service>/values.yaml                 service-wide defaults (all versions, all tenants)
+#   gitops/apps/<service>/values-<version>.yaml       image.tag (bumped by CI) + version-specific config
+#   gitops/tenants/<tenant>/values-<chart>.yaml       tenant-wide overrides (e.g. redis db); required file
+#   helm.valuesObject                                 tenant wiring computed here, deep-merged with the
+#                                                     descriptor's imageTag / replicas / values
+#
+# Tenant wiring: dedicated tenant -> namespace tenant-<t>, host <t>.api.example.com, tenant "<t>";
+# the "shared" pool -> namespace shared-services, host api.example.com, tenant "" (pooled).
+# Data names follow charts/tenant: database/user <t>_<service>, vhost <t>, RabbitMQ/Kafka user
+# <t>-<service>, Kafka prefix "<t>.", Redis key prefix "<t>:<service>:".
+#
+# Progressive sync (RollingSync): ring canary -> early -> general (label platform.example.com/release-ring
+# from the descriptor's `ring`, default general). Requires the ApplicationSet controller flag
+# --enable-progressive-syncs (argocd-cmd-params-cm: applicationsetcontroller.enable.progressive.syncs: "true").
+# While RollingSync is active the controller drives the syncs itself (per-Application automated sync is
+# disabled by the controller); the automated policy below applies if progressive sync is switched off.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: services
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: platform
+    platform.example.com/category: apps
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+        revision: main
+        files:
+          - path: gitops/tenants/*/services/*.yaml
+          - path: gitops/tenants/_template/services/*.yaml
+            exclude: true
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        # 1. canary-ring tenants (e.g. globex) - all at once; must become Healthy (incl. the in-release
+        #    Argo Rollouts canary + analysis) before step 2 starts.
+        - matchExpressions:
+            - key: platform.example.com/release-ring
+              operator: In
+              values: [canary]
+        # 2. early adopters, half of them at a time.
+        - matchExpressions:
+            - key: platform.example.com/release-ring
+              operator: In
+              values: [early]
+          maxUpdate: 50%
+        # 3. everyone else incl. the shared pool, 25% of the Applications at a time.
+        - matchExpressions:
+            - key: platform.example.com/release-ring
+              operator: In
+              values: [general]
+          maxUpdate: 25%
+  syncPolicy:
+    # Removing a descriptor file deletes that release (see gitops/apps/README.md "Sunsetting a version").
+    preserveResourcesOnDeletion: false
+  template:
+    metadata:
+      name: '{{ index .path.segments 2 }}-{{ .service }}-{{ .version }}'
+      namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: platform
+        platform.example.com/category: apps
+        platform.example.com/tenant: '{{ index .path.segments 2 }}'
+        platform.example.com/service: '{{ .service }}'
+        platform.example.com/version: '{{ .version }}'
+        platform.example.com/language: '{{ .language }}'
+        platform.example.com/chart: '{{ .chart }}'
+        platform.example.com/tier: '{{ if eq (index .path.segments 2) "shared" }}shared{{ else }}dedicated{{ end }}'
+        platform.example.com/release-ring: '{{ dig "ring" "general" . }}'
+        platform.example.com/environment: '{{ dig "environment" "production" . }}'
+      annotations:
+        argocd.argoproj.io/sync-wave: "20"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: apps
+      # sources: rendered by templatePatch below (needs toYaml for the values object).
+      sources: []
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ if eq (index .path.segments 2) "shared" }}shared-services{{ else }}tenant-{{ index .path.segments 2 }}{{ end }}'
+      ignoreDifferences:
+        # Argo Rollouts owns the canary/stable route weights of the release's VirtualService during a canary.
+        - group: networking.istio.io
+          kind: VirtualService
+          jqPathExpressions:
+            - .spec.http[].route[].weight
+        # Argo Rollouts adds rollouts-pod-template-hash to the stable/canary Service selectors.
+        - group: ""
+          kind: Service
+          jqPathExpressions:
+            - .spec.selector."rollouts-pod-template-hash"
+        # spec.replicas needs no rule: charts/microservice and charts/frontend omit it when HPA/KEDA is on.
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - RespectIgnoreDifferences=true
+          - ServerSideApply=true
+          - PruneLast=true
+          # The namespace is created by the tenant Application (wave 10), never by a release.
+          - CreateNamespace=false
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m
+  templatePatch: |
+    {{- $tenant := index .path.segments 2 }}
+    {{- $shared := eq $tenant "shared" }}
+    {{- $svc := .service }}
+    {{- $sql := printf "%s_%s" ($tenant | replace "-" "_") ($svc | replace "-" "_") }}
+    {{- $tenantId := ternary "" $tenant $shared }}
+    {{- $v := dict }}
+    {{- if eq .chart "frontend" }}
+    {{-   $v = dict
+            "name" $svc
+            "version" .version
+            "tenant" $tenantId
+            "hosts" (list (ternary "app.example.com" (printf "%s.app.example.com" $tenant) $shared))
+            "runtimeConfig" (dict
+                "apiBaseUrl" (ternary "https://api.example.com" (printf "https://%s.api.example.com" $tenant) $shared)
+                "authUrl" (ternary "https://keycloak.example.com/realms/{tenant}" (printf "https://keycloak.example.com/realms/%s" $tenant) $shared)
+                "tenantId" $tenantId) }}
+    {{- else }}
+    {{-   $v = dict
+            "tenant" $tenantId
+            "language" .language
+            "service" (dict "name" $svc "version" .version)
+            "kong" (dict "host" (ternary "api.example.com" (printf "%s.api.example.com" $tenant) $shared))
+            "dependencies" (dict
+                "postgres" (dict "database" $sql "user" $sql)
+                "redis" (dict "keyPrefix" (printf "%s:%s:" $tenant $svc))
+                "rabbitmq" (dict "vhost" $tenant "user" (printf "%s-%s" $tenant $svc))
+                "kafka" (dict "topicPrefix" (printf "%s." $tenant))) }}
+    {{- end }}
+    {{- $imageTag := dig "imageTag" "" . | toString }}
+    {{- if $imageTag }}
+    {{-   $_ := set $v "image" (dict "tag" $imageTag) }}
+    {{- end }}
+    {{- $replicas := dig "replicas" 0 . | int }}
+    {{- if gt $replicas 0 }}
+    {{-   $_ := set $v "replicaCount" $replicas }}
+    {{-   $_ := set $v "autoscaling" (dict "hpa" (dict "minReplicas" $replicas) "keda" (dict "minReplicas" $replicas)) }}
+    {{- end }}
+    {{- $overrides := dig "values" dict . }}
+    {{- if $overrides }}
+    {{-   $v = mergeOverwrite $v (deepCopy $overrides) }}
+    {{- end }}
+    spec:
+      sources:
+        - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+          targetRevision: main
+          path: charts/{{ .chart }}
+          helm:
+            releaseName: {{ $svc }}-{{ .version }}
+            # Strict: a missing values-<version>.yaml must fail the sync instead of silently deploying the
+            # chart's default image. Every tenant with services keeps values-<chart>.yaml (may be empty: {}).
+            ignoreMissingValueFiles: false
+            valueFiles:
+              - $values/gitops/apps/{{ $svc }}/values.yaml
+              - $values/gitops/apps/{{ $svc }}/values-{{ .version }}.yaml
+              - $values/gitops/tenants/{{ $tenant }}/values-{{ .chart }}.yaml
+            valuesObject:
+              {{- toYaml $v | nindent 14 }}
+        - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+          targetRevision: main
+          ref: values

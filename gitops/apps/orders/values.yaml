@@ -1,0 +1,93 @@
+# =============================================================================
+# orders - service-wide defaults (all versions, all tenants). Chart: charts/microservice.
+# Precedence (low -> high): charts/microservice/values.yaml < this file < values-<version>.yaml
+#   < gitops/tenants/<tenant>/values-microservice.yaml < ApplicationSet valuesObject (tenant wiring +
+#   the descriptor's `values:`). See gitops/apps/README.md.
+# Sized for ~1M users: ~3.5k peak RPS on orders across tenants (docs/capacity-planning.md).
+# =============================================================================
+language: dotnet
+
+image:
+  registry: harbor.ops.example.local
+  repository: platform/orders
+  # tag: set per major version in values-<version>.yaml (bumped by CI)
+
+# PostgreSQL (database/user "<tenant>_orders", created by charts/tenant), Redis (idempotency keys + read
+# cache), Kafka (orders-events outbox relay), RabbitMQ (order.created commands to payments).
+dependencies:
+  postgres:
+    enabled: true
+    pooler: true
+  redis:
+    enabled: true
+  rabbitmq:
+    enabled: true
+  kafka:
+    enabled: true
+
+startup:
+  waitForDependencies: true
+  migrations:
+    enabled: true
+    # EF Core migration bundle shipped in the image; idempotent, runs once per pod start (init container).
+    command: ["/app/efbundle", "--connection", "Host=$(DB_HOST);Port=$(DB_PORT);Database=$(DB_NAME);Username=$(DB_USER);Password=$(DB_PASSWORD)"]
+
+config:
+  ASPNETCORE_URLS: "http://+:8080"
+  ASPNETCORE_ENVIRONMENT: Production
+  Logging__Console__FormatterName: json
+  # Topic / exchange names are tenant-scoped (Kafka ACLs only allow the "<tenant>." prefix).
+  Orders__Kafka__EventsTopic: "{{ .Values.dependencies.kafka.topicPrefix }}orders-events"
+  Orders__Kafka__ConsumerGroup: "{{ .Values.dependencies.kafka.topicPrefix }}orders-{{ .Values.service.version }}"
+  Orders__Rabbit__Exchange: orders.events
+  Orders__Rabbit__RoutingKey: order.created
+  Orders__Cache__TtlSeconds: "60"
+  Orders__Db__MaxPoolSize: "40"
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+autoscaling:
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 60
+    cpu: 65
+    memory: 0
+
+pdb:
+  enabled: true
+  minAvailable: "50%"
+
+kong:
+  enabled: true
+  # path: default /orders/<version>
+  stripPath: true
+  auth: jwt
+  rateLimit:
+    enabled: true
+    minute: 6000
+    policy: redis
+
+istio:
+  timeout: 10s
+  retries:
+    attempts: 2
+    perTryTimeout: 4s
+    # POST /orders is not idempotent without an Idempotency-Key: do not retry 5xx on it.
+    retryOn: "reset,connect-failure,refused-stream,gateway-error"
+
+rollout:
+  enabled: true
+  canary:
+    analysis:
+      enabled: true
+      successRate: 0.99
+      p95LatencyMs: 400
+
+nodeSelector:
+  workload-tier: apps

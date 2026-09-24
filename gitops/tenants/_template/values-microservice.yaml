@@ -1,0 +1,5 @@
+# Tenant-wide overrides for every charts/microservice release of this tenant (required file; may be {}).
+dependencies:
+  redis:
+    # Must match data.redis.db in tenant.yaml.
+    db: 0

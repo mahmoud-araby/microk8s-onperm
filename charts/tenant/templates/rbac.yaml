@@ -1,0 +1,82 @@
+{{- if include "tenant.landingZone" . }}
+{{- $ns := include "tenant.namespace" . }}
+{{- $prefix := .Values.rbac.groupPrefix }}
+{{- $bindings := list
+      (dict "name" "tenant-admins" "role" "admin" "groups" (concat .Values.rbac.adminGroups .Values.rbac.platformAdminGroups))
+      (dict "name" "tenant-developers" "role" "edit" "groups" .Values.rbac.developerGroups)
+      (dict "name" "tenant-viewers" "role" "view" "groups" .Values.rbac.viewerGroups) }}
+{{- range $bindings }}
+{{- if .groups }}
+---
+# Keycloak OIDC groups -> built-in ClusterRole "{{ .role }}" scoped to {{ $ns }}.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .role }}
+subjects:
+  {{- range .groups }}
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: {{ printf "%s%s" $prefix . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.rbac.deliveryRole }}
+---
+# Progressive-delivery operations for developers (promote/abort/retry Rollouts, read analysis + mesh config).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-delivery
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [rollouts, rollouts/status]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [argoproj.io]
+    resources: [analysisruns, analysistemplates, experiments]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.istio.io, security.istio.io]
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups: [external-secrets.io]
+    resources: [externalsecrets, secretstores]
+    verbs: [get, list, watch]
+  - apiGroups: [keda.sh]
+    resources: [scaledobjects, triggerauthentications]
+    verbs: [get, list, watch]
+  - apiGroups: [monitoring.coreos.com]
+    resources: [servicemonitors, podmonitors, prometheusrules]
+    verbs: [get, list, watch]
+{{- $devGroups := concat .Values.rbac.adminGroups .Values.rbac.developerGroups }}
+{{- if $devGroups }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-delivery
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant-delivery
+subjects:
+  {{- range $devGroups }}
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: {{ printf "%s%s" $prefix . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
