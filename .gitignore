@@ -1,0 +1,31 @@
+# Secrets / local state
+*.retry
+.vault_pass*
+**/vault.yml
+!**/vault.yml.example
+kubeconfig*
+*.kubeconfig
+.env
+.env.*
+!.env.example
+
+# Build output
+bin/
+obj/
+target/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+coverage/
+*.tgz
+charts/*/charts/
+charts/*/Chart.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
