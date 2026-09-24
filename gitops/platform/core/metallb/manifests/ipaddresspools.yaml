@@ -1,0 +1,31 @@
+# Address pools (docs/conventions.md). Replace the ranges with the VLANs allocated by the network team.
+#   public-pool   : DMZ VLAN, NATed / routed from the Internet (Kong, Istio public ingress)
+#   internal-pool : internal VLAN reachable from corporate network + site-to-site VPN (Istio internal gateway,
+#                   Kafka external listener, ops tooling)
+# Services select a pool with the annotation  metallb.io/address-pool: <pool>  and pools are NOT auto-assigned
+# so nothing ever lands on a public IP by accident.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: public-pool
+  namespace: metallb-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"     # after the MetalLB webhook is ready
+spec:
+  addresses:
+    - 203.0.113.10-203.0.113.19           # placeholder (TEST-NET-3)
+  autoAssign: false
+  avoidBuggyIPs: true
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: internal-pool
+  namespace: metallb-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  addresses:
+    - 10.10.50.10-10.10.50.49             # placeholder
+  autoAssign: false
+  avoidBuggyIPs: true

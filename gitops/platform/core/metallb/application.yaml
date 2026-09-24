@@ -1,0 +1,61 @@
+# MetalLB (L2 mode; BGP example in manifests/bgp-example.yaml). Address pools: public-pool (Kong,
+# Istio public ingress) and internal-pool (Istio internal gateway, Kafka external listener, ops).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-15"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system
+  sources:
+    - repoURL: https://metallb.github.io/metallb
+      chart: metallb
+      targetRevision: 0.16.1 # pin: verify latest before upgrade
+      helm:
+        releaseName: metallb
+        valueFiles:
+          - $values/gitops/platform/core/metallb/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/metallb/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      jqPathExpressions:
+        - .spec.conversion.webhook.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

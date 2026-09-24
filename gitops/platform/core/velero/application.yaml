@@ -1,0 +1,47 @@
+# Velero cluster backups (resources + Kopia file-system backups of volumes) to S3-compatible storage (MinIO).
+# Databases are additionally backed up natively (CNPG barman, Kafka MirrorMaker/tiered storage ...).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+  sources:
+    - repoURL: https://vmware-tanzu.github.io/helm-charts
+      chart: velero
+      targetRevision: 12.2.0 # pin: verify latest before upgrade (Velero 1.18.2)
+      helm:
+        releaseName: velero
+        valueFiles:
+          - $values/gitops/platform/core/velero/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/velero/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

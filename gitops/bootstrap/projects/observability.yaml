@@ -1,0 +1,54 @@
+# Project "observability": kube-prometheus-stack (+ Thanos), ECK (Elasticsearch/Kibana/APM),
+# Fluent Bit, OpenTelemetry Collector, Kiali (istio-system), dashboards, alerts, SLOs.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: observability
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Observability stack (metrics, logs, traces, dashboards, alerting, SLOs)
+  sourceRepos:
+    - https://github.com/mahmoud-araby/microk8s-onperm.git
+    - https://prometheus-community.github.io/helm-charts
+    - https://grafana.github.io/helm-charts
+    - https://helm.elastic.co
+    - https://fluent.github.io/helm-charts
+    - https://open-telemetry.github.io/opentelemetry-helm-charts
+    - https://kiali.org/helm-charts
+    - https://slok.github.io/sloth
+    - https://charts.bitnami.com/bitnami
+    - registry-1.docker.io/bitnamicharts
+    - harbor.ops.example.local/charts
+  destinations:
+    - {server: https://kubernetes.default.svc, namespace: monitoring}
+    - {server: https://kubernetes.default.svc, namespace: elastic-system}
+    - {server: https://kubernetes.default.svc, namespace: logging}
+    - {server: https://kubernetes.default.svc, namespace: observability}
+    - {server: https://kubernetes.default.svc, namespace: istio-system}      # Kiali
+    - {server: https://kubernetes.default.svc, namespace: istio-internal}    # ops VirtualServices, if owned here
+    - {server: https://kubernetes.default.svc, namespace: kube-system}       # control-plane scrape Services
+  clusterResourceWhitelist:
+    - {group: '*', kind: '*'}
+  namespaceResourceWhitelist:
+    - {group: '*', kind: '*'}
+  orphanedResources:
+    warn: true
+    ignore:
+      - {kind: Secret}
+      - {kind: ConfigMap, name: kube-root-ca.crt}
+      - {kind: ConfigMap, name: istio-ca-root-cert}
+  roles:
+    - name: observability-admin
+      groups: [platform-admins, sre]
+      policies:
+        - p, proj:observability:observability-admin, applications, *, observability/*, allow
+        - p, proj:observability:observability-admin, logs, get, observability/*, allow
+    - name: observability-operator
+      groups: [platform-operators]
+      policies:
+        - p, proj:observability:observability-operator, applications, get, observability/*, allow
+        - p, proj:observability:observability-operator, applications, sync, observability/*, allow

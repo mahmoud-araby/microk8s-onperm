@@ -1,0 +1,47 @@
+# Argo Rollouts controller (canary with Istio weighted routing + Prometheus analysis), dashboard
+# (rollouts.ops.example.local via Istio internal gateway) and notifications.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-rollouts
+      targetRevision: 2.43.2 # pin: verify latest before upgrade (Rollouts v1.10.0)
+      helm:
+        releaseName: argo-rollouts
+        valueFiles:
+          - $values/gitops/platform/core/argo-rollouts/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/argo-rollouts/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

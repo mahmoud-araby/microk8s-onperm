@@ -1,0 +1,47 @@
+# Istio EGRESS gateway: single, audited exit point for hybrid & external services (runs on edge nodes
+# whose source IPs are allow-listed by partners / the site-to-site VPN).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: istio-egress
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-egress
+  sources:
+    - repoURL: https://istio-release.storage.googleapis.com/charts
+      chart: gateway
+      targetRevision: 1.30.5 # pin: verify latest before upgrade
+      helm:
+        releaseName: istio-egressgateway
+        valueFiles:
+          - $values/gitops/platform/core/istio-egress/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/istio-egress/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

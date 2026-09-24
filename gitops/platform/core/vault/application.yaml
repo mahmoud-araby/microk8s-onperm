@@ -1,0 +1,57 @@
+# HashiCorp Vault HA (integrated raft storage, 3 replicas, TLS from internal-ca). Source of truth for
+# secrets; consumed through External Secrets Operator (agent injector disabled).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vault
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault
+  sources:
+    - repoURL: https://helm.releases.hashicorp.com
+      chart: vault
+      targetRevision: 0.34.1 # pin: verify latest before upgrade (Vault 2.0.4)
+      helm:
+        releaseName: vault
+        valueFiles:
+          - $values/gitops/platform/core/vault/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/vault/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

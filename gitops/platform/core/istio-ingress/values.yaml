@@ -1,0 +1,58 @@
+# istio/gateway - PUBLIC ingress gateway (namespace istio-ingress, release istio-ingressgateway).
+# Only for public non-API traffic when explicitly needed; APIs/frontends are exposed by Kong.
+labels:
+  app: istio-ingressgateway
+  istio: ingressgateway
+
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.io/address-pool: public-pool
+  externalTrafficPolicy: Local          # preserve client source IP
+  ports:
+    - {name: status-port, port: 15021, protocol: TCP, targetPort: 15021}
+    - {name: http2, port: 80, protocol: TCP, targetPort: 80}
+    - {name: https, port: 443, protocol: TCP, targetPort: 443}
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  minAvailable: 1
+
+resources:
+  requests: {cpu: 500m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+priorityClassName: platform-critical
+
+nodeSelector:
+  workload-tier: edge
+tolerations:
+  - key: workload-tier
+    operator: Equal
+    value: edge
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: istio-ingressgateway
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app: istio-ingressgateway
+
+terminationGracePeriodSeconds: 60

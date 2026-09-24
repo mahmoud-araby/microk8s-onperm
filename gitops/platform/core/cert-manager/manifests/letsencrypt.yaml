@@ -1,0 +1,44 @@
+# Public certificates (api.example.com, <tenant>.api.example.com, app.example.com, keycloak.example.com ...).
+# HTTP01 challenges are answered through Kong (IngressClass "kong", public VIP). For wildcard public certs
+# (e.g. *.api.example.com) add a DNS01 solver for your DNS provider.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: platform-team@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: kong
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform-team@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: kong
+      # - selector:
+      #     dnsZones: [api.example.com]
+      #   dns01:
+      #     rfc2136:                                  # or cloudflare / route53 / azureDNS ...
+      #       nameserver: 10.0.0.53:53
+      #       tsigKeyName: cert-manager
+      #       tsigAlgorithm: HMACSHA512
+      #       tsigSecretSecretRef: {name: rfc2136-tsig, key: secret}

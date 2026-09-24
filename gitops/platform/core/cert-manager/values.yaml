@@ -1,0 +1,61 @@
+# cert-manager (jetstack/cert-manager chart)
+crds:
+  enabled: true
+  keep: true                      # never garbage-collect Certificates when the release is removed
+
+global:
+  priorityClassName: platform-critical
+  leaderElection:
+    namespace: cert-manager
+
+replicaCount: 2
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector:
+  kubernetes.io/os: linux
+  workload-tier: platform
+
+resources:
+  requests: {cpu: 50m, memory: 128Mi}
+  limits: {memory: 512Mi}
+
+# DNS01 (if enabled on letsencrypt-prod) checks propagation against these resolvers; adjust for on-prem DNS.
+# extraArgs:
+#   - --dns01-recursive-nameservers-only
+#   - --dns01-recursive-nameservers=10.0.0.53:53
+
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: true
+    interval: 60s
+
+webhook:
+  replicaCount: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector:
+    kubernetes.io/os: linux
+    workload-tier: platform
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+cainjector:
+  enabled: true
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector:
+    kubernetes.io/os: linux
+    workload-tier: platform
+  resources:
+    requests: {cpu: 20m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+startupapicheck:
+  enabled: false                  # Helm hook job; not useful under Argo CD (health checks cover it)

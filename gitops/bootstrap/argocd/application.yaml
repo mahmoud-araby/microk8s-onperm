@@ -1,0 +1,57 @@
+# Self-managed Argo CD. Ansible performs the first `helm install argocd` with ./values.yaml; this
+# Application then adopts the release (same release name "argocd", same values) and keeps it in sync.
+# Upgrade = bump targetRevision below in a MR (read the upstream upgrade notes first).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-25"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-cd
+      targetRevision: 10.9.2 # pin: verify latest before upgrade (app v3.5.3)
+      helm:
+        releaseName: argocd
+        valueFiles:
+          - $values/gitops/bootstrap/argocd/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    # ExternalSecrets for OIDC client secret + notification tokens (need ESO, wave -10 -> retried until ready)
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/bootstrap/argocd/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true          # Argo CD CRDs (ApplicationSet) exceed the last-applied annotation limit
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: argocd-secret
+      jsonPointers:
+        - /data/server.secretkey

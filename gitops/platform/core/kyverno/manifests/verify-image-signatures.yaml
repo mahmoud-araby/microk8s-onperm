@@ -1,0 +1,44 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    policies.kyverno.io/title: Verify cosign image signatures
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Images from Harbor must be signed by the CI pipeline (cosign, key pair in Vault
+      secret/platform/cosign). AUDIT mode for now: violations are reported in PolicyReports; switch
+      failureAction to Enforce once every service is signed.
+spec:
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tenant-*", "shared-services"]
+      verifyImages:
+        - imageReferences:
+            - "harbor.ops.example.local/*"
+          failureAction: Audit
+          mutateDigest: false
+          verifyDigest: false
+          required: false
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    # Public key of the CI signing key (replace with the real one; private key never leaves Vault)
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEREPLACEWITHREALCOSIGNPUBLICKEYxx
+                      xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx==
+                      -----END PUBLIC KEY-----
+                    rekor:
+                      ignoreTlog: true      # air-gapped / private signing, no public transparency log
+                    ctlog:
+                      ignoreSCT: true

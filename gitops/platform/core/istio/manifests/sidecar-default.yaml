@@ -1,0 +1,28 @@
+# Default Sidecar (root namespace, no selector => applies to every namespace without its own Sidecar).
+# Limits the config pushed to each Envoy (memory/CPU at scale) AND the reachable destinations:
+#   own namespace, shared-services, data tier, integration, observability, keycloak (JWKS), istio-system,
+#   istio-egress (egress routing + ServiceEntries for hybrid/external services).
+# Kong (namespace kong) has its own Sidecar with "*/*" because it routes to every tenant namespace.
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"
+        - "istio-egress/*"
+        - "shared-services/*"
+        - "data-postgres/*"
+        - "data-redis/*"
+        - "data-rabbitmq/*"
+        - "data-kafka/*"
+        - "integration/*"
+        - "observability/*"
+        - "logging/*"
+        - "keycloak/*"
+        - "legacy-vms/*"
+  outboundTrafficPolicy:
+    mode: REGISTRY_ONLY

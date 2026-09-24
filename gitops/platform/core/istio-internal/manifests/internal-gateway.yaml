@@ -1,0 +1,42 @@
+# The internal gateway used by ops tooling and by charts/microservice (istio.internalGateway.enabled ->
+# gateways: [istio-internal/internal-gateway]). TLS certificates come from cert-manager
+# (core/cert-manager/manifests/internal-gateway-certificates.yaml, issuer internal-ca).
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: internal-gateway
+  namespace: istio-internal
+spec:
+  selector:
+    istio: internal-gateway
+  servers:
+    # HTTP -> HTTPS redirect for every internal/ops host
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*.internal.example.local"
+        - "*.ops.example.local"
+      tls:
+        httpsRedirect: true
+    - port:
+        number: 443
+        name: https-internal
+        protocol: HTTPS
+      hosts:
+        - "*.internal.example.local"
+      tls:
+        mode: SIMPLE
+        credentialName: internal-wildcard-tls
+        minProtocolVersion: TLSV1_2
+    - port:
+        number: 443
+        name: https-ops
+        protocol: HTTPS
+      hosts:
+        - "*.ops.example.local"
+      tls:
+        mode: SIMPLE
+        credentialName: ops-wildcard-tls
+        minProtocolVersion: TLSV1_2

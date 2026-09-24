@@ -1,0 +1,105 @@
+# Longhorn (longhorn/longhorn chart) on MicroK8s.
+#
+# Placement model
+# - Disks/replicas live ONLY on platform + data nodes: those nodes are labelled
+#   node.longhorn.io/create-default-disk=true by Ansible, and createDefaultDiskLabeledNodes=true below.
+# - The Longhorn manager/CSI/instance-manager DaemonSets must run on every node that MOUNTS a volume
+#   (apps, observability, data ...), therefore they tolerate the data taint and are not node-selected.
+# - User-deployed components (UI, driver deployer) are pinned to platform nodes.
+#
+# StorageClasses are managed in ./manifests (longhorn + longhorn-db), so the chart's own class is disabled.
+
+global:
+  nodeSelector: {}
+  tolerations:
+    - key: workload-tier
+      operator: Equal
+      value: data
+      effect: NoSchedule
+
+persistence:
+  createStorageClass: false         # see manifests/storageclasses.yaml
+  defaultClass: false
+  defaultClassReplicaCount: 3
+  reclaimPolicy: Delete
+
+csi:
+  kubeletRootDir: /var/snap/microk8s/common/var/lib/kubelet   # MicroK8s kubelet root
+  attacherReplicaCount: 3
+  provisionerReplicaCount: 3
+  resizerReplicaCount: 3
+  snapshotterReplicaCount: 3
+
+preUpgradeChecker:
+  jobEnabled: false                 # Helm hook job; required off under Argo CD (upstream recommendation)
+
+defaultSettings:
+  createDefaultDiskLabeledNodes: true
+  defaultDataPath: /var/lib/longhorn
+  defaultReplicaCount: '{"v1":"3","v2":"3"}'
+  defaultDataLocality: best-effort
+  replicaSoftAntiAffinity: false            # never two replicas on the same node
+  replicaZoneSoftAntiAffinity: true
+  replicaAutoBalance: best-effort
+  storageOverProvisioningPercentage: 150
+  storageMinimalAvailablePercentage: 15
+  storageReservedPercentageForDefaultDisk: 25
+  guaranteedInstanceManagerCPU: '{"v1":"15","v2":"15"}'   # % of node CPU reserved per instance manager
+  priorityClass: platform-critical
+  taintToleration: workload-tier=data:NoSchedule
+  nodeDownPodDeletionPolicy: delete-both-statefulset-and-deployment-pod
+  nodeDrainPolicy: block-for-eviction-if-contains-last-replica
+  autoSalvage: true
+  autoDeletePodWhenVolumeDetachedUnexpectedly: true
+  concurrentAutomaticEngineUpgradePerNodeLimit: 1
+  concurrentReplicaRebuildPerNodeLimit: 2
+  backupConcurrentLimit: 4
+  restoreConcurrentLimit: 4
+  allowRecurringJobWhileVolumeDetached: true
+  recurringSuccessfulJobsHistoryLimit: 3
+  recurringFailedJobsHistoryLimit: 3
+  snapshotDataIntegrity: fast-check
+  snapshotDataIntegrityCronjob: "0 3 */7 * *"
+  fastReplicaRebuildEnabled: '{"v1":"true","v2":"true"}'
+  orphanResourceAutoDeletion: replica-data;instance
+  upgradeChecker: false
+  allowCollectingLonghornUsageMetrics: false
+  logLevel: Info
+
+# Default backup target (S3-compatible, e.g. MinIO in the backup VLAN, or NFS).
+# Credentials secret "longhorn-backup-s3" is rendered by manifests/backup-credentials.yaml from Vault.
+defaultBackupStore:
+  backupTarget: s3://longhorn-backups@us-east-1/microk8s-prod
+  # backupTarget: nfs://backup-nfs.example.local:/export/longhorn
+  backupTargetCredentialSecret: longhorn-backup-s3
+  pollInterval: 300
+
+longhornManager:
+  log:
+    format: json
+  priorityClass: platform-critical
+  tolerations:
+    - key: workload-tier
+      operator: Equal
+      value: data
+      effect: NoSchedule
+
+longhornDriver:
+  log:
+    format: json
+  priorityClass: platform-critical
+  nodeSelector:
+    workload-tier: platform
+
+longhornUI:
+  replicas: 2
+  priorityClass: platform-critical
+  nodeSelector:
+    workload-tier: platform
+
+ingress:
+  enabled: false                    # UI only via kubectl port-forward / ops VirtualService if needed
+
+metrics:
+  serviceMonitor:
+    enabled: true

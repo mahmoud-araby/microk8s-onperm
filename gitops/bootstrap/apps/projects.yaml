@@ -1,0 +1,37 @@
+# AppProjects (core, data, observability, tenants, apps). First wave so that every project referenced by
+# a component Application exists before the Applications are created.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: projects
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-30"
+  labels:
+    app.kubernetes.io/part-of: bootstrap
+    platform.example.com/category: bootstrap
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/bootstrap/projects
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

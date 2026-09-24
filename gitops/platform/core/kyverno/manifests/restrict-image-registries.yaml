@@ -1,0 +1,33 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    policies.kyverno.io/title: Restrict image registries
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Workload images must come from the internal Harbor (harbor.ops.example.local), where they are scanned
+      by Trivy and signed by CI. Public images are consumed through Harbor proxy-cache projects
+      (e.g. harbor.ops.example.local/dockerhub/...). The Istio sidecar image injected by istiod is allowed.
+spec:
+  background: true
+  rules:
+    - name: validate-registries
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tenant-*", "shared-services"]
+      validate:
+        failureAction: Enforce
+        message: "Unknown image registry. Images must be pulled from harbor.ops.example.local."
+        pattern:
+          spec:
+            containers:
+              - image: "harbor.ops.example.local/* | registry.istio.io/release/proxyv2:*"
+            =(initContainers):
+              - image: "harbor.ops.example.local/* | registry.istio.io/release/proxyv2:*"
+            =(ephemeralContainers):
+              - image: "harbor.ops.example.local/*"

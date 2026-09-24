@@ -1,0 +1,40 @@
+# Category app-of-apps: Networking, security and delivery components (docs/conventions.md waves -20..-5).
+# Picks up every gitops/platform/core/<component>/application.yaml (the include glob is matched against
+# the path relative to gitops/platform/core; values.yaml and manifests/ are NOT applied here - they are
+# consumed by the component Applications themselves).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-core
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+  labels:
+    app.kubernetes.io/part-of: bootstrap
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/platform/core
+    directory:
+      recurse: true
+      include: '*/application.yaml'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

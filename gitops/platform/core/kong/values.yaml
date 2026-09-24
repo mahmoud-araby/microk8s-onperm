@@ -1,0 +1,191 @@
+# Kong external API gateway - kong/ingress chart (KIC + Kong Gateway OSS, DB-less).
+# Release "kong" in namespace kong:
+#   kong-controller-*          Kong Ingress Controller (platform nodes), IngressClass "kong"
+#   kong-gateway-*             Kong proxies (edge nodes), Service kong-gateway-proxy = public VIP (public-pool)
+# Routing contract: api.example.com, <tenant>.api.example.com, app.example.com, <tenant>.app.example.com
+# (Ingress/KongPlugin objects are rendered by charts/microservice and charts/frontend).
+#
+# Istio: the proxies are injected. Inbound bypasses Envoy (includeInboundPorts: "") so client IP / TLS /
+# HTTP semantics stay with Kong; OUTBOUND to upstream services goes through the sidecar -> mTLS, Istio
+# retries/circuit breaking and Argo Rollouts canary weights apply. For canary weights to work Kong must send
+# traffic to the Service (not pod IPs): charts set ingress.kubernetes.io/service-upstream: "true".
+
+controller:
+  ingressController:
+    enabled: true
+    ingressClass: kong
+    env:
+      log_format: json
+      log_level: info
+      kong_admin_tls_skip_verify: true      # admin API uses the chart's self-signed cert (in-cluster only)
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {memory: 1Gi}
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  podAnnotations:
+    sidecar.istio.io/inject: "false"          # the controller only talks to the K8s API and Kong admin API
+  serviceMonitor:
+    enabled: true
+    trustCRDsExist: true
+
+gateway:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - {type: Percent, value: 100, periodSeconds: 30}
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - {type: Pods, value: 1, periodSeconds: 60}
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 60
+      - type: Resource
+        resource:
+          name: memory
+          target:
+            type: Utilization
+            averageUtilization: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: "66%"
+  priorityClassName: platform-critical
+  terminationGracePeriodSeconds: 60
+
+  resources:
+    requests: {cpu: "1", memory: 1Gi}
+    limits: {memory: 2Gi}
+
+  nodeSelector:
+    workload-tier: edge
+  tolerations:
+    - key: workload-tier
+      operator: Equal
+      value: edge
+      effect: NoSchedule
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+              app.kubernetes.io/instance: kong
+              app.kubernetes.io/component: app
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: gateway
+          app.kubernetes.io/instance: kong
+          app.kubernetes.io/component: app
+
+  # Merged with the chart defaults (kuma annotations etc.)
+  podAnnotations:
+    sidecar.istio.io/inject: "true"
+    traffic.sidecar.istio.io/includeInboundPorts: ""        # inbound bypasses Envoy
+    traffic.sidecar.istio.io/excludeOutboundPorts: "8444"   # admin API calls from KIC
+    proxy.istio.io/config: |
+      holdApplicationUntilProxyStarts: true
+      terminationDrainDuration: 30s
+    sidecar.istio.io/proxyCPU: 500m
+    sidecar.istio.io/proxyMemory: 256Mi
+  podLabels:
+    sidecar.istio.io/inject: "true"
+
+  proxy:
+    enabled: true
+    type: LoadBalancer
+    annotations:
+      metallb.io/address-pool: public-pool
+    externalTrafficPolicy: Local            # preserve client IP for ip-restriction / rate limiting / logs
+    http:
+      enabled: true
+      servicePort: 80
+      containerPort: 8000
+      parameters: [reuseport, "backlog=16384"]
+    tls:
+      enabled: true
+      servicePort: 443
+      containerPort: 8443
+      parameters: [http2, reuseport, "backlog=16384"]
+
+  admin:
+    enabled: true
+    type: ClusterIP
+    clusterIP: None
+    http:
+      enabled: false
+    tls:
+      enabled: true
+
+  status:
+    enabled: true
+    http:
+      enabled: true
+      containerPort: 8100
+
+  serviceMonitor:
+    enabled: true
+    trustCRDsExist: true
+    interval: 15s
+
+  env:
+    role: traditional
+    database: "off"
+    router_flavor: traditional
+    # ---- high-concurrency tuning
+    nginx_worker_processes: auto
+    nginx_main_worker_rlimit_nofile: "1048576"
+    nginx_events_worker_connections: "65536"
+    nginx_events_multi_accept: "on"
+    nginx_http_keepalive_requests: "10000"
+    nginx_http_keepalive_timeout: 75s
+    upstream_keepalive_pool_size: "1024"
+    upstream_keepalive_max_requests: "10000"
+    upstream_keepalive_idle_timeout: "60"
+    mem_cache_size: 512m
+    nginx_http_client_body_buffer_size: 32k
+    nginx_http_client_max_body_size: 10m
+    nginx_proxy_proxy_buffer_size: 16k
+    nginx_proxy_proxy_buffers: "16 16k"
+    # ---- observability
+    tracing_instrumentations: all
+    tracing_sampling_rate: "0.1"
+    proxy_access_log: /dev/stdout json_access
+    nginx_http_log_format: >-
+      json_access escape=json '{"time":"$time_iso8601","remote_addr":"$remote_addr","request_id":"$request_id",'
+      '"correlation_id":"$http_x_correlation_id","tenant_id":"$http_x_tenant_id","method":"$request_method",'
+      '"host":"$host","uri":"$request_uri","status":$status,"bytes_sent":$bytes_sent,'
+      '"request_time":$request_time,"upstream_addr":"$upstream_addr","upstream_status":"$upstream_status",'
+      '"upstream_response_time":"$upstream_response_time","user_agent":"$http_user_agent","traceparent":"$http_traceparent"}'
+    proxy_error_log: /dev/stderr
+    admin_access_log: "off"
+    log_level: notice
+    # ---- security
+    headers: "latency_tokens,X-Kong-Request-Id"   # hide "Server: kong/x.y" but keep latency headers
+    # Client IPs arrive directly (MetalLB + externalTrafficPolicy Local), so X-Forwarded-For is NOT trusted.
+    # If an L7 load balancer / WAF is put in front, set trusted_ips to ITS CIDRs only:
+    # trusted_ips: "198.51.100.0/28"
+    # real_ip_header: X-Forwarded-For
+    ssl_cipher_suite: intermediate
+    ssl_protocols: TLSv1.2 TLSv1.3
+    status_listen: 0.0.0.0:8100

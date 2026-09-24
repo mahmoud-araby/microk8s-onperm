@@ -1,0 +1,35 @@
+# Wrapper that applies gitops/bootstrap/argocd/application.yaml, i.e. the self-managed Argo CD
+# Application ("argocd", project core). Argo CD then upgrades/reconfigures itself from Git.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-self
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-25"
+  labels:
+    app.kubernetes.io/part-of: bootstrap
+    platform.example.com/category: bootstrap
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/bootstrap/argocd
+    directory:
+      include: application.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

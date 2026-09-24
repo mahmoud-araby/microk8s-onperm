@@ -1,0 +1,60 @@
+# BGP mode example (ECMP across all edge nodes instead of a single L2 leader per VIP).
+# To enable: set frrk8s.enabled=true in ../values.yaml, uncomment below, and remove the
+# L2Advertisements for the pools that should be announced via BGP.
+#
+# apiVersion: metallb.io/v1beta2
+# kind: BGPPeer
+# metadata:
+#   name: tor-a
+#   namespace: metallb-system
+# spec:
+#   myASN: 64512
+#   peerASN: 64501
+#   peerAddress: 10.10.0.1
+#   holdTime: 90s
+#   keepaliveTime: 30s
+#   bfdProfile: fast
+#   nodeSelectors:
+#     - matchLabels:
+#         workload-tier: edge
+#   passwordSecret:
+#     name: bgp-tor-a-password           # ExternalSecret from secret/platform/metallb
+#     namespace: metallb-system
+# ---
+# apiVersion: metallb.io/v1beta2
+# kind: BGPPeer
+# metadata:
+#   name: tor-b
+#   namespace: metallb-system
+# spec:
+#   myASN: 64512
+#   peerASN: 64501
+#   peerAddress: 10.10.0.2
+#   bfdProfile: fast
+#   nodeSelectors:
+#     - matchLabels:
+#         workload-tier: edge
+# ---
+# apiVersion: metallb.io/v1beta1
+# kind: BFDProfile
+# metadata:
+#   name: fast
+#   namespace: metallb-system
+# spec:
+#   receiveInterval: 300
+#   transmitInterval: 300
+#   detectMultiplier: 3
+# ---
+# apiVersion: metallb.io/v1beta1
+# kind: BGPAdvertisement
+# metadata:
+#   name: public-bgp
+#   namespace: metallb-system
+# spec:
+#   ipAddressPools: [public-pool]
+#   aggregationLength: 32
+#   localPref: 100
+#   communities: ["64512:100"]
+#   nodeSelectors:
+#     - matchLabels:
+#         workload-tier: edge

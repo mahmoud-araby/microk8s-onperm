@@ -1,0 +1,84 @@
+# Project "core": networking, security and delivery platform components (gitops/platform/core/*).
+# Cluster-admin level: CRDs, webhooks, ClusterRoles, StorageClasses, PriorityClasses, KongClusterPlugins,
+# Kyverno ClusterPolicies ... are all cluster-scoped, so the cluster whitelist is open. Only platform
+# admins can sync/modify these Applications.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: core
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Platform core - networking, security, delivery (Istio, Kong, MetalLB, cert-manager, Longhorn, Vault, ESO, Keycloak, Kyverno, Rollouts, KEDA, Velero, Harbor, Argo CD)
+  sourceRepos:
+    - https://github.com/mahmoud-araby/microk8s-onperm.git
+    - https://argoproj.github.io/argo-helm                        # argo-cd, argo-rollouts
+    - https://metallb.github.io/metallb
+    - https://charts.jetstack.io                                  # cert-manager
+    - https://charts.longhorn.io
+    - https://istio-release.storage.googleapis.com/charts         # base, istiod, cni, gateway
+    - https://charts.konghq.com                                   # kong/ingress
+    - https://helm.releases.hashicorp.com                         # vault
+    - https://charts.external-secrets.io
+    - https://codecentric.github.io/helm-charts                   # keycloakx
+    - https://kyverno.github.io/kyverno
+    - https://kedacore.github.io/charts
+    - https://vmware-tanzu.github.io/helm-charts                  # velero
+    - https://helm.goharbor.io
+    - https://prometheus-community.github.io/helm-charts          # prometheus-operator-crds (wave -20)
+  destinations:
+    - {server: https://kubernetes.default.svc, namespace: argocd}
+    - {server: https://kubernetes.default.svc, namespace: argo-rollouts}
+    - {server: https://kubernetes.default.svc, namespace: istio-system}
+    - {server: https://kubernetes.default.svc, namespace: istio-ingress}
+    - {server: https://kubernetes.default.svc, namespace: istio-internal}
+    - {server: https://kubernetes.default.svc, namespace: istio-egress}
+    - {server: https://kubernetes.default.svc, namespace: kong}
+    - {server: https://kubernetes.default.svc, namespace: metallb-system}
+    - {server: https://kubernetes.default.svc, namespace: cert-manager}
+    - {server: https://kubernetes.default.svc, namespace: longhorn-system}
+    - {server: https://kubernetes.default.svc, namespace: vault}
+    - {server: https://kubernetes.default.svc, namespace: external-secrets}
+    - {server: https://kubernetes.default.svc, namespace: keycloak}
+    - {server: https://kubernetes.default.svc, namespace: kyverno}
+    - {server: https://kubernetes.default.svc, namespace: velero}
+    - {server: https://kubernetes.default.svc, namespace: harbor}
+    - {server: https://kubernetes.default.svc, namespace: keda}
+    - {server: https://kubernetes.default.svc, namespace: legacy-vms}        # hybrid: WorkloadEntries for on-prem VMs
+    - {server: https://kubernetes.default.svc, namespace: kube-system}
+  clusterResourceWhitelist:
+    - {group: '*', kind: '*'}
+  namespaceResourceWhitelist:
+    - {group: '*', kind: '*'}
+  orphanedResources:
+    warn: true
+    ignore:
+      - {kind: Secret}          # cert-manager / ESO / Helm generated secrets
+      - {kind: ConfigMap, name: kube-root-ca.crt}
+      - {kind: ConfigMap, name: istio-ca-root-cert}
+  roles:
+    - name: platform-admin
+      description: Full control over core platform Applications
+      groups: [platform-admins]
+      policies:
+        - p, proj:core:platform-admin, applications, *, core/*, allow
+        - p, proj:core:platform-admin, logs, get, core/*, allow
+        - p, proj:core:platform-admin, exec, create, core/*, allow
+    - name: platform-operator
+      description: Read + sync (no delete / no config change)
+      groups: [platform-operators]
+      policies:
+        - p, proj:core:platform-operator, applications, get, core/*, allow
+        - p, proj:core:platform-operator, applications, sync, core/*, allow
+        - p, proj:core:platform-operator, applications, action/*, core/*, allow
+        - p, proj:core:platform-operator, logs, get, core/*, allow
+  # Freeze window example: no automated syncs of core during the Friday change freeze.
+  # syncWindows:
+  #   - kind: deny
+  #     schedule: "0 16 * * 5"
+  #     duration: 64h
+  #     applications: ['*']
+  #     manualSync: true

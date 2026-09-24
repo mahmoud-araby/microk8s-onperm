@@ -1,0 +1,91 @@
+# Recurring snapshot / backup jobs. Volumes join a group through the StorageClass recurringJobSelector
+# (or the label recurring-job-group.longhorn.io/<group>=enabled on the Longhorn Volume).
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: snapshot-hourly
+  namespace: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  task: snapshot
+  cron: "15 * * * *"
+  retain: 24
+  concurrency: 4
+  groups: [default-snapshots]
+  labels:
+    schedule: hourly
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: backup-daily
+  namespace: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  task: backup
+  cron: "0 2 * * *"
+  retain: 14
+  concurrency: 2
+  groups: [default-backups]
+  labels:
+    schedule: daily
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: backup-weekly
+  namespace: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  task: backup
+  cron: "0 4 * * 0"
+  retain: 8
+  concurrency: 2
+  groups: [default-backups]
+  labels:
+    schedule: weekly
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: db-snapshot-6h
+  namespace: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  task: snapshot
+  cron: "0 */6 * * *"
+  retain: 8
+  concurrency: 2
+  groups: [db-snapshots]
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: snapshot-cleanup-daily
+  namespace: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  task: snapshot-cleanup
+  cron: "30 3 * * *"
+  retain: 0
+  concurrency: 2
+  groups: [default-snapshots, db-snapshots]
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: filesystem-trim-weekly
+  namespace: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  task: filesystem-trim
+  cron: "0 5 * * 6"
+  retain: 0
+  concurrency: 2
+  groups: [default-snapshots]

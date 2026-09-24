@@ -1,0 +1,72 @@
+# Kyverno (kyverno/kyverno chart) - HA policy engine.
+crds:
+  install: true
+
+config:
+  # Never let admission webhooks block the platform's own control planes
+  webhooks:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: [kube-system, kyverno, istio-system, longhorn-system, metallb-system]
+
+features:
+  policyExceptions:
+    enabled: true
+    namespace: kyverno            # PolicyExceptions only from the kyverno namespace (platform-reviewed)
+  backgroundScan:
+    enabled: true
+    backgroundScanInterval: 1h
+
+admissionController:
+  replicas: 3
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  container:
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {memory: 1Gi}
+  serviceMonitor:
+    enabled: true
+
+backgroundController:
+  replicas: 2
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  serviceMonitor:
+    enabled: true
+  # generate rule "generate-tenant-default-networkpolicy" creates NetworkPolicies (already in the core role)
+
+cleanupController:
+  replicas: 2
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  serviceMonitor:
+    enabled: true
+
+reportsController:
+  replicas: 2
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  serviceMonitor:
+    enabled: true

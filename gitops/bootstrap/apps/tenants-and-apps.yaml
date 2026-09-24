@@ -1,0 +1,37 @@
+# ApplicationSets that stamp out tenant landing zones (charts/tenant, project "tenants", wave 10) and
+# service releases per tenant/version (charts/microservice + charts/frontend, project "apps", wave 20).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tenants-and-apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+  labels:
+    app.kubernetes.io/part-of: bootstrap
+    platform.example.com/category: tenants
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/apps/applicationsets
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

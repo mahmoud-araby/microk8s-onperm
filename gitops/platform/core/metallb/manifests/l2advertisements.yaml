@@ -1,0 +1,31 @@
+# L2 (ARP/NDP) announcements. Only edge nodes answer for the VIPs; with externalTrafficPolicy=Local on the
+# gateway Services the announcing node is always one that runs a gateway pod (client source IP preserved).
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: public-l2
+  namespace: metallb-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  ipAddressPools:
+    - public-pool
+  nodeSelectors:
+    - matchLabels:
+        workload-tier: edge
+  # interfaces: [ens224]                 # pin to the DMZ NIC if edge nodes are multi-homed
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: internal-l2
+  namespace: metallb-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  ipAddressPools:
+    - internal-pool
+  nodeSelectors:
+    - matchLabels:
+        workload-tier: edge
+  # interfaces: [ens192]

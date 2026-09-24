@@ -1,0 +1,40 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-default-labels
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    policies.kyverno.io/title: Add default and tenant labels
+    policies.kyverno.io/category: Multi-Tenancy
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/description: >-
+      Adds platform.example.com/tenant (derived from the namespace tenant-<name>, "shared" for
+      shared-services) and app.kubernetes.io/part-of when missing, so that cost allocation, logs
+      (Fluent Bit) and metrics can always be attributed to a tenant.
+spec:
+  background: false
+  rules:
+    - name: tenant-label-dedicated
+      match:
+        any:
+          - resources:
+              kinds: [Pod, Deployment, StatefulSet, Job, CronJob, Service, ConfigMap, PersistentVolumeClaim]
+              namespaces: ["tenant-*"]
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              +(platform.example.com/tenant): "{{ trim_prefix('{{request.namespace}}', 'tenant-') }}"
+              +(app.kubernetes.io/part-of): "tenant-{{ trim_prefix('{{request.namespace}}', 'tenant-') }}"
+    - name: tenant-label-shared
+      match:
+        any:
+          - resources:
+              kinds: [Pod, Deployment, StatefulSet, Job, CronJob, Service, ConfigMap, PersistentVolumeClaim]
+              namespaces: ["shared-services"]
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              +(platform.example.com/tenant): shared
+              +(app.kubernetes.io/part-of): shared-services

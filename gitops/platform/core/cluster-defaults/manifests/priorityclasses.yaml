@@ -1,0 +1,53 @@
+# Scheduling priorities (highest first). system-node-critical / system-cluster-critical (2e9) stay above.
+#   platform-critical 1000000000  Istio, Kong, Argo CD, cert-manager, Vault, ESO, Kyverno, Longhorn, MetalLB
+#   data-critical      900000000  (owned by gitops/platform/data/data-common - NOT declared here)
+#   apps-high             100000  latency-critical tenant services (checkout, auth, gateway-facing APIs)
+#   apps-default           10000  global default for every pod without a priorityClassName
+#   batch-low                100  batch / reporting / migrations; never preempts others
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/managed-by: argocd
+value: 1000000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: Platform control planes and gateways (mesh, ingress, GitOps, security, storage).
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: apps-high
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/managed-by: argocd
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: Latency-critical application workloads.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: apps-default
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/managed-by: argocd
+value: 10000
+globalDefault: true
+preemptionPolicy: PreemptLowerPriority
+description: Default priority for application workloads (global default).
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: batch-low
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/managed-by: argocd
+value: 100
+globalDefault: false
+preemptionPolicy: Never
+description: Batch and best-effort jobs; first to be preempted, never preempts.

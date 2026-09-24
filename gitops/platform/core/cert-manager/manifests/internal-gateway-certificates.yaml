@@ -1,0 +1,74 @@
+# Wildcard server certificates for the Istio internal gateway (istio-internal/internal-gateway).
+# The Gateway references them via credentialName, so they MUST live in the gateway namespace.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-wildcard
+  namespace: istio-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  secretName: internal-wildcard-tls
+  commonName: "*.internal.example.local"
+  dnsNames:
+    - "*.internal.example.local"
+    - internal.example.local
+  duration: 2160h                  # 90d
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature, key encipherment]
+  issuerRef:
+    name: internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ops-wildcard
+  namespace: istio-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  secretName: ops-wildcard-tls
+  commonName: "*.ops.example.local"
+  dnsNames:
+    - "*.ops.example.local"
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature, key encipherment]
+  issuerRef:
+    name: internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# CA bundle used by the internal gateway to VERIFY TLS upstreams (Vault) - DestinationRule credentialName.
+# Only ca.crt of this secret is used (SIMPLE TLS); the leaf itself is never presented.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: upstream-ca
+  namespace: istio-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  secretName: upstream-ca
+  commonName: istio-internal-upstream-client
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [client auth]
+  issuerRef:
+    name: internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

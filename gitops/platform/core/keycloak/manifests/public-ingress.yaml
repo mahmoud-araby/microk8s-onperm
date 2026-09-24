@@ -1,0 +1,55 @@
+# Public exposure of the realm endpoints (login pages, OIDC/OAuth2 endpoints, JWKS) through Kong at
+# https://keycloak.example.com. The admin console (/admin) and the management port are NOT exposed publicly
+# (admin console: keycloak.ops.example.local via the Istio internal gateway).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-public
+  namespace: keycloak
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    konghq.com/protocols: https
+    konghq.com/https-redirect-status-code: "301"
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "true"
+    konghq.com/plugins: keycloak-rate-limit
+spec:
+  ingressClassName: kong
+  tls:
+    - hosts: [keycloak.example.com]
+      secretName: keycloak-public-tls
+  rules:
+    - host: keycloak.example.com
+      http:
+        paths:
+          - path: /realms/
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /resources/
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+---
+# Brute-force / credential-stuffing guard on the public endpoints (Keycloak brute force detection is also on).
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: keycloak-rate-limit
+  namespace: keycloak
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: rate-limiting
+config:
+  second: 50
+  minute: 1500
+  limit_by: ip
+  policy: local
+  fault_tolerant: true
+  hide_client_headers: false

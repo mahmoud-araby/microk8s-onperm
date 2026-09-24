@@ -1,0 +1,66 @@
+# Project "data": stateful data services (gitops/platform/data/*): CloudNativePG, Redis + Sentinel,
+# RabbitMQ (cluster + messaging-topology operators), Strimzi Kafka, WSO2 Micro Integrator, hybrid
+# ServiceEntries for external data sources. May write any namespaced resource (incl. KafkaTopic,
+# KafkaUser, CNPG Database/Pooler/ScheduledBackup, RabbitMQ Vhost/User/Permission CRs) into the data-*
+# namespaces, plus the operator CRDs / cluster roles / webhooks.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: data
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Platform data services (Postgres, Redis, RabbitMQ, Kafka, Micro Integrator)
+  sourceRepos:
+    - https://github.com/mahmoud-araby/microk8s-onperm.git
+    - https://cloudnative-pg.github.io/charts                     # cloudnative-pg, plugin-barman-cloud
+    - https://strimzi.io/charts/
+    - https://charts.bitnami.com/bitnami
+    - registry-1.docker.io/bitnamicharts                         # OCI
+    - https://ot-container-kit.github.io/helm-charts
+    - https://dandydeveloper.github.io/charts                    # redis-ha
+    - https://github.com/rabbitmq/cluster-operator.git
+    - https://github.com/rabbitmq/messaging-topology-operator.git
+    - https://helm.wso2.com
+    - harbor.ops.example.local/charts                            # internally mirrored/OCI charts
+  destinations:
+    - {server: https://kubernetes.default.svc, namespace: 'data-*'}
+    - {server: https://kubernetes.default.svc, namespace: cnpg-system}
+    - {server: https://kubernetes.default.svc, namespace: rabbitmq-system}
+    - {server: https://kubernetes.default.svc, namespace: integration}
+    - {server: https://kubernetes.default.svc, namespace: default}           # data-common: cluster-scoped only (PriorityClass)
+    - {server: https://kubernetes.default.svc, namespace: istio-system}      # hybrid ServiceEntries (exportTo "*")
+    - {server: https://kubernetes.default.svc, namespace: istio-egress}      # hybrid egress routing
+  clusterResourceWhitelist:
+    - {group: '*', kind: '*'}
+  namespaceResourceWhitelist:
+    - {group: '*', kind: '*'}
+  orphanedResources:
+    warn: true
+    ignore:
+      - {kind: Secret}
+      - {kind: ConfigMap, name: kube-root-ca.crt}
+      - {kind: ConfigMap, name: istio-ca-root-cert}
+      - {group: postgresql.cnpg.io, kind: Backup}           # created by ScheduledBackup
+      - {group: kafka.strimzi.io, kind: KafkaTopic}         # tenant topics come from the tenant landing zones
+      - {group: kafka.strimzi.io, kind: KafkaUser}
+      - {group: postgresql.cnpg.io, kind: Database}
+      - {group: rabbitmq.com, kind: '*'}
+  roles:
+    - name: data-admin
+      description: Data platform engineers / DBAs
+      groups: [platform-admins, data-admins]
+      policies:
+        - p, proj:data:data-admin, applications, *, data/*, allow
+        - p, proj:data:data-admin, logs, get, data/*, allow
+        - p, proj:data:data-admin, exec, create, data/*, allow
+    - name: data-operator
+      groups: [platform-operators]
+      policies:
+        - p, proj:data:data-operator, applications, get, data/*, allow
+        - p, proj:data:data-operator, applications, sync, data/*, allow
+        - p, proj:data:data-operator, applications, action/*, data/*, allow
+        - p, proj:data:data-operator, logs, get, data/*, allow

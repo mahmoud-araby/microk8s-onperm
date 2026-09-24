@@ -1,0 +1,7 @@
+# istio/base: CRDs, cluster roles, default validating webhook.
+defaultRevision: default
+base:
+  enableCRDTemplates: true
+  enableIstioConfigCRDs: true
+global:
+  istioNamespace: istio-system

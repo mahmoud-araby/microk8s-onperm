@@ -1,0 +1,46 @@
+# MetalLB (metallb/metallb chart). L2 mode by default; FRR/BGP optional (see manifests/bgp-example.yaml).
+# NOTE: disable the MicroK8s "metallb" addon - MetalLB is managed here by Argo CD.
+crds:
+  enabled: true
+
+prometheus:
+  # ServiceMonitors for controller + speaker (Prometheus picks up every ServiceMonitor, docs/conventions.md)
+  serviceMonitor:
+    enabled: true
+  rbacPrometheus: true
+  serviceAccount: kube-prometheus-stack-prometheus
+  namespace: monitoring
+
+controller:
+  enabled: true
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  logLevel: info
+
+speaker:
+  enabled: true
+  priorityClassName: platform-critical
+  # Speakers must run where the VIPs are announced (edge nodes) - tolerate the edge/data taints so a
+  # speaker runs on every node; L2Advertisements restrict WHICH nodes answer ARP for each pool.
+  tolerations:
+    - key: workload-tier
+      operator: Equal
+      value: edge
+      effect: NoSchedule
+    - key: workload-tier
+      operator: Equal
+      value: data
+      effect: NoSchedule
+  tolerateMaster: true
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+# BGP backend (frr-k8s, the default BGP implementation since 0.15). Pure L2 mode does not need it; set
+# enabled: true (and apply manifests/bgp-example.yaml) to switch the pools to BGP/ECMP.
+frrk8s:
+  enabled: false

@@ -1,0 +1,25 @@
+# istio/cni node agent. global.platform=microk8s selects the MicroK8s CNI paths
+# (/var/snap/microk8s/current/opt/cni/bin, /var/snap/microk8s/current/args/cni-network) - set explicitly too.
+global:
+  platform: microk8s
+  logAsJson: true
+  priorityClassName: platform-critical
+cniBinDir: /var/snap/microk8s/current/opt/cni/bin
+cniConfDir: /var/snap/microk8s/current/args/cni-network
+chained: true
+excludeNamespaces:
+  - kube-system
+  - istio-system
+repair:
+  enabled: true
+  deletePods: true
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+# Must run on EVERY node that may host meshed pods (tolerate edge/data taints; control-plane too).
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+  - operator: Exists
+    effect: NoExecute
+  - key: CriticalAddonsOnly
+    operator: Exists

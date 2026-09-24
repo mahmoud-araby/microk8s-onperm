@@ -1,0 +1,286 @@
+# Platform-core namespaces. Component Applications also use CreateNamespace=true (no-op once these exist).
+# Data / observability / tenant namespaces - and shared-services, owned by the "shared" tenant landing zone
+# (charts/tenant, gitops/tenants/shared) - are owned by their own Applications and NOT declared here.
+# Pod Security: enforce as listed, always warn+audit at "restricted" to surface drift.
+# istio-cni is installed, so meshed namespaces do not need NET_ADMIN (no privileged istio-init).
+# NEVER label the gateway namespaces istio-injection=disabled: gateway pods are injected via the
+# object selector (sidecar.istio.io/inject=true) which requires the namespace label to be absent.
+# GitOps (not meshed; TLS terminates at istio-internal)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: argocd
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argo-rollouts
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: argo-rollouts
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# istio-cni node agent needs privileged + hostPath
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: istio-system
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# gateway pods are injected via the gateway template
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-ingress
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: istio-ingress
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-internal
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: istio-internal
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-egress
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: istio-egress
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# Kong proxy: inbound bypasses Envoy, outbound through the mesh
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kong
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: kong
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+    istio-injection: enabled
+---
+# speaker uses hostNetwork + NET_RAW
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: metallb-system
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: cert-manager
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# instance managers / CSI plugin are privileged
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: longhorn-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: longhorn-system
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: vault
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-secrets
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: external-secrets
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: keycloak
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: kyverno
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# node-agent mounts kubelet pod volumes (hostPath)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: velero
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: harbor
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keda
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: keda
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# hybrid: WorkloadGroups/WorkloadEntries of on-prem VMs joined to the mesh
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: legacy-vms
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+    argocd.argoproj.io/sync-options: Delete=false,Prune=false
+  labels:
+    kubernetes.io/metadata.name: legacy-vms
+    platform.example.com/category: core
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+    istio-injection: enabled

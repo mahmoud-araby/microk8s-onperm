@@ -1,0 +1,55 @@
+# istio/gateway - INTERNAL gateway (namespace istio-internal, release istio-internal-gateway).
+# Private VIP from MetalLB internal-pool. Serves *.internal.example.local and *.ops.example.local
+# (Gateway "istio-internal/internal-gateway" in ./manifests), east-west/hybrid traffic and the istiod
+# endpoints used by on-prem VMs joining the mesh (ports 15012/15017).
+labels:
+  app: istio-internal-gateway
+  istio: internal-gateway
+
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.io/address-pool: internal-pool
+  externalTrafficPolicy: Local
+  ports:
+    - {name: status-port, port: 15021, protocol: TCP, targetPort: 15021}
+    - {name: http2, port: 80, protocol: TCP, targetPort: 80}
+    - {name: https, port: 443, protocol: TCP, targetPort: 443}
+    - {name: tls-istiod, port: 15012, protocol: TCP, targetPort: 15012}      # VM mesh expansion: XDS/CA
+    - {name: tls-webhook, port: 15017, protocol: TCP, targetPort: 15017}
+    - {name: tls-mesh, port: 15443, protocol: TCP, targetPort: 15443}        # mTLS AUTO_PASSTHROUGH (VMs, multi-network)
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  minAvailable: 1
+
+resources:
+  requests: {cpu: 500m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+priorityClassName: platform-critical
+
+nodeSelector:
+  workload-tier: edge
+tolerations:
+  - key: workload-tier
+    operator: Equal
+    value: edge
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: istio-internal-gateway
+
+terminationGracePeriodSeconds: 60

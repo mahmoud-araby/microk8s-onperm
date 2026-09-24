@@ -1,0 +1,264 @@
+# Realm import (kc.sh start --import-realm): files in /opt/keycloak/data/import are imported ONCE when the
+# realm does not exist yet (existing realms are never overwritten - day-2 changes go through the admin API /
+# keycloak-config-cli). ${ENV_VAR} placeholders are resolved from the pod environment (client secrets).
+#
+# Realm "platform": staff/ops SSO for Argo CD, Grafana, Kibana, Harbor, Vault, Kiali. Its frontendUrl is the
+# internal host, so its issuer is https://keycloak.ops.example.local/realms/platform (tenant realms use
+# KC_HOSTNAME = https://keycloak.example.com, e.g. https://keycloak.example.com/realms/acme). Groups map to Argo CD RBAC
+# (platform-admins, platform-operators, platform-viewers, sre, <tenant>-admins/-devs/-viewers).
+# The client scope "tenant" puts the user attribute "tenant" into the access token as claim "tenant"
+# (Kong copies it into X-Tenant-ID, docs/conventions.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realms
+  namespace: keycloak
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  platform-realm.json: |
+    {
+      "realm": "platform",
+      "displayName": "Example Platform",
+      "enabled": true,
+      "attributes": {"frontendUrl": "https://keycloak.ops.example.local"},
+      "sslRequired": "external",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "bruteForceProtected": true,
+      "permanentLockout": false,
+      "failureFactor": 10,
+      "accessTokenLifespan": 300,
+      "ssoSessionIdleTimeout": 1800,
+      "ssoSessionMaxLifespan": 36000,
+      "passwordPolicy": "length(14) and notUsername and notEmail and passwordHistory(5)",
+      "otpPolicyType": "totp",
+      "eventsEnabled": true,
+      "adminEventsEnabled": true,
+      "adminEventsDetailsEnabled": true,
+      "groups": [
+        {"name": "platform-admins"},
+        {"name": "platform-operators"},
+        {"name": "platform-viewers"},
+        {"name": "platform-devs"},
+        {"name": "sre"},
+        {"name": "data-admins"},
+        {"name": "ci-bots"},
+        {"name": "acme-admins"}, {"name": "acme-devs"}, {"name": "acme-viewers"},
+        {"name": "globex-admins"}, {"name": "globex-devs"}, {"name": "globex-viewers"}
+      ],
+      "clientScopes": [
+        {
+          "name": "groups",
+          "description": "Group membership (short names) as claim 'groups'",
+          "protocol": "openid-connect",
+          "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+          "protocolMappers": [
+            {
+              "name": "groups",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "consentRequired": false,
+              "config": {
+                "full.path": "false",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "claim.name": "groups"
+              }
+            }
+          ]
+        },
+        {
+          "name": "tenant",
+          "description": "Tenant id of the user as claim 'tenant'",
+          "protocol": "openid-connect",
+          "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+          "protocolMappers": [
+            {
+              "name": "tenant",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "tenant",
+                "claim.name": "tenant",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "defaultDefaultClientScopes": ["profile", "email", "roles", "web-origins", "groups", "tenant"],
+      "clients": [
+        {
+          "clientId": "argocd",
+          "name": "Argo CD",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "${ARGOCD_CLIENT_SECRET}",
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "rootUrl": "https://argocd.ops.example.local",
+          "redirectUris": ["https://argocd.ops.example.local/auth/callback", "http://localhost:8085/auth/callback"],
+          "webOrigins": ["https://argocd.ops.example.local"],
+          "attributes": {"pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "https://argocd.ops.example.local/*"},
+          "defaultClientScopes": ["profile", "email", "groups"]
+        },
+        {
+          "clientId": "grafana",
+          "name": "Grafana",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "${GRAFANA_CLIENT_SECRET}",
+          "standardFlowEnabled": true,
+          "rootUrl": "https://grafana.ops.example.local",
+          "redirectUris": ["https://grafana.ops.example.local/login/generic_oauth"],
+          "webOrigins": ["https://grafana.ops.example.local"],
+          "defaultClientScopes": ["profile", "email", "groups"]
+        },
+        {
+          "clientId": "harbor",
+          "name": "Harbor",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "${HARBOR_CLIENT_SECRET}",
+          "standardFlowEnabled": true,
+          "rootUrl": "https://harbor.ops.example.local",
+          "redirectUris": ["https://harbor.ops.example.local/c/oidc/callback"],
+          "webOrigins": ["https://harbor.ops.example.local"],
+          "defaultClientScopes": ["profile", "email", "groups"]
+        },
+        {
+          "clientId": "vault",
+          "name": "Vault",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "${VAULT_CLIENT_SECRET}",
+          "standardFlowEnabled": true,
+          "rootUrl": "https://vault.ops.example.local",
+          "redirectUris": ["https://vault.ops.example.local/ui/vault/auth/oidc/oidc/callback", "http://localhost:8250/oidc/callback"],
+          "webOrigins": ["https://vault.ops.example.local"],
+          "defaultClientScopes": ["profile", "email", "groups"]
+        },
+        {
+          "clientId": "kiali",
+          "name": "Kiali",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "${KIALI_CLIENT_SECRET}",
+          "standardFlowEnabled": true,
+          "rootUrl": "https://kiali.ops.example.local",
+          "redirectUris": ["https://kiali.ops.example.local/kiali/*"],
+          "webOrigins": ["https://kiali.ops.example.local"],
+          "defaultClientScopes": ["profile", "email", "groups"]
+        }
+      ]
+    }
+---
+# Per-tenant realm TEMPLATE (not mounted into the import directory). Tenant onboarding renders it with the
+# tenant id (e.g. sed / keycloak-config-cli with TENANT_ID=acme) and applies it via the admin API.
+# Every token issued by realm <tenant> carries the hard-coded claim  tenant: <tenant>, which Kong forwards as
+# X-Tenant-ID. Kong validates tokens with the realm public key (KongConsumer per issuer, core/kong/manifests).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-tenant-realm-template
+  namespace: keycloak
+data:
+  tenant-realm-template.json: |
+    {
+      "realm": "${TENANT_ID}",
+      "displayName": "${TENANT_DISPLAY_NAME}",
+      "enabled": true,
+      "sslRequired": "external",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "resetPasswordAllowed": true,
+      "bruteForceProtected": true,
+      "accessTokenLifespan": 300,
+      "ssoSessionIdleTimeout": 1800,
+      "ssoSessionMaxLifespan": 36000,
+      "passwordPolicy": "length(12) and notUsername and passwordHistory(3)",
+      "attributes": {"frontendUrl": "https://keycloak.example.com"},
+      "groups": [
+        {"name": "${TENANT_ID}-admins"},
+        {"name": "${TENANT_ID}-devs"},
+        {"name": "${TENANT_ID}-viewers"},
+        {"name": "${TENANT_ID}-users"}
+      ],
+      "clientScopes": [
+        {
+          "name": "tenant",
+          "description": "Hard-coded tenant claim for every token of this realm",
+          "protocol": "openid-connect",
+          "attributes": {"include.in.token.scope": "false", "display.on.consent.screen": "false"},
+          "protocolMappers": [
+            {
+              "name": "tenant",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-hardcoded-claim-mapper",
+              "consentRequired": false,
+              "config": {
+                "claim.name": "tenant",
+                "claim.value": "${TENANT_ID}",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "access.tokenResponse.claim": "false"
+              }
+            }
+          ]
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+          "protocolMappers": [
+            {
+              "name": "groups",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "config": {"full.path": "false", "id.token.claim": "true", "access.token.claim": "true", "claim.name": "groups"}
+            }
+          ]
+        }
+      ],
+      "defaultDefaultClientScopes": ["profile", "email", "roles", "web-origins", "tenant", "groups"],
+      "clients": [
+        {
+          "clientId": "web",
+          "name": "${TENANT_DISPLAY_NAME} web app",
+          "protocol": "openid-connect",
+          "publicClient": true,
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "rootUrl": "https://${TENANT_ID}.app.example.com",
+          "redirectUris": ["https://${TENANT_ID}.app.example.com/*"],
+          "webOrigins": ["https://${TENANT_ID}.app.example.com"],
+          "attributes": {"pkce.code.challenge.method": "S256"}
+        },
+        {
+          "clientId": "api",
+          "name": "${TENANT_DISPLAY_NAME} API (resource server / audience)",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "bearerOnly": true
+        },
+        {
+          "clientId": "m2m",
+          "name": "${TENANT_DISPLAY_NAME} machine-to-machine",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "serviceAccountsEnabled": true,
+          "standardFlowEnabled": false,
+          "secret": "${TENANT_M2M_CLIENT_SECRET}"
+        }
+      ]
+    }

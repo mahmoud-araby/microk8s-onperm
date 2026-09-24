@@ -1,0 +1,92 @@
+# Argo Rollouts (argo/argo-rollouts chart). Canary releases with Istio weighted routing (VirtualService
+# weights are ignored by Argo CD diffing, see gitops/bootstrap/argocd/values.yaml) and Prometheus analysis
+# (AnalysisTemplates rendered by charts/microservice).
+installCRDs: true
+keepCRDs: true
+
+controller:
+  replicas: 2                    # leader election; second replica is a hot standby
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  pdb:
+    enabled: true
+    minAvailable: 1
+  logging:
+    format: json
+    level: info
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+providerRBAC:
+  enabled: true
+  providers:
+    istio: true
+    smi: false
+    ambassador: false
+    awsLoadBalancerController: false
+    awsAppMesh: false
+    traefik: false
+    apisix: false
+    contour: false
+    glooPlatform: false
+    gatewayAPI: false
+
+dashboard:
+  enabled: true
+  readonly: false                # promote/abort from the UI (network-restricted, see ops VirtualService)
+  replicas: 2
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  service:
+    type: ClusterIP
+    port: 3100
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# Notifications: argo-rollouts-notification-configmap. Built-in triggers (on-rollout-completed,
+# on-rollout-step-completed, on-rollout-updated, on-rollout-aborted, on-analysis-run-failed ...)
+# are subscribed per Rollout with annotations, e.g.
+#   notifications.argoproj.io/subscribe.on-rollout-aborted.slack: deployments
+notifications:
+  configmap:
+    create: true
+  secret:
+    create: false                # "argo-rollouts-notification-secret" rendered by ExternalSecret (manifests)
+  notifiers:
+    service.slack: |
+      token: $slack-token
+  templates:
+    template.rollout-aborted: |
+      message: |
+        :rotating_light: Rollout *{{.rollout.metadata.namespace}}/{{.rollout.metadata.name}}* was ABORTED (analysis or manual). Stable version keeps serving.
+    template.rollout-completed: |
+      message: |
+        :white_check_mark: Rollout *{{.rollout.metadata.namespace}}/{{.rollout.metadata.name}}* completed - new version is 100% live.
+    template.analysis-run-failed: |
+      message: |
+        :x: Analysis failed for *{{.rollout.metadata.namespace}}/{{.rollout.metadata.name}}*: {{.analysisRun.status.message}}
+  triggers:
+    trigger.on-rollout-aborted: |
+      - send: [rollout-aborted]
+    trigger.on-rollout-completed: |
+      - send: [rollout-completed]
+    trigger.on-analysis-run-failed: |
+      - send: [analysis-run-failed]
+  subscriptions:
+    # Global: every aborted rollout / failed analysis goes to #deployments
+    - recipients:
+        - slack:deployments
+      triggers:
+        - on-rollout-aborted
+        - on-analysis-run-failed

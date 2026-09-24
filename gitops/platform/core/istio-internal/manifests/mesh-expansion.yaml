@@ -1,0 +1,75 @@
+# Mesh expansion for on-prem VMs (see core/hybrid/README.md): VMs reach istiod (XDS + CA) and meshed
+# services through the internal VIP over the site-to-site VPN / datacenter network.
+# Ports 15012 (istiod XDS/CA) and 15017 (webhook) are TLS-passthrough to istiod; 15443 is the mTLS
+# AUTO_PASSTHROUGH port for VM <-> pod traffic when the VMs are modelled as a separate network.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: istiod-gateway
+  namespace: istio-internal
+spec:
+  selector:
+    istio: internal-gateway
+  servers:
+    - port:
+        name: tls-istiod
+        number: 15012
+        protocol: TLS
+      tls:
+        mode: PASSTHROUGH
+      hosts:
+        - "*"
+    - port:
+        name: tls-istiodwebhook
+        number: 15017
+        protocol: TLS
+      tls:
+        mode: PASSTHROUGH
+      hosts:
+        - "*"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: istiod-vs
+  namespace: istio-internal
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - istiod-gateway
+  tls:
+    - match:
+        - port: 15012
+          sniHosts: ["*"]
+      route:
+        - destination:
+            host: istiod.istio-system.svc.cluster.local
+            port:
+              number: 15012
+    - match:
+        - port: 15017
+          sniHosts: ["*"]
+      route:
+        - destination:
+            host: istiod.istio-system.svc.cluster.local
+            port:
+              number: 443
+---
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: cross-network-gateway
+  namespace: istio-internal
+spec:
+  selector:
+    istio: internal-gateway
+  servers:
+    - port:
+        number: 15443
+        name: tls
+        protocol: TLS
+      tls:
+        mode: AUTO_PASSTHROUGH
+      hosts:
+        - "*.local"

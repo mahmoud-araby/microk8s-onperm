@@ -1,0 +1,40 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-probes
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    policies.kyverno.io/title: Require liveness and readiness probes
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Application containers must define liveness and readiness probes (/health/live, /health/ready).
+      The injected istio-proxy container is exempt.
+spec:
+  background: true
+  rules:
+    - name: validate-probes
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tenant-*", "shared-services"]
+      preconditions:
+        all:
+          - key: "{{ request.operation || 'BACKGROUND' }}"
+            operator: AnyIn
+            value: [CREATE, UPDATE, BACKGROUND]
+      validate:
+        failureAction: Enforce
+        message: "Liveness and readiness probes are required for every application container."
+        foreach:
+          - list: "request.object.spec.containers[?name != 'istio-proxy']"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.livenessProbe || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.readinessProbe || '' }}"
+                    operator: Equals
+                    value: ""

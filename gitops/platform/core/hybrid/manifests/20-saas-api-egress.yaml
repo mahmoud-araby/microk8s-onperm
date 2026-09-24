@@ -1,0 +1,170 @@
+# (b) External cloud SaaS API (placeholder: api.payments-saas.example.com) routed through the Istio EGRESS
+#     gateway with TLS ORIGINATION:
+#       app --(plain HTTP :80, in-mesh mTLS)--> sidecar --(mTLS ISTIO_MUTUAL)--> istio-egressgateway
+#           --(TLS 1.2+ originated, SNI, verified)--> api.payments-saas.example.com:443
+#     Benefits: single audited exit IP (edge nodes), mesh-level retries/timeouts/circuit breaking, access
+#     logs + traces for every call, and the application never handles the provider's TLS.
+#     Applications call  http://api.payments-saas.example.com  (no TLS in the app).
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: saas-payments-api
+  namespace: istio-egress
+spec:
+  hosts:
+    - api.payments-saas.example.com
+  exportTo: ["*"]
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 80
+      name: http
+      protocol: HTTP
+    - number: 443
+      name: https
+      protocol: HTTPS
+---
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: egress-saas-payments
+  namespace: istio-egress
+spec:
+  selector:
+    istio: egressgateway
+  servers:
+    - port:
+        number: 80
+        name: https-mtls
+        protocol: HTTPS
+      hosts:
+        - api.payments-saas.example.com
+      tls:
+        mode: ISTIO_MUTUAL              # sidecar -> egress gateway is mesh mTLS
+---
+# sidecar -> egress gateway (subset carries the mTLS + SNI settings)
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: egressgateway-for-saas-payments
+  namespace: istio-egress
+spec:
+  host: istio-egressgateway.istio-egress.svc.cluster.local
+  exportTo: ["*"]
+  subsets:
+    - name: saas-payments
+      trafficPolicy:
+        loadBalancer:
+          simple: ROUND_ROBIN
+        portLevelSettings:
+          - port:
+              number: 80
+            tls:
+              mode: ISTIO_MUTUAL
+              sni: api.payments-saas.example.com
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: saas-payments-via-egress
+  namespace: istio-egress
+spec:
+  hosts:
+    - api.payments-saas.example.com
+  exportTo: ["*"]
+  gateways:
+    - mesh
+    - istio-egress/egress-saas-payments
+  http:
+    # 1) inside the mesh: every sidecar sends the call to the egress gateway
+    - name: mesh-to-egress
+      match:
+        - gateways: [mesh]
+          port: 80
+      route:
+        - destination:
+            host: istio-egressgateway.istio-egress.svc.cluster.local
+            subset: saas-payments
+            port:
+              number: 80
+    # 2) on the egress gateway: originate TLS towards the provider, with resilience policies
+    - name: egress-to-saas
+      match:
+        - gateways: [istio-egress/egress-saas-payments]
+          port: 80
+      timeout: 10s
+      retries:
+        attempts: 3
+        perTryTimeout: 3s
+        retryOn: connect-failure,refused-stream,reset,unavailable,gateway-error,retriable-status-codes
+        retryRemoteLocalities: true
+      route:
+        - destination:
+            host: api.payments-saas.example.com
+            port:
+              number: 443
+---
+# egress gateway -> SaaS: TLS origination + connection pool + circuit breaker (outlier detection)
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: saas-payments-tls-origination
+  namespace: istio-egress
+spec:
+  host: api.payments-saas.example.com
+  exportTo: ["*"]
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_REQUEST
+    connectionPool:
+      tcp:
+        maxConnections: 1000
+        connectTimeout: 2s
+        tcpKeepalive:
+          time: 120s
+          interval: 30s
+      http:
+        http1MaxPendingRequests: 1000
+        http2MaxRequests: 2000
+        maxRequestsPerConnection: 0
+        maxRetries: 50                    # cap concurrent retries -> no retry storms against the provider
+        idleTimeout: 60s
+    outlierDetection:                     # circuit breaker: eject failing provider endpoints
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 100
+    portLevelSettings:
+      - port:
+          number: 443
+        tls:
+          mode: SIMPLE
+          sni: api.payments-saas.example.com
+          # verify the provider certificate against the system CA bundle of the proxy image;
+          # for providers with a private CA use credentialName: saas-payments-ca (secret in istio-egress)
+---
+# Only the payments services (any tenant) may use this exit (evaluated on the egress gateway).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: egress-saas-payments-callers
+  namespace: istio-egress
+spec:
+  selector:
+    matchLabels:
+      istio: egressgateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["shared-services", "tenant-*", "integration"]
+      to:
+        - operation:
+            hosts: ["api.payments-saas.example.com", "api.payments-saas.example.com:*"]
+    # cloud Kafka exit (TLS passthrough, port 9093). Passthrough traffic carries no mesh identity, so
+    # callers are restricted by NetworkPolicy (only data-kafka / integration may reach the egress on 9093)
+    # and by the Kafka ACLs of the cloud provider.
+    - to:
+        - operation:
+            ports: ["9093"]

@@ -1,0 +1,178 @@
+# HashiCorp Vault (hashicorp/vault chart) - HA with integrated raft storage, TLS everywhere.
+# Consumption model: External Secrets Operator (ClusterSecretStore "vault-backend"); the agent injector
+# and CSI provider are disabled.
+#
+# Day-1 (Ansible role / runbook, once):  vault operator init -> store recovery keys offline (HSM/escrow),
+# enable kv-v2 at "secret", kubernetes auth (role "external-secrets" bound to SA external-secrets/external-secrets),
+# OIDC auth for humans (Keycloak realm platform, vault.ops.example.local), audit device (file on auditStorage).
+
+global:
+  enabled: true
+  tlsDisable: false
+  serverTelemetry:
+    prometheusOperator: true
+
+injector:
+  enabled: false                    # we use External Secrets Operator instead
+
+csi:
+  enabled: false
+
+server:
+  enabled: true
+  logLevel: info
+  logFormat: json
+  priorityClassName: platform-critical
+  updateStrategyType: OnDelete      # raft: roll pods one by one (runbook), never all at once
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {memory: 2Gi}
+  nodeSelector:
+    workload-tier: platform
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "vault.name" . }}
+              app.kubernetes.io/instance: "{{ .Release.Name }}"
+              component: server
+          topologyKey: kubernetes.io/hostname
+
+  # TLS material from cert-manager (manifests/certificate.yaml, issuer internal-ca)
+  extraVolumes:
+    - type: secret
+      name: vault-server-tls        # mounted at /vault/userconfig/vault-server-tls
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/userconfig/vault-server-tls/ca.crt
+    VAULT_TLSCERT: /vault/userconfig/vault-server-tls/tls.crt
+    VAULT_TLSKEY: /vault/userconfig/vault-server-tls/tls.key
+    VAULT_SKIP_VERIFY: "false"
+
+  readinessProbe:
+    enabled: true
+    path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+  livenessProbe:
+    enabled: true
+    path: /v1/sys/health?standbyok=true
+    initialDelaySeconds: 60
+
+  # Raft replicates data itself -> longhorn-db (1 replica, strict-local) per docs/conventions.md
+  dataStorage:
+    enabled: true
+    size: 20Gi
+    storageClass: longhorn-db
+    accessMode: ReadWriteOnce
+  auditStorage:
+    enabled: true
+    size: 20Gi
+    storageClass: longhorn-db
+    accessMode: ReadWriteOnce
+
+  service:
+    enabled: true
+    port: 8200
+    targetPort: 8200
+
+  ha:
+    enabled: true
+    replicas: 3
+    apiAddr: https://$(HOSTNAME).vault-internal:8200   # matches *.vault-internal SAN of the certificate
+    disruptionBudget:
+      enabled: true
+      maxUnavailable: 1
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = true
+        cluster_name = "platform-vault"
+        disable_mlock = true
+
+        listener "tcp" {
+          address            = "[::]:8200"
+          cluster_address    = "[::]:8201"
+          tls_cert_file      = "/vault/userconfig/vault-server-tls/tls.crt"
+          tls_key_file       = "/vault/userconfig/vault-server-tls/tls.key"
+          tls_client_ca_file = "/vault/userconfig/vault-server-tls/ca.crt"
+          tls_min_version    = "tls12"
+          # Prometheus scrapes /v1/sys/metrics without a token
+          telemetry {
+            unauthenticated_metrics_access = "true"
+          }
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+          retry_join {
+            leader_api_addr         = "https://vault-0.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-server-tls/ca.crt"
+            leader_tls_servername   = "vault-0.vault-internal"
+          }
+          retry_join {
+            leader_api_addr         = "https://vault-1.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-server-tls/ca.crt"
+            leader_tls_servername   = "vault-1.vault-internal"
+          }
+          retry_join {
+            leader_api_addr         = "https://vault-2.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/vault-server-tls/ca.crt"
+            leader_tls_servername   = "vault-2.vault-internal"
+          }
+          autopilot {
+            cleanup_dead_servers            = "true"
+            last_contact_threshold          = "10s"
+            dead_server_last_contact_threshold = "10m"
+            min_quorum                      = 3
+            server_stabilization_time       = "10s"
+          }
+        }
+
+        # ---- Auto-unseal (choose ONE; without it every pod restart needs manual unseal with Shamir keys)
+        # (1) Transit auto-unseal against a small, separately operated "unseal" Vault (DR site / VM):
+        # seal "transit" {
+        #   address         = "https://vault-unseal.example.local:8200"
+        #   key_name        = "platform-autounseal"
+        #   mount_path      = "transit/"
+        #   tls_ca_cert     = "/vault/userconfig/vault-server-tls/ca.crt"
+        #   # token via env VAULT_TOKEN from Secret vault-unseal-token (extraSecretEnvironmentVars)
+        # }
+        # (2) HSM (PKCS#11, Vault Enterprise):
+        # seal "pkcs11" {
+        #   lib            = "/vault/userconfig/hsm/libCryptoki2_64.so"
+        #   slot           = "0"
+        #   key_label      = "vault-hsm-key"
+        #   hmac_key_label = "vault-hsm-hmac-key"
+        #   # pin via env VAULT_HSM_PIN
+        # }
+
+        service_registration "kubernetes" {}
+
+        telemetry {
+          prometheus_retention_time = "30s"
+          disable_hostname          = true
+        }
+
+  # Uncomment for transit auto-unseal token
+  # extraSecretEnvironmentVars:
+  #   - envName: VAULT_TOKEN
+  #     secretName: vault-unseal-token
+  #     secretKey: token
+
+ui:
+  enabled: true
+  serviceType: ClusterIP             # exposed as vault.ops.example.local through the Istio internal gateway
+  externalPort: 8200
+
+serverTelemetry:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    tlsConfig:
+      ca:
+        secret:
+          name: vault-server-tls
+          key: ca.crt
+      serverName: vault.vault.svc
+  prometheusRules:
+    enabled: false                   # alerts are owned by gitops/platform/observability

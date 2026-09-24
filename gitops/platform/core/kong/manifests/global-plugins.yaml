@@ -1,0 +1,153 @@
+# Global Kong plugins. A KongClusterPlugin labelled global: "true" applies to every route of the "kong"
+# IngressClass. Per-service plugins (jwt, rate-limiting with Redis, request-transformer setting
+# X-Tenant-ID from the JWT "tenant" claim ...) are rendered by charts/microservice and charts/frontend.
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: global-prometheus
+  annotations:
+    kubernetes.io/ingress.class: kong
+  labels:
+    global: "true"
+plugin: prometheus
+config:
+  per_consumer: false            # bounded cardinality (tenants are a label via the route/service name)
+  status_code_metrics: true
+  latency_metrics: true
+  bandwidth_metrics: true
+  upstream_health_metrics: true
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: global-correlation-id
+  annotations:
+    kubernetes.io/ingress.class: kong
+  labels:
+    global: "true"
+plugin: correlation-id
+config:
+  header_name: X-Correlation-ID  # docs/conventions.md microservice contract
+  generator: uuid#
+  echo_downstream: true
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: global-opentelemetry
+  annotations:
+    kubernetes.io/ingress.class: kong
+  labels:
+    global: "true"
+plugin: opentelemetry
+config:
+  traces_endpoint: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+  logs_endpoint: http://otel-collector.observability.svc.cluster.local:4318/v1/logs
+  resource_attributes:
+    service.name: kong-gateway
+    deployment.environment: production
+  propagation:
+    extract: [w3c, b3, jaeger]
+    inject: [preserve, w3c]
+    default_format: w3c
+  sampling_rate: 0.1             # aligned with the mesh (Telemetry 10%)
+  batch_span_count: 200
+  batch_flush_delay: 3
+  connect_timeout: 1000
+  send_timeout: 5000
+---
+# Reject known bad bots / scanners (default block list + custom deny patterns).
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: global-bot-detection
+  annotations:
+    kubernetes.io/ingress.class: kong
+  labels:
+    global: "true"
+plugin: bot-detection
+config:
+  deny:
+    - "(?i)sqlmap"
+    - "(?i)nikto"
+    - "(?i)masscan"
+    - "(?i)zgrab"
+---
+# Protect upstreams from oversized payloads (services may lower it per route).
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: global-request-size-limiting
+  annotations:
+    kubernetes.io/ingress.class: kong
+  labels:
+    global: "true"
+plugin: request-size-limiting
+config:
+  allowed_payload_size: 10
+  size_unit: megabytes
+  require_content_length: false
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: global-cors
+  annotations:
+    kubernetes.io/ingress.class: kong
+  labels:
+    global: "true"
+plugin: cors
+config:
+  origins:
+    - https://app.example.com
+    - "https://[a-z0-9-]+\\.app\\.example\\.com"     # tenant frontends (regex)
+  methods: [GET, HEAD, PUT, PATCH, POST, DELETE, OPTIONS]
+  headers: [Accept, Authorization, Content-Type, X-Correlation-ID, X-API-Version, traceparent, tracestate]
+  exposed_headers: [X-Correlation-ID, X-RateLimit-Remaining-Minute, Retry-After]
+  credentials: true
+  max_age: 3600
+  preflight_continue: false
+---
+# NOT global: attach with  konghq.com/plugins: ops-ip-restriction  to admin / partner routes.
+apiVersion: configuration.konghq.com/v1
+kind: KongClusterPlugin
+metadata:
+  name: ops-ip-restriction
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: ip-restriction
+config:
+  allow:
+    - 10.0.0.0/8                 # corporate + VPN (placeholder)
+    - 198.51.100.0/24            # partner egress range (placeholder)
+  status: 403
+  message: Forbidden
+# ---
+# Enterprise alternative to the per-service OSS rate limiting: a global, sliding-window, Redis-synchronised
+# limit per consumer/IP. Requires Kong Enterprise (rate-limiting-advanced is not in Kong OSS).
+# apiVersion: configuration.konghq.com/v1
+# kind: KongClusterPlugin
+# metadata:
+#   name: global-rate-limiting-advanced
+#   annotations:
+#     kubernetes.io/ingress.class: kong
+#   labels:
+#     global: "true"
+# plugin: rate-limiting-advanced
+# config:
+#   identifier: consumer            # falls back to IP for anonymous traffic
+#   window_type: sliding
+#   window_size: [1, 60]
+#   limit: [200, 6000]
+#   sync_rate: 0.5
+#   strategy: redis
+#   namespace: global
+#   redis:
+#     sentinel_master: mymaster
+#     sentinel_role: master
+#     sentinel_nodes:
+#       - host: redis-sentinel.data-redis.svc.cluster.local
+#         port: 26379
+#     password: "{vault://env/redis-password}"
+#     database: 4
+#   hide_client_headers: false

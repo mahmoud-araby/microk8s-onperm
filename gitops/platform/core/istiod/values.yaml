@@ -1,0 +1,113 @@
+# istio/istiod - HA control plane.
+global:
+  platform: microk8s
+  istioNamespace: istio-system
+  logAsJson: true
+  priorityClassName: platform-critical
+  defaultPodDisruptionBudget:
+    enabled: true
+  proxy:
+    # Sidecar defaults (override per workload with sidecar.istio.io/proxyCPU etc.)
+    resources:
+      requests: {cpu: 50m, memory: 96Mi}
+      limits: {memory: 512Mi}
+    logLevel: warning
+    componentLogLevel: "misc:error"
+
+pdb:
+  minAvailable: 2
+
+pilot:
+  replicaCount: 3
+  autoscaleEnabled: true
+  autoscaleMin: 3
+  autoscaleMax: 6
+  cpu:
+    targetAverageUtilization: 70
+  rollingMaxSurge: 100%
+  rollingMaxUnavailable: 0
+  resources:
+    requests: {cpu: 500m, memory: 2Gi}
+    limits: {memory: 4Gi}
+  traceSampling: 10.0
+  cni:
+    enabled: true                  # istio-cni app (wave -10) - no privileged istio-init containers
+  nodeSelector:
+    workload-tier: platform
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: istiod
+  env:
+    PILOT_ENABLE_STATUS: "true"
+    # Keep push load bounded at 1M-user scale (many Services/VirtualServices across tenants)
+    PILOT_DEBOUNCE_AFTER: 150ms
+    PILOT_DEBOUNCE_MAX: 5s
+    PILOT_PUSH_THROTTLE: "150"
+    # Auto-allocate VIPs for ServiceEntries without addresses (TCP ServiceEntries: legacy SQL Server, Kafka)
+    PILOT_ENABLE_IP_AUTOALLOCATE: "true"
+
+sidecarInjectorWebhook:
+  rewriteAppHTTPProbe: true
+  enableNamespacesByDefault: false
+
+telemetry:
+  enabled: true
+  v2:
+    enabled: true
+
+meshConfig:
+  # ---- access logs: JSON on stdout (shipped by Fluent Bit -> logs-<namespace>)
+  accessLogFile: /dev/stdout
+  accessLogEncoding: JSON
+  accessLogFormat: |
+    {"start_time":"%START_TIME%","method":"%REQ(:METHOD)%","path":"%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%","protocol":"%PROTOCOL%","response_code":"%RESPONSE_CODE%","response_flags":"%RESPONSE_FLAGS%","response_code_details":"%RESPONSE_CODE_DETAILS%","bytes_received":"%BYTES_RECEIVED%","bytes_sent":"%BYTES_SENT%","duration":"%DURATION%","upstream_service_time":"%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%","x_forwarded_for":"%REQ(X-FORWARDED-FOR)%","user_agent":"%REQ(USER-AGENT)%","request_id":"%REQ(X-REQUEST-ID)%","correlation_id":"%REQ(X-CORRELATION-ID)%","tenant_id":"%REQ(X-TENANT-ID)%","traceparent":"%REQ(TRACEPARENT)%","authority":"%REQ(:AUTHORITY)%","upstream_host":"%UPSTREAM_HOST%","upstream_cluster":"%UPSTREAM_CLUSTER%","downstream_peer":"%DOWNSTREAM_PEER_URI_SAN%","route_name":"%ROUTE_NAME%"}
+
+  # ---- tracing: OpenTelemetry to the collector (sampling set by the Telemetry resource in core/istio)
+  enableTracing: true
+  extensionProviders:
+    - name: otel-tracing
+      opentelemetry:
+        service: otel-collector.observability.svc.cluster.local
+        port: 4317
+        resource_detectors:
+          environment: {}
+    - name: otel-als                # optional: access logs via OTLP instead of stdout
+      envoyOtelAls:
+        service: otel-collector.observability.svc.cluster.local
+        port: 4317
+  defaultProviders:
+    tracing: [otel-tracing]
+    accessLogging: [envoy]
+    metrics: [prometheus]
+
+  # ---- egress control: only destinations in the service registry (Services + ServiceEntries) are reachable
+  outboundTrafficPolicy:
+    mode: REGISTRY_ONLY
+
+  enablePrometheusMerge: true
+  enableAutoMtls: true
+  trustDomain: cluster.local
+
+  defaultConfig:
+    holdApplicationUntilProxyStarts: true
+    terminationDrainDuration: 20s
+    proxyMetadata:
+      ISTIO_META_DNS_CAPTURE: "true"         # DNS proxying: resolves ServiceEntry hosts, fewer CoreDNS hits
+      EXIT_ON_ZERO_ACTIVE_CONNECTIONS: "true"
+    # Envoy stats needed for outlier-detection / circuit-breaker dashboards and alerts
+    proxyStatsMatcher:
+      inclusionRegexps:
+        - ".*outlier_detection.*"
+        - ".*upstream_rq_retry.*"
+        - ".*upstream_rq_pending.*"
+        - ".*upstream_cx_.*"
+        - ".*circuit_breakers.*"
+        - ".*upstream_rq_timeout.*"
+      inclusionSuffixes:
+        - upstream_rq_timeout
+        - upstream_rq_pending_overflow
+        - upstream_cx_overflow

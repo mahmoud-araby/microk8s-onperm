@@ -1,0 +1,40 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-requests-limits
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    policies.kyverno.io/title: Require resource requests and memory limits
+    policies.kyverno.io/category: Multi-Tenancy, Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Every container must request CPU and memory and set a memory limit (CPU limits are optional to avoid
+      CFS throttling). Required for fair scheduling, quotas and HPA.
+spec:
+  background: true
+  rules:
+    - name: containers-requests-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["tenant-*", "shared-services"]
+      validate:
+        failureAction: Enforce
+        message: "CPU/memory requests and a memory limit are required for every container."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"
+            =(initContainers):
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"

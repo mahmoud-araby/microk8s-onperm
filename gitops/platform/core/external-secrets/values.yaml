@@ -1,0 +1,48 @@
+# External Secrets Operator (external-secrets/external-secrets chart, API external-secrets.io/v1).
+installCRDs: true
+
+replicaCount: 2
+leaderElect: true
+concurrent: 5
+priorityClassName: platform-critical
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+nodeSelector:
+  workload-tier: platform
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}
+log:
+  level: info
+
+serviceMonitor:
+  enabled: true
+  renderMode: alwaysRender           # render even before the Prometheus CRDs exist (Argo CD retries)
+  interval: 30s
+
+webhook:
+  create: true
+  replicaCount: 2
+  priorityClassName: platform-critical
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector:
+    workload-tier: platform
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+certController:
+  create: true
+  replicaCount: 2
+  priorityClassName: platform-critical
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  nodeSelector:
+    workload-tier: platform
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}

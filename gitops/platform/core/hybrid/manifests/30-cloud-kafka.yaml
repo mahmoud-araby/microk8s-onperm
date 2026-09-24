@@ -1,0 +1,129 @@
+# (c) Cloud-hosted / managed Kafka (placeholder: Confluent Cloud / MSK / Event Hubs Kafka endpoint) used for
+#     cross-site event replication (e.g. MirrorMaker2 from data-kafka) or SaaS integrations.
+#     Clients speak TLS (SASL_SSL) end-to-end; the egress gateway routes by SNI (TLS PASSTHROUGH), so the
+#     cloud provider sees the egress (edge) IPs only. Brokers are discovered via the bootstrap host and then
+#     addressed individually - list every advertised broker host.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: cloud-kafka
+  namespace: istio-egress
+spec:
+  hosts:
+    - bootstrap.kafka.cloud-provider.example.com
+    - b0.kafka.cloud-provider.example.com
+    - b1.kafka.cloud-provider.example.com
+    - b2.kafka.cloud-provider.example.com
+  exportTo: ["*"]
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 9093
+      name: tls-kafka
+      protocol: TLS
+---
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: egress-cloud-kafka
+  namespace: istio-egress
+spec:
+  selector:
+    istio: egressgateway
+  servers:
+    - port:
+        number: 9093
+        name: tls-kafka
+        protocol: TLS
+      hosts:
+        - bootstrap.kafka.cloud-provider.example.com
+        - b0.kafka.cloud-provider.example.com
+        - b1.kafka.cloud-provider.example.com
+        - b2.kafka.cloud-provider.example.com
+      tls:
+        mode: PASSTHROUGH
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: cloud-kafka-via-egress
+  namespace: istio-egress
+spec:
+  hosts:
+    - bootstrap.kafka.cloud-provider.example.com
+    - b0.kafka.cloud-provider.example.com
+    - b1.kafka.cloud-provider.example.com
+    - b2.kafka.cloud-provider.example.com
+  exportTo: ["*"]
+  gateways:
+    - mesh
+    - istio-egress/egress-cloud-kafka
+  tls:
+    # sidecars -> egress gateway (SNI preserved)
+    - match:
+        - gateways: [mesh]
+          port: 9093
+          sniHosts:
+            - bootstrap.kafka.cloud-provider.example.com
+            - b0.kafka.cloud-provider.example.com
+            - b1.kafka.cloud-provider.example.com
+            - b2.kafka.cloud-provider.example.com
+      route:
+        - destination:
+            host: istio-egressgateway.istio-egress.svc.cluster.local
+            port:
+              number: 9093
+    # egress gateway -> the broker named in the SNI (one route per advertised broker)
+    - match:
+        - gateways: [istio-egress/egress-cloud-kafka]
+          port: 9093
+          sniHosts: [bootstrap.kafka.cloud-provider.example.com]
+      route:
+        - destination:
+            host: bootstrap.kafka.cloud-provider.example.com
+            port:
+              number: 9093
+    - match:
+        - gateways: [istio-egress/egress-cloud-kafka]
+          port: 9093
+          sniHosts: [b0.kafka.cloud-provider.example.com]
+      route:
+        - destination:
+            host: b0.kafka.cloud-provider.example.com
+            port:
+              number: 9093
+    - match:
+        - gateways: [istio-egress/egress-cloud-kafka]
+          port: 9093
+          sniHosts: [b1.kafka.cloud-provider.example.com]
+      route:
+        - destination:
+            host: b1.kafka.cloud-provider.example.com
+            port:
+              number: 9093
+    - match:
+        - gateways: [istio-egress/egress-cloud-kafka]
+          port: 9093
+          sniHosts: [b2.kafka.cloud-provider.example.com]
+      route:
+        - destination:
+            host: b2.kafka.cloud-provider.example.com
+            port:
+              number: 9093
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: cloud-kafka
+  namespace: istio-egress
+spec:
+  host: "*.kafka.cloud-provider.example.com"          # wildcard DR applies to all broker hosts above
+  exportTo: ["*"]
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 2000
+        connectTimeout: 5s
+        tcpKeepalive:
+          time: 60s
+          interval: 20s

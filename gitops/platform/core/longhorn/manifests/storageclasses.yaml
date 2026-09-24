@@ -1,0 +1,43 @@
+# StorageClasses (docs/conventions.md).
+#   longhorn     (default) 3 replicas - general stateful workloads (Harbor, Keycloak themes, Grafana ...)
+#   longhorn-db  1 replica, strict-local - systems that replicate themselves (Postgres, Kafka, RabbitMQ,
+#                Redis, Elasticsearch, Vault raft). Data stays on the node; the application provides HA.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+    argocd.argoproj.io/sync-wave: "1"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "30"
+  dataLocality: best-effort
+  fsType: ext4
+  diskSelector: ""
+  nodeSelector: ""
+  recurringJobSelector: '[{"name":"default-snapshots","isGroup":true},{"name":"default-backups","isGroup":true}]'
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-db
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+    argocd.argoproj.io/sync-wave: "1"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain                 # never lose database volumes on PVC deletion
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  numberOfReplicas: "1"
+  dataLocality: strict-local
+  staleReplicaTimeout: "30"
+  fsType: xfs
+  unmapMarkSnapChainRemoved: enabled
+  # Data-tier volumes are snapshotted only; databases are backed up natively (CNPG barman, etc.)
+  recurringJobSelector: '[{"name":"db-snapshots","isGroup":true}]'

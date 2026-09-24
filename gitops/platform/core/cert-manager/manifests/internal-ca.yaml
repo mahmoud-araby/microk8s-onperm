@@ -1,0 +1,70 @@
+# Internal PKI.
+# Bootstrap: a self-signed ClusterIssuer mints the root "internal-ca" (secret internal-ca-keypair in the
+# cert-manager namespace = cluster resource namespace), then the CA ClusterIssuer "internal-ca" signs every
+# internal certificate (*.internal.example.local, *.ops.example.local, Vault, service TLS...).
+#
+# PRODUCTION: replace the self-signed root by an intermediate issued from the enterprise PKI:
+#   1. put tls.crt/tls.key (+ ca.crt chain) into Vault  secret/platform/internal-ca
+#   2. delete the Certificate "internal-ca" below and uncomment the ExternalSecret that renders
+#      internal-ca-keypair from Vault.
+# Distribute the root (ca.crt) to workstations/VMs; PushSecret in core/external-secrets publishes it to Vault.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-ca
+  namespace: cert-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  isCA: true
+  commonName: Example Platform Internal CA
+  subject:
+    organizations: [Example Corp]
+    organizationalUnits: [Platform Engineering]
+  secretName: internal-ca-keypair
+  duration: 87600h                 # 10y root (bootstrap only)
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+    rotationPolicy: Never          # rotating the root would invalidate every issued cert at once
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  ca:
+    secretName: internal-ca-keypair
+# ---
+# apiVersion: external-secrets.io/v1
+# kind: ExternalSecret
+# metadata:
+#   name: internal-ca-keypair
+#   namespace: cert-manager
+# spec:
+#   refreshInterval: 1h
+#   secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+#   target:
+#     name: internal-ca-keypair
+#     template:
+#       type: kubernetes.io/tls
+#   data:
+#     - {secretKey: tls.crt, remoteRef: {key: platform/internal-ca, property: tls.crt}}
+#     - {secretKey: tls.key, remoteRef: {key: platform/internal-ca, property: tls.key}}
+#     - {secretKey: ca.crt,  remoteRef: {key: platform/internal-ca, property: ca.crt}}

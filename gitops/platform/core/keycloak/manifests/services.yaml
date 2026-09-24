@@ -1,0 +1,46 @@
+# Stable Service names.
+# - "keycloak": the endpoint contract keycloak.keycloak.svc.cluster.local:8080 (docs/conventions.md). The
+#   chart itself names its Service "keycloak-http".
+# - "keycloak-jgroups": headless Service for JGroups DNS_PING. It publishes NOT-READY pods, so members can
+#   find each other while they start (the chart's keycloak-headless only lists ready pods).
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloakx
+    app.kubernetes.io/instance: keycloak
+    app.kubernetes.io/component: http
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: keycloakx
+    app.kubernetes.io/instance: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-jgroups
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloakx
+    app.kubernetes.io/instance: keycloak
+    app.kubernetes.io/component: jgroups
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: keycloakx
+    app.kubernetes.io/instance: keycloak
+  ports:
+    - name: tcp-jgroups
+      port: 7800
+      targetPort: 7800
+      protocol: TCP

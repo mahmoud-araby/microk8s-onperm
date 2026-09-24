@@ -1,0 +1,35 @@
+# Mesh-wide telemetry defaults (root namespace => applies to every workload).
+# Tracing: OpenTelemetry provider "otel-tracing" (meshConfig.extensionProviders, istiod values) ->
+# otel-collector.observability.svc.cluster.local:4317, 10% sampling (parent-based: upstream sampled
+# decisions carried in traceparent are honoured). Tenant id is added as a span tag.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-default
+  namespace: istio-system
+spec:
+  tracing:
+    - providers:
+        - name: otel-tracing
+      randomSamplingPercentage: 10.0
+      customTags:
+        tenant_id:
+          header:
+            name: x-tenant-id
+            defaultValue: shared
+        correlation_id:
+          header:
+            name: x-correlation-id
+            defaultValue: "-"
+        cluster:
+          literal:
+            value: microk8s-prod
+  accessLogging:
+    - providers:
+        - name: envoy
+      # To reduce volume at peak load, log only errors/slow requests:
+      # filter:
+      #   expression: "response.code >= 400 || response.duration > 1000"
+  metrics:
+    - providers:
+        - name: prometheus

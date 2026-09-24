@@ -1,0 +1,162 @@
+# Ops UIs exposed ONLY on the Istio internal gateway (private VIP, *.ops.example.local wildcard cert).
+# Hostnames and backends follow docs/conventions.md. Each tool authenticates against Keycloak (realm
+# "platform") where supported; network access is limited to the corporate network / VPN.
+#
+# Owned here: argocd, rollouts, vault, harbor, keycloak.
+# Owned next to their component (do NOT duplicate - two VirtualServices for one host on one gateway conflict):
+#   grafana.ops.example.local   gitops/platform/observability/kube-prometheus-stack/manifests/virtualservice-grafana.yaml
+#   kibana.ops.example.local    gitops/platform/observability/elastic/manifests/virtualservice-kibana.yaml
+#   rabbitmq.ops.example.local  gitops/platform/data/rabbitmq/manifests/60-virtualservice-ops.yaml
+#   kiali.ops.example.local     gitops/platform/observability/kiali/manifests/virtualservice-kiali.yaml
+# Argo CD UI + gRPC-web (server.insecure=true)
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ops-argocd
+  namespace: istio-internal
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/component: ops-ui
+spec:
+  hosts:
+    - argocd.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: argocd
+      route:
+        - destination:
+            host: argocd-server.argocd.svc.cluster.local
+            port:
+              number: 80
+      timeout: 300s
+---
+# Argo Rollouts dashboard (no auth of its own: restrict via AuthorizationPolicy/VPN)
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ops-rollouts
+  namespace: istio-internal
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/component: ops-ui
+spec:
+  hosts:
+    - rollouts.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: rollouts
+      route:
+        - destination:
+            host: argo-rollouts-dashboard.argo-rollouts.svc.cluster.local
+            port:
+              number: 3100
+      timeout: 60s
+---
+# Vault UI/API (TLS upstream -> DestinationRule below)
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ops-vault
+  namespace: istio-internal
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/component: ops-ui
+spec:
+  hosts:
+    - vault.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: vault
+      route:
+        - destination:
+            host: vault.vault.svc.cluster.local
+            port:
+              number: 8200
+      timeout: 60s
+---
+# Harbor portal + registry API (large blobs: no timeout)
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ops-harbor
+  namespace: istio-internal
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/component: ops-ui
+spec:
+  hosts:
+    - harbor.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: harbor
+      route:
+        - destination:
+            host: harbor.harbor.svc.cluster.local
+            port:
+              number: 80
+      # large image layer uploads: no route timeout, retries disabled for non-idempotent PUT/PATCH
+      retries:
+        attempts: 0
+---
+# Keycloak admin console (KC_HOSTNAME_ADMIN); public realms are on keycloak.example.com via Kong
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ops-keycloak
+  namespace: istio-internal
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    app.kubernetes.io/component: ops-ui
+spec:
+  hosts:
+    - keycloak.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: keycloak
+      route:
+        - destination:
+            host: keycloak.keycloak.svc.cluster.local
+            port:
+              number: 8080
+      timeout: 60s
+---
+# Upstream TLS for Vault (listener TLS from internal-ca). The gateway verifies the Vault certificate with
+# ca.crt of secret istio-internal/upstream-ca (core/cert-manager/manifests/internal-gateway-certificates.yaml).
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: ops-vault-tls
+  namespace: istio-internal
+spec:
+  host: vault.vault.svc.cluster.local
+  exportTo: ["."]
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      credentialName: upstream-ca
+      sni: vault.vault.svc.cluster.local
+---
+# Rollouts dashboard has no authentication: only allow clients from the ops/admin networks.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: ops-rollouts-allowlist
+  namespace: istio-internal
+spec:
+  selector:
+    matchLabels:
+      istio: internal-gateway
+  action: DENY
+  rules:
+    - to:
+        - operation:
+            hosts: ["rollouts.ops.example.local", "rollouts.ops.example.local:*"]
+      from:
+        - source:
+            notRemoteIpBlocks:
+              - 10.0.0.0/8                    # placeholder: ops/admin + VPN ranges

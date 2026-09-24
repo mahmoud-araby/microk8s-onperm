@@ -1,0 +1,37 @@
+# Root "app-of-apps". Applied ONCE by Ansible (playbooks/bootstrap-gitops.yml) right after the initial
+# `helm install argocd` with gitops/bootstrap/argocd/values.yaml. From then on everything is reconciled
+# from Git: root -> gitops/bootstrap/apps/* (category Applications) -> component Applications.
+#
+# NOTE: deliberately NO resources-finalizer here. Deleting the root Application must never cascade-delete
+# the whole platform; category Applications carry the finalizer instead.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bootstrap
+    platform.example.com/category: bootstrap
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/bootstrap/apps
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

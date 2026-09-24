@@ -1,0 +1,151 @@
+# Harbor (goharbor/harbor chart) - internal container registry + Helm OCI registry at
+# https://harbor.ops.example.local (Istio internal gateway terminates TLS -> Service "harbor" :80).
+#
+# HA-ish layout: stateless components x2, internal DB/Redis OFF:
+#   PostgreSQL : CNPG pg-main (data-postgres), database "harbor", role "harbor" (created by the data team)
+#   Redis      : data-redis via Sentinel (master set mymaster). Harbor reserves DB indexes 5-8.
+#   Registry   : Longhorn RWX volume (share-manager) so 2 registry replicas can share blobs; switch to
+#                S3/MinIO (commented) for larger scale.
+# DR: a second Harbor at the DR site is kept in sync with push-based replication rules
+#     (Administration > Replications, event-based + nightly full), see gitops/platform/core/README.md.
+
+externalURL: https://harbor.ops.example.local
+
+expose:
+  type: clusterIP
+  tls:
+    enabled: false                    # TLS terminates at istio-internal/internal-gateway (ops wildcard cert)
+  clusterIP:
+    name: harbor
+    ports:
+      httpPort: 80
+
+existingSecretAdminPassword: harbor-admin
+existingSecretAdminPasswordKey: HARBOR_ADMIN_PASSWORD
+existingSecretSecretKey: harbor-secret-key     # key "secretKey" (16 chars)
+
+updateStrategy:
+  type: RollingUpdate                 # fine with RWX / object storage
+
+logLevel: info
+
+persistence:
+  enabled: true
+  resourcePolicy: keep
+  persistentVolumeClaim:
+    registry:
+      storageClass: longhorn
+      accessMode: ReadWriteMany
+      size: 1Ti
+    jobservice:
+      jobLog:
+        storageClass: longhorn
+        accessMode: ReadWriteMany
+        size: 5Gi
+    trivy:
+      storageClass: longhorn
+      accessMode: ReadWriteOnce
+      size: 10Gi
+  imageChartStorage:
+    disableredirect: true
+    type: filesystem
+    filesystem:
+      rootdirectory: /storage
+    # type: s3
+    # s3:
+    #   region: us-east-1
+    #   bucket: harbor-registry
+    #   regionendpoint: https://minio.backup.example.local:9000
+    #   existingSecret: harbor-s3          # REGISTRY_STORAGE_S3_ACCESSKEY / _SECRETKEY
+    #   secure: true
+    #   v4auth: true
+    #   rootdirectory: /registry
+
+database:
+  type: external
+  external:
+    host: pg-main-rw.data-postgres.svc.cluster.local
+    port: "5432"
+    username: harbor
+    coreDatabase: harbor
+    existingSecret: harbor-db          # key "password"
+    sslmode: require
+  maxIdleConns: 50
+  maxOpenConns: 300
+
+redis:
+  type: external
+  external:
+    addr: redis-sentinel.data-redis.svc.cluster.local:26379
+    sentinelMasterSet: mymaster
+    coreDatabaseIndex: "5"
+    jobserviceDatabaseIndex: "6"
+    registryDatabaseIndex: "7"
+    trivyAdapterIndex: "8"
+    existingSecret: harbor-redis       # key REDIS_PASSWORD
+
+cache:
+  enabled: true
+  expireHours: 24
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+trace:
+  enabled: true
+  provider: otel
+  sample_rate: 0.1
+  otel:
+    endpoint: otel-collector.observability.svc.cluster.local:4318
+    url_path: /v1/traces
+    compression: false
+    insecure: true
+    timeout: 10
+
+nginx:
+  replicas: 2
+  nodeSelector: {workload-tier: platform}
+  priorityClassName: platform-critical
+portal:
+  replicas: 2
+  nodeSelector: {workload-tier: platform}
+  priorityClassName: platform-critical
+core:
+  replicas: 2
+  nodeSelector: {workload-tier: platform}
+  priorityClassName: platform-critical
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 2Gi}
+jobservice:
+  replicas: 2
+  nodeSelector: {workload-tier: platform}
+  priorityClassName: platform-critical
+  jobLoggers:
+    - database                          # no shared log volume needed across replicas
+  loggerSweeperDuration: 14
+registry:
+  replicas: 2
+  nodeSelector: {workload-tier: platform}
+  priorityClassName: platform-critical
+  registry:
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {memory: 2Gi}
+  relativeurls: true                    # correct Location headers behind the TLS-terminating gateway
+trivy:
+  enabled: true
+  replicas: 2
+  nodeSelector: {workload-tier: platform}
+  priorityClassName: platform-critical
+  ignoreUnfixed: false
+  skipUpdate: false                     # set true + offlineScan for air-gapped sites (mirror the Trivy DB)
+  severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 2Gi}
+exporter:
+  replicas: 1
+  nodeSelector: {workload-tier: platform}

@@ -1,0 +1,14 @@
+# Kong routes to every tenant namespace and shared-services, so its proxies need the full service registry
+# (overrides the restrictive mesh default in istio-system). Egress stays REGISTRY_ONLY.
+# Kong accepts plaintext from the public VIP (inbound bypasses Envoy), so no PeerAuthentication exception.
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: kong
+  namespace: kong
+spec:
+  egress:
+    - hosts:
+        - "*/*"
+  outboundTrafficPolicy:
+    mode: REGISTRY_ONLY

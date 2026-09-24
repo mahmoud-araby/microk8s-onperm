@@ -1,0 +1,139 @@
+# Keycloak (official quay.io/keycloak/keycloak image) via codecentric/keycloakx.
+# Endpoint contract: keycloak.keycloak.svc.cluster.local:8080. The chart names its Service "keycloak-http",
+# so manifests/services.yaml adds a Service named "keycloak" on :8080.
+# Hostnames: tenant realms   https://keycloak.example.com   (KC_HOSTNAME; Kong, manifests/public-ingress.yaml)
+#            realm platform  https://keycloak.ops.example.local (realm attribute frontendUrl -> issuer
+#                            https://keycloak.ops.example.local/realms/platform used by Argo CD, Grafana, Kibana...)
+#            admin console   https://keycloak.ops.example.local (KC_HOSTNAME_ADMIN, Istio internal gateway only)
+fullnameOverride: keycloak
+
+replicas: 3
+podManagementPolicy: Parallel
+priorityClassName: platform-critical
+
+# Official image; build an optimized image in CI (kc.sh build) for faster startup if desired.
+image:
+  repository: quay.io/keycloak/keycloak
+  tag: "26.7.4"
+
+command:
+  - /opt/keycloak/bin/kc.sh
+  - start
+  - --import-realm                 # imports /opt/keycloak/data/import/*.json once (skips existing realms)
+
+http:
+  relativePath: "/"
+  internalPort: http-internal      # management interface :9000 (health + metrics)
+
+service:
+  httpPort: 8080
+
+proxy:
+  enabled: true
+  mode: xforwarded                 # Kong / Istio gateway set X-Forwarded-*
+  http:
+    enabled: true                  # KC_HTTP_ENABLED: TLS terminates at Kong / Istio gateway
+
+# Cache: Infinispan cluster discovered via JGroups DNS_PING on the headless Service keycloak-jgroups (instead of the
+# chart default jdbc-ping). "custom" disables the chart's KC_CACHE* env so we set them below.
+cache:
+  stack: custom
+
+database:
+  vendor: postgres
+  hostname: pg-main-rw.data-postgres.svc.cluster.local   # direct primary (session features, no PgBouncer txn mode)
+  port: 5432
+  database: keycloak
+  existingSecret: keycloak-db      # ExternalSecret (manifests/externalsecrets.yaml)
+  existingSecretKey: password
+
+extraEnv: |
+  - name: KC_CACHE
+    value: ispn
+  - name: KC_CACHE_STACK
+    value: kubernetes
+  - name: JAVA_OPTS_APPEND
+    value: >-
+      -XX:MaxRAMPercentage=70 -XX:+UseG1GC -Djava.net.preferIPv4Stack=true
+      -Djgroups.dns.query=keycloak-jgroups.keycloak.svc.cluster.local
+  - name: KC_DB_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-db
+        key: username
+  - name: KC_DB_POOL_MIN_SIZE
+    value: "10"
+  - name: KC_DB_POOL_MAX_SIZE
+    value: "50"
+  - name: KC_HOSTNAME
+    value: https://keycloak.example.com
+  - name: KC_HOSTNAME_ADMIN
+    value: https://keycloak.ops.example.local
+  - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+    value: "true"                  # in-cluster clients may use keycloak.keycloak.svc for back-channel calls
+  - name: KC_LOG_CONSOLE_OUTPUT
+    value: json
+  - name: KC_TRACING_ENABLED
+    value: "true"
+  - name: KC_TRACING_ENDPOINT
+    value: http://otel-collector.observability.svc.cluster.local:4317
+  - name: KC_TRACING_SAMPLER_RATIO
+    value: "0.1"
+  - name: KC_EVENT_METRICS_USER_ENABLED
+    value: "true"
+  - name: KC_BOOTSTRAP_ADMIN_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin
+        key: username
+  - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: keycloak-admin
+        key: password
+  # Client secrets referenced as ${...} placeholders in the realm import files
+  - name: ARGOCD_CLIENT_SECRET
+    valueFrom: {secretKeyRef: {name: keycloak-client-secrets, key: argocd}}
+  - name: GRAFANA_CLIENT_SECRET
+    valueFrom: {secretKeyRef: {name: keycloak-client-secrets, key: grafana}}
+  - name: HARBOR_CLIENT_SECRET
+    valueFrom: {secretKeyRef: {name: keycloak-client-secrets, key: harbor}}
+  - name: VAULT_CLIENT_SECRET
+    valueFrom: {secretKeyRef: {name: keycloak-client-secrets, key: vault}}
+  - name: KIALI_CLIENT_SECRET
+    valueFrom: {secretKeyRef: {name: keycloak-client-secrets, key: kiali}}
+
+extraVolumes: |
+  - name: realm-import
+    configMap:
+      name: keycloak-realms
+extraVolumeMounts: |
+  - name: realm-import
+    mountPath: /opt/keycloak/data/import
+    readOnly: true
+
+resources:
+  requests: {cpu: "1", memory: 2Gi}
+  limits: {memory: 3Gi}
+
+nodeSelector:
+  workload-tier: platform
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+
+metrics:
+  enabled: true
+health:
+  enabled: true
+serviceMonitor:
+  enabled: true
+  interval: 30s
+
+dbchecker:
+  enabled: true                    # wait for pg-main before starting (bootstrap ordering)

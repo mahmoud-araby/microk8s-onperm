@@ -1,0 +1,85 @@
+# Example Kong consumer + JWT credential sourced from Vault through External Secrets.
+# Pattern: one KongConsumer per token ISSUER. Tenant realms in Keycloak sign access tokens; the jwt plugin
+# (rendered per service by charts/microservice with key_claim_name: iss) looks up the credential whose "key"
+# equals the token's "iss" and verifies the RS256 signature with the realm public key.
+#
+# Vault: secret/platform/kong  (property per issuer)
+#   keycloak-acme-rsa-public-key   PEM public key of realm "acme"
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  name: keycloak-realm-acme
+  namespace: kong
+  annotations:
+    kubernetes.io/ingress.class: kong
+username: keycloak-realm-acme
+custom_id: tenant-acme
+credentials:
+  - keycloak-realm-acme-jwt
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: keycloak-realm-acme-jwt
+  namespace: kong
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault-backend
+  target:
+    name: keycloak-realm-acme-jwt
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          konghq.com/credential: jwt          # KIC picks the Secret up as a JWT credential
+      data:
+        key: https://keycloak.example.com/realms/acme
+        algorithm: RS256
+        rsa_public_key: "{{ .publicKey }}"
+  data:
+    - secretKey: publicKey
+      remoteRef:
+        key: platform/kong
+        property: keycloak-acme-rsa-public-key
+---
+# Machine-to-machine partner consumer (HS256 shared secret), e.g. an ERP partner integration.
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  name: partner-erp
+  namespace: kong
+  annotations:
+    kubernetes.io/ingress.class: kong
+    konghq.com/plugins: ops-ip-restriction
+username: partner-erp
+credentials:
+  - partner-erp-jwt
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: partner-erp-jwt
+  namespace: kong
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault-backend
+  target:
+    name: partner-erp-jwt
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          konghq.com/credential: jwt
+      data:
+        key: partner-erp
+        algorithm: HS256
+        secret: "{{ .secret }}"
+  data:
+    - secretKey: secret
+      remoteRef:
+        key: platform/kong
+        property: partner-erp-jwt-secret

@@ -1,0 +1,37 @@
+# cluster-defaults: platform namespaces (labels: pod-security, istio-injection) and PriorityClasses
+# (shared-services quota/limits come from its tenant landing zone "shared"). Plain manifests, wave -20.
+# Namespaces carry Prune=false/Delete=false so a Git mistake can never delete a platform namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster-defaults
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  sources:
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/cluster-defaults/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

@@ -1,0 +1,124 @@
+# Velero (vmware-tanzu/velero chart). Backups of Kubernetes resources + Kopia file-system backups of
+# volumes to S3-compatible object storage (MinIO in the backup VLAN / secondary site).
+# Databases (longhorn-db volumes) are protected natively (CNPG barman to S3, Kafka replication, Redis RDB)
+# and are therefore excluded from file-system backup; Velero still captures their CRs/manifests.
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.14.3   # pin: verify matches the Velero minor (1.18)
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+priorityClassName: platform-critical
+nodeSelector:
+  workload-tier: platform
+resources:
+  requests: {cpu: 500m, memory: 512Mi}
+  limits: {memory: 2Gi}
+
+upgradeCRDs: true
+cleanUpCRDs: false
+
+credentials:
+  useSecret: true
+  existingSecret: velero-s3-credentials     # rendered by ExternalSecret (manifests/credentials.yaml)
+
+snapshotsEnabled: false                     # no CSI snapshot controller on MicroK8s: file-system backup (Kopia)
+backupsEnabled: true
+
+deployNodeAgent: true
+nodeAgent:
+  # MicroK8s kubelet root
+  podVolumePath: /var/snap/microk8s/common/var/lib/kubelet/pods
+  pluginVolumePath: /var/snap/microk8s/common/var/lib/kubelet/plugins
+  priorityClassName: platform-critical
+  resources:
+    requests: {cpu: 200m, memory: 512Mi}
+    limits: {memory: 4Gi}
+  tolerations:
+    - key: workload-tier
+      operator: Equal
+      value: data
+      effect: NoSchedule
+
+configuration:
+  uploaderType: kopia
+  defaultBackupStorageLocation: default
+  defaultBackupTTL: 720h
+  defaultVolumesToFsBackup: false           # opt-in per schedule / pod annotation
+  defaultRepoMaintainFrequency: 24h
+  garbageCollectionFrequency: 1h
+  fsBackupTimeout: 4h
+  logFormat: json
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero-backups
+      prefix: microk8s-prod
+      default: true
+      accessMode: ReadWrite
+      validationFrequency: 1m
+      credential:
+        name: velero-s3-credentials
+        key: cloud
+      config:
+        region: us-east-1                   # MinIO ignores it but the AWS SDK requires one
+        s3ForcePathStyle: "true"
+        s3Url: https://minio.backup.example.local:9000   # placeholder
+        checksumAlgorithm: ""
+        # caCert of the MinIO endpoint if signed by internal-ca: set spec.objectStorage.caCert (base64)
+  volumeSnapshotLocation: []
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+  nodeAgentPodMonitor:
+    enabled: true
+
+schedules:
+  # Hourly: every tenant namespace, resources + volumes (Kopia), kept 3 days
+  tenants-hourly:
+    disabled: false
+    schedule: "5 * * * *"
+    useOwnerReferencesInBackup: false
+    skipImmediately: false
+    template:
+      ttl: 72h
+      storageLocation: default
+      includedNamespaces:
+        - "tenant-*"                        # namespace glob (Velero >= 1.15)
+      includeClusterResources: false
+      defaultVolumesToFsBackup: true
+      snapshotVolumes: false
+      excludedResources: [events, events.events.k8s.io, reports.kyverno.io, policyreports.wgpolicyk8s.io]
+  # Daily: full cluster (all namespaces + cluster-scoped resources); volumes only for pods that opt in with
+  # annotation backup.velero.io/backup-volumes. Kept 30 days.
+  cluster-daily:
+    disabled: false
+    schedule: "30 1 * * *"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: 720h
+      storageLocation: default
+      includedNamespaces: ["*"]
+      includeClusterResources: true
+      defaultVolumesToFsBackup: false
+      snapshotVolumes: false
+      excludedResources: [events, events.events.k8s.io, reports.kyverno.io, policyreports.wgpolicyk8s.io]
+  # Weekly: full cluster incl. shared-services volumes, kept 90 days (compliance)
+  cluster-weekly:
+    disabled: false
+    schedule: "0 3 * * 0"
+    useOwnerReferencesInBackup: false
+    template:
+      ttl: 2160h
+      storageLocation: default
+      includedNamespaces: ["*"]
+      excludedNamespaces: [data-postgres, data-kafka, data-redis, data-rabbitmq, logging]   # native backups
+      includeClusterResources: true
+      defaultVolumesToFsBackup: true
+      snapshotVolumes: false
+      excludedResources: [events, events.events.k8s.io]

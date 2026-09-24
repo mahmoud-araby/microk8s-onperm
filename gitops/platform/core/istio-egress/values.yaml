@@ -1,0 +1,47 @@
+# istio/gateway - EGRESS gateway (namespace istio-egress, release istio-egressgateway).
+# ClusterIP only. Runs on edge nodes, whose source IPs are the ones allow-listed by SaaS providers / the
+# firewall / the site-to-site VPN. NetworkPolicy/firewall: only edge nodes may reach the Internet/VPN.
+labels:
+  app: istio-egressgateway
+  istio: egressgateway
+
+service:
+  type: ClusterIP
+  ports:
+    - {name: status-port, port: 15021, protocol: TCP, targetPort: 15021}
+    - {name: http2, port: 80, protocol: TCP, targetPort: 80}
+    - {name: https, port: 443, protocol: TCP, targetPort: 443}
+    - {name: tls-kafka, port: 9093, protocol: TCP, targetPort: 9093}        # cloud Kafka (TLS passthrough)
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  minAvailable: 1
+
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+priorityClassName: platform-critical
+
+nodeSelector:
+  workload-tier: edge
+tolerations:
+  - key: workload-tier
+    operator: Equal
+    value: edge
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: istio-egressgateway

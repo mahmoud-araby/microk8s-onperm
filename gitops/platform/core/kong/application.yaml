@@ -1,0 +1,47 @@
+# Kong external API gateway (kong/ingress chart: KIC + DB-less gateway), public VIP from MetalLB public-pool.
+# Global KongClusterPlugins + consumer examples in ./manifests.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kong
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  labels:
+    app.kubernetes.io/part-of: platform-core
+    platform.example.com/category: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: core
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kong
+  sources:
+    - repoURL: https://charts.konghq.com
+      chart: ingress
+      targetRevision: 0.24.0 # pin: verify latest before upgrade (Kong 3.9 / KIC 3.5)
+      helm:
+        releaseName: kong
+        valueFiles:
+          - $values/gitops/platform/core/kong/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/core/kong/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

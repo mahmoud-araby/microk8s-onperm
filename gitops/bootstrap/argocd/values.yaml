@@ -1,0 +1,431 @@
+# Argo CD - HA values for the argo/argo-cd chart (version pinned in application.yaml).
+# Used twice:
+#   1. by Ansible for the very first `helm install argocd argo/argo-cd -n argocd -f values.yaml`
+#   2. by the self-managed Application gitops/bootstrap/argocd/application.yaml afterwards.
+# Keep the release name "argocd" in both places.
+#
+# Exposure: NO ingress. argocd.ops.example.local is routed by the Istio internal gateway
+# (gitops/platform/core/istio/manifests/ops-virtualservices.yaml). TLS terminates at the gateway, therefore
+# argocd-server runs with server.insecure=true (plain HTTP/gRPC-web inside the cluster; the argocd namespace
+# is not part of the mesh).
+
+global:
+  domain: argocd.ops.example.local
+  logging:
+    format: json
+    level: info
+  priorityClassName: platform-critical
+  nodeSelector:
+    workload-tier: platform
+  # Spread every Argo CD component across nodes
+  affinity:
+    podAntiAffinity: soft
+    nodeAffinity:
+      type: hard
+      matchExpressions:
+        - key: workload-tier
+          operator: In
+          values: [platform]
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+
+crds:
+  install: true
+  keep: true
+
+configs:
+  # ---------------------------------------------------------------- argocd-cmd-params-cm
+  params:
+    server.insecure: "true"                                 # TLS terminated at istio-internal gateway
+    controller.sharding.algorithm: round-robin
+    controller.status.processors: 50
+    controller.operation.processors: 25
+    controller.repo.server.timeout.seconds: 180
+    controller.diff.server.side: "true"
+    reposerver.parallelism.limit: 10
+    applicationsetcontroller.enable.progressive.syncs: "true"  # RollingSync rings (gitops/apps/applicationsets/services.yaml)
+    applicationsetcontroller.policy: sync                    # never let an ApplicationSet delete Applications
+    otlp.address: otel-collector.observability.svc.cluster.local:4317
+    otlp.insecure: "true"
+
+  # ---------------------------------------------------------------- argocd-cm
+  cm:
+    url: https://argocd.ops.example.local
+    admin.enabled: false                                    # break-glass: re-enable via Git + initial secret
+    exec.enabled: true                                      # gated by RBAC (platform-admins only)
+    timeout.reconciliation: 180s
+    timeout.reconciliation.jitter: 60s
+    application.resourceTrackingMethod: annotation
+    statusbadge.enabled: false
+    kustomize.buildOptions: --enable-helm
+    users.anonymous.enabled: false
+
+    # OIDC with Keycloak (realm "platform", frontendUrl https://keycloak.ops.example.local). The client secret
+    # comes from Vault through the ExternalSecret in ./manifests (Secret "argocd-oidc", labelled
+    # app.kubernetes.io/part-of=argocd). The issuer certificate is signed by internal-ca, which argocd-server
+    # trusts through SSL_CERT_DIR (see server.env below).
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.ops.example.local/realms/platform
+      clientID: argocd
+      clientSecret: $argocd-oidc:clientSecret
+      requestedScopes: ["openid", "profile", "email", "groups"]
+      requestedIDTokenClaims:
+        groups:
+          essential: true
+      enablePKCEAuthentication: true
+      logoutURL: https://keycloak.ops.example.local/realms/platform/protocol/openid-connect/logout?id_token_hint={{token}}&post_logout_redirect_uri={{logoutRedirectURL}}
+
+    # ---- resource health: Argo Rollouts (canary pause steps are expected, not "Suspended forever")
+    resource.customizations.health.argoproj.io_Rollout: |
+      hs = {}
+      if obj.status == nil then
+        hs.status = "Progressing"
+        hs.message = "Waiting for rollout status"
+        return hs
+      end
+      if obj.metadata.generation ~= nil and obj.status.observedGeneration ~= nil and tostring(obj.metadata.generation) ~= tostring(obj.status.observedGeneration) then
+        hs.status = "Progressing"
+        hs.message = "Waiting for rollout spec update to be observed"
+        return hs
+      end
+      if obj.status.abort == true then
+        hs.status = "Degraded"
+        hs.message = obj.status.message or "Rollout aborted"
+        return hs
+      end
+      local phase = obj.status.phase
+      if phase == "Degraded" then
+        hs.status = "Degraded"
+      elseif phase == "Paused" then
+        -- timed canary pause steps resume by themselves; indefinite pauses need a human (promote)
+        local timed = false
+        if obj.status.pauseConditions ~= nil then
+          for _, c in ipairs(obj.status.pauseConditions) do
+            if c.reason == "CanaryPauseStep" and obj.spec.strategy ~= nil and obj.spec.strategy.canary ~= nil and obj.spec.strategy.canary.steps ~= nil and obj.status.currentStepIndex ~= nil then
+              local step = obj.spec.strategy.canary.steps[obj.status.currentStepIndex + 1]
+              if step ~= nil and step.pause ~= nil and step.pause.duration ~= nil then
+                timed = true
+              end
+            end
+          end
+        end
+        if timed then hs.status = "Progressing" else hs.status = "Suspended" end
+      elseif phase == "Healthy" then
+        hs.status = "Healthy"
+      else
+        hs.status = "Progressing"
+      end
+      hs.message = obj.status.message or phase
+      return hs
+    resource.customizations.health.argoproj.io_AnalysisRun: |
+      hs = {}
+      if obj.status == nil or obj.status.phase == nil then
+        hs.status = "Progressing"
+        hs.message = "Analysis pending"
+        return hs
+      end
+      local p = obj.status.phase
+      if p == "Successful" then hs.status = "Healthy"
+      elseif p == "Failed" or p == "Error" then hs.status = "Degraded"
+      elseif p == "Inconclusive" then hs.status = "Suspended"
+      else hs.status = "Progressing" end
+      hs.message = obj.status.message or p
+      return hs
+
+    # ---- diffing: Argo Rollouts owns the canary weights of VirtualServices (spec.http[0].route[*].weight)
+    # and the rollouts-pod-template-hash labels of DestinationRule subsets. Never revert them.
+    resource.customizations.ignoreDifferences.networking.istio.io_VirtualService: |
+      jqPathExpressions:
+        - .spec.http[0].route
+        - .spec.http[]? | select(.name == "primary" or .name == "canary") | .route
+    resource.customizations.ignoreDifferences.networking.istio.io_DestinationRule: |
+      jqPathExpressions:
+        - .spec.subsets[]?.labels["rollouts-pod-template-hash"]
+    # Webhook CA bundles injected by cert-manager / Kyverno / Istio / KEDA at runtime
+    resource.customizations.ignoreDifferences.admissionregistration.k8s.io_MutatingWebhookConfiguration: |
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    resource.customizations.ignoreDifferences.admissionregistration.k8s.io_ValidatingWebhookConfiguration: |
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+        - .webhooks[]?.failurePolicy
+    resource.customizations.ignoreDifferences.apiextensions.k8s.io_CustomResourceDefinition: |
+      jqPathExpressions:
+        - .spec.conversion.webhook.clientConfig.caBundle
+    resource.customizations.ignoreDifferences.apiregistration.k8s.io_APIService: |
+      jqPathExpressions:
+        - .spec.caBundle
+
+    # Chart defaults for resource.exclusions (Endpoints, Leases, Kyverno reports, ...) are kept; these are
+    # appended. Reduces controller load at 1M-user scale.
+    resourceExclusionsAdditional:
+      - apiGroups: ["velero.io"]
+        kinds: ["Backup", "PodVolumeBackup", "PodVolumeRestore", "DataUpload", "DataDownload"]
+        clusters: ["*"]
+      - apiGroups: ["longhorn.io"]
+        kinds: ["Snapshot", "Backup", "BackupVolume", "Engine", "Replica", "InstanceManager"]
+        clusters: ["*"]
+
+  # ---------------------------------------------------------------- argocd-rbac-cm
+  rbac:
+    policy.default: ""            # authenticated users without a mapped group see nothing
+    scopes: "[groups, email]"
+    policy.matchMode: glob
+    policy.csv: |
+      # ---- platform roles (Keycloak realm "platform" groups)
+      g, platform-admins, role:admin
+
+      p, role:platform-operator, applications, get, */*, allow
+      p, role:platform-operator, applications, sync, */*, allow
+      p, role:platform-operator, applications, action/*, */*, allow
+      p, role:platform-operator, applicationsets, get, */*, allow
+      p, role:platform-operator, logs, get, */*, allow
+      p, role:platform-operator, projects, get, *, allow
+      p, role:platform-operator, clusters, get, *, allow
+      p, role:platform-operator, repositories, get, *, allow
+      g, platform-operators, role:platform-operator
+
+      g, platform-viewers, role:readonly
+      g, sre, role:platform-operator
+
+      # CI (GitHub Actions) only needs to read app status after bumping image tags in Git
+      p, role:ci, applications, get, */*, allow
+      g, ci-bots, role:ci
+
+      # ---- per-tenant READ-ONLY (project-scoped admin/dev roles live in the AppProjects "apps"/"tenants")
+      # One block per tenant, added by the tenant onboarding MR.
+      p, role:tenant-acme-readonly, applications, get, apps/acme-*, allow
+      p, role:tenant-acme-readonly, applications, get, tenants/tenant-acme*, allow
+      p, role:tenant-acme-readonly, logs, get, apps/acme-*, allow
+      g, acme-viewers, role:tenant-acme-readonly
+      g, acme-devs, role:tenant-acme-readonly
+      g, acme-admins, role:tenant-acme-readonly
+
+      p, role:tenant-globex-readonly, applications, get, apps/globex-*, allow
+      p, role:tenant-globex-readonly, applications, get, tenants/tenant-globex*, allow
+      p, role:tenant-globex-readonly, logs, get, apps/globex-*, allow
+      g, globex-viewers, role:tenant-globex-readonly
+      g, globex-devs, role:tenant-globex-readonly
+      g, globex-admins, role:tenant-globex-readonly
+
+  # Git repository (public HTTPS). For a private repo add a credential template via ExternalSecret.
+  repositories:
+    platform-gitops:
+      url: https://github.com/mahmoud-araby/microk8s-onperm.git
+      name: platform-gitops
+      type: git
+
+  secret:
+    createSecret: true           # server.secretkey is generated; admin disabled
+
+# ---------------------------------------------------------------- application controller (sharded)
+controller:
+  replicas: 3                    # ARGOCD_CONTROLLER_REPLICAS is set automatically -> 3 shards
+  resources:
+    requests: {cpu: "1", memory: 2Gi}
+    limits: {memory: 6Gi}
+  pdb:
+    enabled: true
+    minAvailable: 2
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+    rules:
+      enabled: false             # alerts live in gitops/platform/observability
+
+# ---------------------------------------------------------------- redis HA (sentinel + haproxy)
+redis:
+  enabled: false
+redis-ha:
+  enabled: true
+  replicas: 3
+  exporter:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  haproxy:
+    enabled: true
+    replicas: 3
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+  nodeSelector:
+    workload-tier: platform
+  hardAntiAffinity: true
+
+# ---------------------------------------------------------------- API server / UI
+server:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 60
+    targetMemoryUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 2
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  ingress:
+    enabled: false               # exposed through Istio internal gateway (argocd.ops.example.local)
+  # Trust the internal CA (Keycloak issuer keycloak.ops.example.local). Secret "internal-ca-bundle" is an
+  # ExternalSecret (./manifests) and optional, so the very first install works before Vault/ESO exist.
+  env:
+    - name: SSL_CERT_DIR
+      value: /etc/ssl/certs:/etc/ssl/internal-ca
+  volumes:
+    - name: internal-ca
+      secret:
+        secretName: internal-ca-bundle
+        optional: true
+  volumeMounts:
+    - name: internal-ca
+      mountPath: /etc/ssl/internal-ca
+      readOnly: true
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# ---------------------------------------------------------------- repo server
+repoServer:
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+    targetMemoryUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 2
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {memory: 2Gi}
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# ---------------------------------------------------------------- ApplicationSet controller
+applicationSet:
+  replicas: 2
+  pdb:
+    enabled: true
+    minAvailable: 1
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+# Dex is not used: Argo CD talks OIDC directly to Keycloak
+dex:
+  enabled: false
+
+# ---------------------------------------------------------------- notifications
+notifications:
+  enabled: true
+  argocdUrl: https://argocd.ops.example.local
+  secret:
+    create: false                # "argocd-notifications-secret" is rendered by an ExternalSecret (./manifests)
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  notifiers:
+    service.slack: |
+      token: $slack-token
+      username: argocd
+      icon: ":argo:"
+    service.email.smtp: |
+      host: smtp.example.com
+      port: 587
+      from: argocd@example.com
+      username: $email-username
+      password: $email-password
+  subscriptions:
+    # Everything that fails or degrades -> #platform-alerts + on-call mailbox
+    - recipients:
+        - slack:platform-alerts
+        - email:platform-oncall@example.com
+      triggers:
+        - on-sync-failed
+        - on-health-degraded
+    # Production deployments feed (all tenants)
+    - recipients:
+        - slack:deployments
+      triggers:
+        - on-deployed
+  templates:
+    template.app-deployed: |
+      email:
+        subject: "[Argo CD] {{.app.metadata.name}} deployed revision {{.app.status.sync.revision | trunc 7}}"
+      message: |
+        {{if eq .serviceType "slack"}}:white_check_mark:{{end}} Application *{{.app.metadata.name}}* (project {{.app.spec.project}}) is synced and healthy at revision {{.app.status.sync.revision | trunc 7}}.
+        {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+      slack:
+        attachments: |
+          [{
+            "title": "{{ .app.metadata.name }}",
+            "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+            "color": "#18be52",
+            "fields": [
+              {"title": "Project", "value": "{{.app.spec.project}}", "short": true},
+              {"title": "Revision", "value": "{{.app.status.sync.revision | trunc 7}}", "short": true},
+              {"title": "Namespace", "value": "{{.app.spec.destination.namespace}}", "short": true}
+            ]
+          }]
+    template.app-sync-failed: |
+      email:
+        subject: "[Argo CD] SYNC FAILED: {{.app.metadata.name}}"
+      message: |
+        {{if eq .serviceType "slack"}}:exclamation:{{end}} Sync of *{{.app.metadata.name}}* failed at {{.app.status.operationState.finishedAt}}.
+        Error: {{.app.status.operationState.message}}
+        {{.context.argocdUrl}}/applications/{{.app.metadata.name}}?operation=true
+      slack:
+        attachments: |
+          [{
+            "title": "{{ .app.metadata.name }}",
+            "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+            "color": "#E96D76",
+            "fields": [
+              {"title": "Project", "value": "{{.app.spec.project}}", "short": true},
+              {"title": "Revision", "value": "{{.app.status.operationState.syncResult.revision | trunc 7}}", "short": true}
+            ]
+          }]
+    template.app-health-degraded: |
+      email:
+        subject: "[Argo CD] DEGRADED: {{.app.metadata.name}}"
+      message: |
+        {{if eq .serviceType "slack"}}:warning:{{end}} Application *{{.app.metadata.name}}* is {{.app.status.health.status}}.
+        {{.context.argocdUrl}}/applications/{{.app.metadata.name}}
+      slack:
+        attachments: |
+          [{
+            "title": "{{ .app.metadata.name }}",
+            "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+            "color": "#f4c030",
+            "fields": [
+              {"title": "Health", "value": "{{.app.status.health.status}}", "short": true},
+              {"title": "Project", "value": "{{.app.spec.project}}", "short": true}
+            ]
+          }]
+  triggers:
+    trigger.on-deployed: |
+      - description: Application is synced and healthy. Triggered once per commit.
+        oncePer: app.status.operationState?.syncResult?.revision
+        send: [app-deployed]
+        when: app.status.operationState != nil and app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+    trigger.on-sync-failed: |
+      - description: Application syncing has failed
+        send: [app-sync-failed]
+        when: app.status.operationState != nil and app.status.operationState.phase in ['Error', 'Failed']
+    trigger.on-health-degraded: |
+      - description: Application has degraded
+        send: [app-health-degraded]
+        when: app.status.health.status == 'Degraded'
