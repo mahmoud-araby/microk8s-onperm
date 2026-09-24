@@ -44,7 +44,9 @@ Git repository URL: `https://github.com/mahmoud-araby/microk8s-onperm.git`, `tar
 ## Nodes
 
 MicroK8s HA: 3+ nodes are control plane (dqlite voters). Worker pools are identified by the label
-`workload-tier` = `edge` | `platform` | `data` | `apps` | `observability`.
+`workload-tier` = `edge` | `platform` | `data` | `storage` | `apps` | `observability`.
+`storage` nodes (tainted `workload-tier=storage:NoSchedule`) host the in-cluster MinIO tenant on `local-nvme` drives.
+Non-Kubernetes inventory groups: `loadbalancers` (HAProxy/keepalived), `vault_servers` (external Vault), `minio_servers` (external MinIO).
 Data and edge nodes carry taints `workload-tier=data:NoSchedule` / `workload-tier=edge:NoSchedule`;
 components targeting them add the matching toleration + nodeSelector/affinity.
 
@@ -63,6 +65,8 @@ components targeting them add the matching toleration + nodeSelector/affinity.
 | `data-redis` | Redis replication + Sentinel |
 | `rabbitmq-system` / `data-rabbitmq` | RabbitMQ operator / cluster |
 | `data-kafka` | Strimzi operator + Kafka (KRaft) cluster |
+| `minio-operator` / `minio` | MinIO operator / MinIO tenant `minio` |
+| `csi-s3`, `csi-nfs`, `local-path-storage` | Storage drivers |
 | `integration` | WSO2 Micro Integrator |
 | `monitoring` | kube-prometheus-stack (Prometheus, Alertmanager, Grafana), Thanos |
 | `elastic-system` / `logging` | ECK operator / Elasticsearch, Kibana, APM Server, Fluent Bit |
@@ -105,6 +109,49 @@ MetalLB address pools: `public-pool` (Kong, public ingress), `internal-pool` (Is
 
 - `longhorn` (default) — 3 replicas, for general stateful workloads.
 - `longhorn-db` — 1 replica, `dataLocality: strict-local`; for systems that replicate themselves (Postgres, Kafka, RabbitMQ, Redis, Elasticsearch).
+- `local-nvme` — local-path provisioner on `/mnt/local-nvme` (dedicated disk prepared by Ansible `storage_prep`), `WaitForFirstConsumer`;
+  fastest option, node-bound: MinIO drives, scratch/generic ephemeral volumes, caches.
+- `nfs-rwx` — csi-driver-nfs against an on-prem NFS export (`nfs.storage.example.local:/exports/k8s`); ReadWriteMany shared files.
+- `minio-s3` — CSI S3 driver (FUSE, geesefs) mounting MinIO buckets as volumes (ReadWriteMany, eventual consistency, not for databases).
+
+See [storage.md](storage.md) for the decision table (block vs file vs object vs ephemeral).
+
+## Object storage (MinIO)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `https://minio.minio.svc.cluster.local` (MinIO tenant `minio`, namespace `minio`, S3 API port 443) | In-cluster object storage for applications, per-tenant buckets, CSI S3 mounts |
+| `https://minio-console.ops.example.local` | MinIO console via Istio internal gateway |
+| `https://s3.example.com` | Optional public S3 endpoint via Kong (pre-signed URLs) |
+| `https://minio.storage.example.local:9000` | **External** MinIO on VMs (Ansible `minio_server`, inventory group `minio_servers`) = backup target (CNPG, Velero, Thanos, ES snapshots, Longhorn, dqlite) outside the cluster failure domain |
+
+- Bucket naming: `<tenant>-<purpose>` (e.g. `acme-files`, `shared-files`); platform buckets `platform-*`.
+- Per-tenant S3 identity: MinIO user `<tenant>` restricted to `<tenant>-*` buckets; credentials in Vault `secret/tenants/<tenant>/storage`
+  (keys `S3_ACCESS_KEY`, `S3_SECRET_KEY`) → Secret `tenant-s3-credentials` in the tenant namespace.
+- Env vars injected by `charts/microservice` when object storage is enabled: `S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_FORCE_PATH_STYLE`.
+- MinIO root credentials: Vault `secret/platform/minio` (in-cluster) and `secret/platform/minio-external` (VMs).
+
+## Load balancing (L7 with optional L4)
+
+```
+Internet ─▶ [L7/L4 LB pair: HAProxy + keepalived, inventory group `loadbalancers`]
+              public VIP  (lb_public_vip)   ─▶ Kong proxy MetalLB VIP (public-pool)        :443/:80
+              internal VIP(lb_internal_vip) ─▶ Istio internal gateway MetalLB VIP (internal-pool) :443
+                                            ─▶ Kubernetes API (masters :16443)  [always L4]
+                                            ─▶ Kafka external listener :9094      [always L4]
+```
+
+- `lb_mode: l7` (default) — HAProxy terminates TLS, HTTP/2, WAF hook, per-IP rate limiting, health checks, sets `X-Forwarded-For`/`X-Forwarded-Proto`,
+  re-encrypts to Kong/Istio. Kong/Istio trust the LB IPs for real client IP.
+- `lb_mode: l4` — TCP passthrough with PROXY protocol v2; Kong/Istio terminate TLS and read the client IP from PROXY protocol.
+- In-cluster L4 is MetalLB (L2 by default, BGP optional); in-cluster L7 is Kong (north-south) and Istio gateways/sidecars (east-west).
+
+## External Vault (optional)
+
+Ansible role `vault_server` can run a standalone Vault HA (raft) cluster on VMs (inventory group `vault_servers`,
+`https://vault-ext.example.local:8200`). Uses: Ansible secrets source (`secrets_backend: hashicorp_vault`, lookups via
+`community.hashi_vault`), **transit auto-unseal** (key `autounseal-k8s`) for the in-cluster Vault, and optional ESO backend.
+`vault_deployment_mode`: `in-cluster` (default) | `external` | `both`.
 
 ## Secrets and certificates
 
