@@ -1,0 +1,48 @@
+# Kiali (mesh topology / traffic / Istio config validation) - kiali-operator chart, which also creates the
+# Kiali CR (cr.create) in istio-system. UI: https://kiali.ops.example.local (Istio internal gateway).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kiali
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  labels:
+    app.kubernetes.io/part-of: observability
+    platform.example.com/category: observability
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  sources:
+    - repoURL: https://kiali.org/helm-charts
+      chart: kiali-operator
+      targetRevision: 2.32.0 # pin: verify latest before upgrade (keep within Istio's supported Kiali range)
+      helm:
+        releaseName: kiali-operator
+        valueFiles:
+          - $values/gitops/platform/observability/kiali/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    # ExternalSecrets (OIDC client secret, Grafana token) + VirtualService
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/observability/kiali/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # istio-system is created/owned by gitops/platform/core/istio - no CreateNamespace here.
+    syncOptions:
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

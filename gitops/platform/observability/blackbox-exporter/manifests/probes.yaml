@@ -1,0 +1,162 @@
+# Synthetic probes ("live monitoring"). Every probe exports probe_success, probe_duration_seconds,
+# probe_http_status_code and probe_ssl_earliest_cert_expiry; labels probe_group / criticality drive the
+# alert routing in ../alerts (SyntheticProbeFailed, SyntheticProbeSlow, TLSCertificateExpiringSoon).
+#
+# Public endpoints are probed from inside the cluster through the public VIP (MetalLB public-pool),
+# i.e. through Kong exactly like users. *.ops.example.local must resolve in-cluster (CoreDNS forward of
+# example.local to the internal DNS - configured by the Ansible "addons" playbook).
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: public-api
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobName: synthetic-public-api
+  interval: 30s
+  scrapeTimeout: 10s
+  module: http_health_json
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://api.example.com/health
+      labels:
+        probe_group: public
+        criticality: critical
+        service: kong-public-api
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: public-web
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobName: synthetic-public-web
+  interval: 30s
+  scrapeTimeout: 10s
+  module: http_2xx
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://app.example.com/
+        # Add per-tenant frontends here, e.g. https://acme.app.example.com/
+      labels:
+        probe_group: public
+        criticality: critical
+        service: frontend
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: ops-uis
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobName: synthetic-ops-ui
+  interval: 60s
+  scrapeTimeout: 10s
+  module: http_ops_ui
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://argocd.ops.example.local/healthz
+        - https://grafana.ops.example.local/api/health
+        - https://kibana.ops.example.local/api/status
+        - https://kiali.ops.example.local/kiali/healthz
+        - https://rollouts.ops.example.local/
+        - https://vault.ops.example.local/v1/sys/health
+        - https://harbor.ops.example.local/api/v2.0/health
+        - https://keycloak.ops.example.local/realms/master
+        - https://rabbitmq.ops.example.local/
+      labels:
+        probe_group: ops
+        criticality: warning
+---
+# In-cluster health of the observability stack itself (independent of the ingress path).
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: observability-incluster
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobName: synthetic-incluster
+  interval: 30s
+  scrapeTimeout: 10s
+  module: http_2xx_incluster
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local/api/health
+        - http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093/-/healthy
+        - http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/-/healthy
+        - http://thanos-query-frontend.monitoring.svc.cluster.local:9090/-/healthy
+        - http://kibana-kb-http.logging.svc.cluster.local:5601/api/status
+      labels:
+        probe_group: incluster
+        criticality: warning
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: elastic-incluster
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobName: synthetic-incluster-elastic
+  interval: 30s
+  scrapeTimeout: 10s
+  module: https_auth_incluster
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://elasticsearch-es-http.logging.svc.cluster.local:9200/
+        - https://apm-server-apm-http.logging.svc.cluster.local:8200/
+      labels:
+        probe_group: incluster
+        criticality: warning
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: telemetry-ingest-tcp
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  jobName: synthetic-incluster-tcp
+  interval: 30s
+  scrapeTimeout: 10s
+  module: tcp_connect
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - otel-collector.observability.svc.cluster.local:4317
+        - otel-collector.observability.svc.cluster.local:4318
+      labels:
+        probe_group: incluster
+        criticality: warning

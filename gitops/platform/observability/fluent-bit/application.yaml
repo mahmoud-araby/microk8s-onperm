@@ -1,0 +1,42 @@
+# Fluent Bit DaemonSet (every node) -> Elasticsearch data streams logs-<namespace>-k8s.
+# Same namespace as Elasticsearch ("logging") so it can mount the ECK CA and its ES user secret directly.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fluent-bit
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  labels:
+    app.kubernetes.io/part-of: observability
+    platform.example.com/category: observability
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: logging
+  sources:
+    - repoURL: https://fluent.github.io/helm-charts
+      chart: fluent-bit
+      targetRevision: 0.58.2 # pin: verify latest before upgrade
+      helm:
+        releaseName: fluent-bit
+        valueFiles:
+          - $values/gitops/platform/observability/fluent-bit/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

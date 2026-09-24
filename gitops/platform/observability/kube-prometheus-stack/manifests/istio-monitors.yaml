@@ -1,0 +1,71 @@
+# Istio telemetry scraping (single owner: this file - do NOT add another envoy PodMonitor elsewhere,
+# duplicated scrapes double every istio_* rate in dashboards and SLOs).
+#
+# Envoy stats are scraped directly on the sidecar/gateway port 15090 (http-envoy-prom) instead of the merged
+# 15020 endpoint, so application metrics are not scraped twice (apps have their own ServiceMonitor).
+# Port 15090 is excluded from mTLS interception -> plain HTTP works under STRICT PeerAuthentication.
+#
+# Required mesh config (owned by gitops/platform/core/istio): proxyStatsMatcher.inclusionRegexps must include
+#   ".*outlier_detection.*", ".*upstream_rq_retry.*", ".*upstream_rq_pending_overflow.*",
+#   ".*circuit_breakers.*", ".*upstream_cx_overflow.*", ".*upstream_rq_timeout.*"
+# for the "Circuit breakers & retries" dashboard and alerts.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: istio-envoy-stats
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: istio-envoy-stats
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: envoy-stats
+  namespaceSelector:
+    any: true
+  selector:
+    matchExpressions:
+      - key: istio-prometheus-ignore
+        operator: DoesNotExist
+  podMetricsEndpoints:
+    - port: http-envoy-prom
+      path: /stats/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_container_name]
+          regex: istio-proxy|istio-proxy-.*|istio-ingressgateway|istio-egressgateway
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_platform_example_com_tenant]
+          targetLabel: tenant
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          targetLabel: app
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_version]
+          targetLabel: pod_version
+      metricRelabelings:
+        # Keep Istio standard metrics + the envoy cluster stats used by dashboards/alerts; drop the rest.
+        - action: keep
+          sourceLabels: [__name__]
+          regex: istio_.*|envoy_cluster_(outlier_detection_.*|upstream_rq_retry.*|upstream_rq_pending_overflow|upstream_cx_overflow|upstream_rq_timeout|circuit_breakers_.*|upstream_rq_total|upstream_cx_active|upstream_rq_pending_active|membership_healthy|membership_total)|envoy_server_(live|uptime|memory_allocated|total_connections)|envoy_cluster_manager_.*
+        - action: labeldrop
+          regex: (source_principal|destination_principal|request_protocol|connection_security_policy|source_cluster|destination_cluster)
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istiod
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: istiod
+    app.kubernetes.io/part-of: observability
+spec:
+  jobLabel: istio
+  namespaceSelector:
+    matchNames: [istio-system]
+  selector:
+    matchLabels:
+      app: istiod
+  endpoints:
+    - port: http-monitoring
+      interval: 30s

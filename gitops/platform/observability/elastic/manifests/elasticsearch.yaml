@@ -1,0 +1,163 @@
+# Elasticsearch cluster "elasticsearch" -> https://elasticsearch-es-http.logging.svc.cluster.local:9200
+#
+# Topology (see ../../README.md "Retention & sizing"):
+#   master x3  dedicated, small                       (longhorn-db, 20Gi)
+#   hot    x3  data_hot + data_content + ingest, NVMe (longhorn-db, 6Ti)  heap 16g
+#   warm   x2  data_warm, dense storage               (longhorn-db, 12Ti) heap 12g
+# Elasticsearch replicates shards itself -> single-replica Longhorn class "longhorn-db" (strict-local).
+# Zone awareness: ECK spreads pods over topology.kubernetes.io/zone and sets shard allocation awareness
+# (operator exposes the zone label, see eck-operator values exposedNodeLabels).
+# Node prerequisite (Ansible prepare-nodes): vm.max_map_count >= 1048576 on observability nodes.
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: elasticsearch
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/part-of: observability
+spec:
+  version: 8.19.22 # pin: verify latest before upgrade (keep Kibana/APM on the same version)
+  http:
+    tls:
+      selfSignedCertificate:
+        subjectAltNames:
+          - dns: elasticsearch-es-http.logging.svc.cluster.local
+          - dns: elasticsearch-es-http.logging.svc
+          - dns: elasticsearch-es-http
+  # S3 (MinIO) credentials for the snapshot repository, injected into the ES keystore.
+  secureSettings:
+    - secretName: es-snapshot-s3-credentials
+  auth:
+    roles:
+      - secretName: es-custom-roles
+    fileRealm:
+      - secretName: es-user-fluent-bit
+      - secretName: es-user-grafana
+      - secretName: es-user-exporter
+  updateStrategy:
+    changeBudget:
+      maxSurge: 1
+      maxUnavailable: 1
+  volumeClaimDeletePolicy: DeleteOnScaledownOnly
+  nodeSets:
+    # ---------------------------------------------------------------- dedicated masters
+    - name: master
+      count: 3
+      zoneAwareness: {}
+      config:
+        node.roles: ["master"]
+        node.attr.data_tier: master
+        s3.client.default.endpoint: minio.storage.example.local:9000
+        s3.client.default.protocol: https
+        s3.client.default.path_style_access: true
+        xpack.monitoring.collection.enabled: false
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/name: elasticsearch
+            app.kubernetes.io/component: master
+        spec:
+          nodeSelector:
+            workload-tier: observability
+          containers:
+            - name: elasticsearch
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms4g -Xmx4g"
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 8Gi
+                limits:
+                  memory: 8Gi
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: longhorn-db
+            resources:
+              requests:
+                storage: 20Gi
+    # ---------------------------------------------------------------- hot (ingest + recent data)
+    - name: hot
+      count: 3
+      zoneAwareness: {}
+      config:
+        node.roles: ["data_hot", "data_content", "ingest"]
+        node.attr.data_tier: hot
+        s3.client.default.endpoint: minio.storage.example.local:9000
+        s3.client.default.protocol: https
+        s3.client.default.path_style_access: true
+        # Bulk-heavy workload (Fluent Bit + APM): bigger write queue, index buffer.
+        thread_pool.write.queue_size: 2000
+        indices.memory.index_buffer_size: 20%
+        xpack.monitoring.collection.enabled: false
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/name: elasticsearch
+            app.kubernetes.io/component: data-hot
+        spec:
+          nodeSelector:
+            workload-tier: observability
+          containers:
+            - name: elasticsearch
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms16g -Xmx16g" # 50% of the container memory, < 31g (compressed oops)
+              resources:
+                requests:
+                  cpu: "6"
+                  memory: 32Gi
+                limits:
+                  memory: 32Gi
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: longhorn-db # NVMe-backed disks on the hot nodes
+            resources:
+              requests:
+                storage: 6Ti
+    # ---------------------------------------------------------------- warm (7d -> 30d)
+    - name: warm
+      count: 2
+      zoneAwareness: {}
+      config:
+        node.roles: ["data_warm"]
+        node.attr.data_tier: warm
+        s3.client.default.endpoint: minio.storage.example.local:9000
+        s3.client.default.protocol: https
+        s3.client.default.path_style_access: true
+        xpack.monitoring.collection.enabled: false
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/name: elasticsearch
+            app.kubernetes.io/component: data-warm
+        spec:
+          nodeSelector:
+            workload-tier: observability
+          containers:
+            - name: elasticsearch
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms12g -Xmx12g"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 24Gi
+                limits:
+                  memory: 24Gi
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: longhorn-db
+            resources:
+              requests:
+                storage: 12Ti

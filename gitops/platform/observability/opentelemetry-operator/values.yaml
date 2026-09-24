@@ -1,0 +1,44 @@
+# OpenTelemetry Operator - chart open-telemetry/opentelemetry-operator 0.123.1 (operator 0.159.0).
+replicaCount: 2
+pdb:
+  create: true
+  minAvailable: 1
+
+manager:
+  # Default collector image when a CR does not set one: contrib distribution (tail_sampling, spanmetrics,
+  # k8sattributes, loadbalancing, prometheus exporters are not in the core/k8s distributions).
+  collectorImage:
+    repository: otel/opentelemetry-collector-contrib
+    tag: 0.159.0 # pin: verify latest before upgrade
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  serviceMonitor:
+    enabled: true
+  # Auto-instrumentation images default to the versions bundled with this operator release
+  # (java, dotnet, python used by the "platform-instrumentation" Instrumentation CR).
+  autoInstrumentation:
+    go:
+      enabled: false
+  leaderElection:
+    enabled: true
+
+admissionWebhooks:
+  create: true
+  failurePolicy: Fail
+  pods:
+    failurePolicy: Ignore # never block pod creation if the operator is down (no injection instead)
+  certManager:
+    enabled: true # cert-manager is installed at wave -15
+  autoGenerateCert:
+    enabled: false
+
+crds:
+  create: true
+
+nodeSelector:
+  kubernetes.io/os: linux
+  workload-tier: platform

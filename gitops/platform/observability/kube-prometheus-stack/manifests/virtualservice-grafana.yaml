@@ -1,0 +1,22 @@
+# grafana.ops.example.local -> Grafana, via the Istio internal gateway (ops tooling is never public).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: observability
+spec:
+  hosts:
+    - grafana.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: grafana
+      route:
+        - destination:
+            host: kube-prometheus-stack-grafana.monitoring.svc.cluster.local
+            port:
+              number: 80
+      timeout: 120s

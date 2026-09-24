@@ -1,0 +1,83 @@
+# Edge alerts: Kong public API gateway + synthetic probes (blackbox exporter, ../blackbox-exporter).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: edge-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: edge-alerts
+    app.kubernetes.io/part-of: observability
+spec:
+  groups:
+  - name: edge.alerts
+    rules:
+    - alert: Kong5xxSurge
+      expr: |
+        (
+          sum by (service) (rate(kong_http_requests_total{code=~"5.."}[5m]))
+          /
+          sum by (service) (rate(kong_http_requests_total[5m]))
+        ) > 0.05
+        and
+        sum by (service) (rate(kong_http_requests_total[5m])) > 1
+      for: 5m
+      labels:
+        severity: critical
+        namespace: kong
+      annotations:
+        summary: Kong service {{ $labels.service }} returns {{ $value | humanizePercentage }} 5xx
+        description: More than 5% of requests through the public API gateway fail for this route/service.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/Kong5xxSurge.md
+    - alert: KongGlobal5xxRateHigh
+      expr: |
+        sum(rate(kong_http_requests_total{code=~"5.."}[5m]))
+        /
+        sum(rate(kong_http_requests_total[5m])) > 0.02
+      for: 5m
+      labels:
+        severity: warning
+        namespace: kong
+      annotations:
+        summary: '{{ $value | humanizePercentage }} of all public API requests fail with 5xx'
+        description: Gateway-wide error rate above 2%.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/Kong5xxSurge.md
+    - alert: KongLatencyHigh
+      expr: |
+        histogram_quantile(0.99, sum by (service, le) (rate(kong_request_latency_ms_bucket[5m]))) > 2000
+        and
+        sum by (service) (rate(kong_request_latency_ms_count[5m])) > 1
+      for: 10m
+      labels:
+        severity: warning
+        namespace: kong
+      annotations:
+        summary: Kong p99 latency for {{ $labels.service }} is {{ $value }}ms
+        description: p99 total request latency (Kong + upstream) above 2s.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/KongLatencyHigh.md
+    - alert: SyntheticProbeFailed
+      expr: probe_success{probe_group="public"} == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: Public endpoint {{ $labels.instance }} is DOWN (synthetic probe)
+        description: Blackbox probe from inside the cluster through the public VIP fails (HTTP status {{ with printf `probe_http_status_code{instance="%s"}` $labels.instance | query }}{{ . | first | value }}{{ end }}).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SyntheticProbeFailed.md
+    - alert: SyntheticProbeFailedInternal
+      expr: probe_success{probe_group=~"ops|incluster"} == 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Internal endpoint {{ $labels.instance }} is failing its synthetic probe
+        description: Ops UI or in-cluster platform endpoint unreachable/unhealthy for 5 minutes.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SyntheticProbeFailed.md
+    - alert: SyntheticProbeSlow
+      expr: avg_over_time(probe_duration_seconds{probe_group="public"}[10m]) > 2
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: Public endpoint {{ $labels.instance }} responds slowly ({{ $value | humanizeDuration }})
+        description: Average synthetic probe duration above 2 seconds over 10 minutes.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SyntheticProbeFailed.md

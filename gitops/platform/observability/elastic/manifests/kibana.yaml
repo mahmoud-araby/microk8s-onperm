@@ -1,0 +1,75 @@
+# Kibana "kibana" (2 replicas) -> https://kibana.ops.example.local (TLS terminated at the Istio internal
+# gateway, so Kibana's own self-signed HTTP TLS is disabled; traffic stays inside the cluster network).
+#
+# SSO note: Kibana/Elasticsearch OIDC (Keycloak) needs an Elastic Platinum/Enterprise license
+# (OpenID Connect realm). With the Basic license keep the "basic" provider (native users managed in
+# Kibana) or front Kibana with oauth2-proxy. With a license, add to Elasticsearch config:
+#   xpack.security.authc.realms.oidc.keycloak:
+#     order: 2
+#     rp.client_id: kibana
+#     rp.response_type: code
+#     rp.redirect_uri: https://kibana.ops.example.local/api/security/oidc/callback
+#     op.issuer: https://keycloak.ops.example.local/realms/platform
+#     op.authorization_endpoint: https://keycloak.ops.example.local/realms/platform/protocol/openid-connect/auth
+#     op.token_endpoint: http://keycloak.keycloak.svc.cluster.local:8080/realms/platform/protocol/openid-connect/token
+#     op.jwkset_path: http://keycloak.keycloak.svc.cluster.local:8080/realms/platform/protocol/openid-connect/certs
+#     op.userinfo_endpoint: http://keycloak.keycloak.svc.cluster.local:8080/realms/platform/protocol/openid-connect/userinfo
+#     claims.principal: preferred_username
+#     claims.groups: groups
+#   (+ secureSettings key xpack.security.authc.realms.oidc.keycloak.rp.client_secret)
+# and uncomment the oidc provider below.
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: kibana
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: kibana
+    app.kubernetes.io/part-of: observability
+spec:
+  version: 8.19.22 # pin: verify latest before upgrade (same as Elasticsearch)
+  count: 2
+  elasticsearchRef:
+    name: elasticsearch
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: true
+  config:
+    server.publicBaseUrl: https://kibana.ops.example.local
+    telemetry.optIn: false
+    telemetry.allowChangingOptInStatus: false
+    xpack.fleet.agents.enabled: false # Elastic Agent / Fleet are not used (OTel + Fluent Bit instead)
+    xpack.security.authc.providers:
+      # oidc.keycloak:
+      #   order: 0
+      #   realm: keycloak
+      #   description: "Log in with Keycloak"
+      basic.basic1:
+        order: 1
+    monitoring.ui.ccs.enabled: false
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kibana
+    spec:
+      nodeSelector:
+        workload-tier: observability
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  kibana.k8s.elastic.co/name: kibana
+      containers:
+        - name: kibana
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=2048"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              memory: 3Gi

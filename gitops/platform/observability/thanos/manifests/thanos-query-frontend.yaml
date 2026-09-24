@@ -1,0 +1,131 @@
+# Thanos Query Frontend: splits long range queries by day, retries, and caches results.
+# Grafana datasource "Thanos" and long-range dashboards use http://thanos-query-frontend.monitoring:9090.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thanos-query-frontend-cache
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: thanos-query-frontend
+    app.kubernetes.io/part-of: observability
+data:
+  # In-memory per replica; switch to MEMCACHED/REDIS for a shared cache if hit rate matters.
+  response-cache.yaml: |
+    type: IN-MEMORY
+    config:
+      max_size: 1GB
+      max_size_items: 0
+      validity: 0s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-query-frontend
+  namespace: monitoring
+  labels: &labels
+    app.kubernetes.io/name: thanos-query-frontend
+    app.kubernetes.io/component: query-frontend
+    app.kubernetes.io/part-of: observability
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-query-frontend
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      serviceAccountName: thanos
+      nodeSelector:
+        workload-tier: observability
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: thanos-query-frontend
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: thanos-query-frontend
+          image: quay.io/thanos/thanos:v0.42.4 # pin: verify latest before upgrade
+          args:
+            - query-frontend
+            - --log.level=info
+            - --log.format=json
+            - --http-address=0.0.0.0:10902
+            - --query-frontend.downstream-url=http://thanos-query.monitoring.svc.cluster.local:9090
+            - --query-frontend.compress-responses
+            - --query-frontend.log-queries-longer-than=10s
+            - --query-range.split-interval=24h
+            - --query-range.max-retries-per-request=3
+            - --query-range.request-downsampled
+            - --query-range.response-cache-config-file=/etc/thanos/response-cache.yaml
+            - --labels.split-interval=24h
+            - --labels.max-retries-per-request=3
+            - --labels.response-cache-config-file=/etc/thanos/response-cache.yaml
+          ports:
+            - name: http
+              containerPort: 10902
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 3Gi
+          volumeMounts:
+            - name: cache-config
+              mountPath: /etc/thanos
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: cache-config
+          configMap:
+            name: thanos-query-frontend-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-query-frontend
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: thanos-query-frontend
+    app.kubernetes.io/part-of: observability
+spec:
+  selector:
+    app.kubernetes.io/name: thanos-query-frontend
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: thanos-query-frontend
+  namespace: monitoring
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-query-frontend

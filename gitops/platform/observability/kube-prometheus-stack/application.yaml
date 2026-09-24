@@ -1,0 +1,66 @@
+# kube-prometheus-stack: Prometheus Operator, Prometheus HA (+ Thanos sidecar), Alertmanager HA, Grafana HA,
+# kube-state-metrics, node-exporter. Release name MUST stay "kube-prometheus-stack" so that the Prometheus
+# service is kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090 (docs/conventions.md).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  labels:
+    app.kubernetes.io/part-of: observability
+    platform.example.com/category: observability
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 91.4.1 # pin: verify latest before upgrade
+      helm:
+        releaseName: kube-prometheus-stack
+        valueFiles:
+          - $values/gitops/platform/observability/kube-prometheus-stack/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+    # ExternalSecrets (Grafana DB/OIDC, Alertmanager receivers), cross-namespace SecretStore, Istio scrape
+    # config (envoy PodMonitor + istiod ServiceMonitor) and the Grafana VirtualService.
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/observability/kube-prometheus-stack/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # monitoring is intentionally NOT labelled istio-injection (enabled or disabled): only Prometheus gets a
+    # (non-intercepting) sidecar through the pod label sidecar.istio.io/inject=true, see values.yaml.
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: observability
+        platform.example.com/category: observability
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true # CRDs of prometheus-operator exceed the client-side annotation limit
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

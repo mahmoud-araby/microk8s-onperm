@@ -1,0 +1,116 @@
+# Kiali operator + Kiali CR - chart kiali/kiali-operator 2.32.0 (pin in application.yaml).
+# NOTE on deletion: the Kiali CR has a finalizer handled by the operator; when removing Kiali, delete the
+# CR first (set cr.create=false and sync), then remove this Application.
+
+image:
+  pullPolicy: IfNotPresent
+
+nodeSelector:
+  workload-tier: platform
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 512Mi
+
+watchNamespace: istio-system # only reconcile the Kiali CR below
+clusterRoleCreator: true
+debug:
+  enabled: false
+
+cr:
+  create: true
+  name: kiali
+  namespace: istio-system
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  spec:
+    istio_namespace: istio-system
+
+    # ---- Authentication: OpenID Connect with Keycloak (realm "platform", client "kiali") ----
+    # Client secret: Secret "kiali" key "oidc-secret" (ExternalSecret in manifests/).
+    # Kiali calls the issuer's discovery endpoint over HTTPS (internal-ca certificate): provide the CA in
+    # ConfigMap "kiali-cabundle" (key "openid-server-ca.crt") in istio-system - e.g. from trust-manager.
+    # disable_rbac: true -> Kiali uses its own ServiceAccount for the Kubernetes API (the MicroK8s API
+    # server is not configured as an OIDC relying party); access control = Keycloak group on the client.
+    # Fallback without Keycloak: strategy "token" (users paste a ServiceAccount token).
+    auth:
+      strategy: openid
+      openid:
+        client_id: kiali
+        issuer_uri: https://keycloak.ops.example.local/realms/platform
+        username_claim: preferred_username
+        scopes: ["openid", "profile", "email", "groups"]
+        disable_rbac: true
+
+    deployment:
+      cluster_wide_access: true
+      replicas: 2
+      view_only_mode: false
+      service_type: ClusterIP
+      ingress:
+        enabled: false # exposed by the VirtualService in manifests/
+      logger:
+        log_format: json
+        log_level: info
+      node_selector:
+        workload-tier: observability
+      resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          memory: 1Gi
+
+    server:
+      web_fqdn: kiali.ops.example.local
+      web_port: "443"
+      web_schema: https
+      web_root: /kiali # matches the Keycloak client redirect URI https://kiali.ops.example.local/kiali/*
+
+    external_services:
+      prometheus:
+        # Istio telemetry is scraped by kube-prometheus-stack (PodMonitor istio-envoy-stats).
+        url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+      grafana:
+        enabled: true
+        internal_url: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local:80
+        external_url: https://grafana.ops.example.local
+        auth:
+          type: bearer
+          token: secret:kiali-grafana:token # Grafana service-account token (Viewer)
+        dashboards:
+          - name: Microservice RED
+            variables:
+              namespace: var-namespace
+              service: var-service
+          - name: Platform Overview & SLOs
+            variables:
+              namespace: var-namespace
+      # Tracing integration disabled: Kiali supports Jaeger and Grafana Tempo back ends only. Traces are
+      # stored in Elastic APM (OTLP), which exposes neither API -> use Kibana APM (kibana.ops.example.local).
+      tracing:
+        enabled: false
+      istio:
+        root_namespace: istio-system
+        component_status:
+          enabled: true
+          components:
+            - app_label: istiod
+              is_core: true
+            - app_label: istio-ingressgateway
+              namespace: istio-ingress
+              is_core: false
+            - app_label: internal-gateway
+              namespace: istio-internal
+              is_core: true
+            - app_label: istio-egressgateway
+              namespace: istio-egress
+              is_core: false
+
+    kiali_feature_flags:
+      ui_defaults:
+        metrics_per_refresh: 5m
+        refresh_interval: 1m

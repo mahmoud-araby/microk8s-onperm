@@ -1,0 +1,27 @@
+# kiali.ops.example.local -> Kiali, via the Istio internal gateway (ops tooling is never public).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: kiali
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: kiali
+    app.kubernetes.io/part-of: observability
+spec:
+  hosts:
+    - kiali.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: root-redirect
+      match:
+        - uri:
+            exact: /
+      redirect:
+        uri: /kiali/
+    - name: kiali
+      route:
+        - destination:
+            host: kiali.istio-system.svc.cluster.local
+            port:
+              number: 20001

@@ -1,0 +1,154 @@
+# Thanos Store Gateway: serves historical blocks from object storage. 2 identical replicas for HA
+# (Query merges identical series). The PVC only holds index-headers/caches (rebuildable) -> longhorn-db.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thanos-store-cache
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: thanos-store
+    app.kubernetes.io/part-of: observability
+data:
+  index-cache.yaml: |
+    type: IN-MEMORY
+    config:
+      max_size: 2GB
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thanos-store
+  namespace: monitoring
+  labels: &labels
+    app.kubernetes.io/name: thanos-store
+    app.kubernetes.io/component: store-gateway
+    app.kubernetes.io/part-of: observability
+spec:
+  replicas: 2
+  serviceName: thanos-store
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-store
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      serviceAccountName: thanos
+      nodeSelector:
+        workload-tier: observability
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: thanos-store
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: thanos-store
+          image: quay.io/thanos/thanos:v0.42.4 # pin: verify latest before upgrade
+          args:
+            - store
+            - --log.level=info
+            - --log.format=json
+            - --data-dir=/var/thanos/store
+            - --http-address=0.0.0.0:10902
+            - --grpc-address=0.0.0.0:10901
+            - --objstore.config-file=/etc/thanos/objstore/objstore.yml
+            - --index-cache.config-file=/etc/thanos/cache/index-cache.yaml
+            - --chunk-pool-size=4GB
+            - --sync-block-duration=5m
+            - --ignore-deletion-marks-delay=24h
+            - --store.enable-index-header-lazy-reader
+            - --store.grpc.series-max-concurrency=40
+          ports:
+            - name: http
+              containerPort: 10902
+            - name: grpc
+              containerPort: 10901
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 30
+            failureThreshold: 8
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 6Gi
+            limits:
+              memory: 12Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/thanos/store
+            - name: objstore
+              mountPath: /etc/thanos/objstore
+              readOnly: true
+            - name: cache-config
+              mountPath: /etc/thanos/cache
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: objstore
+          secret:
+            secretName: thanos-objstore
+        - name: cache-config
+          configMap:
+            name: thanos-store-cache
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: longhorn-db
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 100Gi
+---
+# Headless: Thanos Query discovers every replica with dnssrv+_grpc._tcp.thanos-store.monitoring.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-store
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: thanos-store
+    app.kubernetes.io/part-of: observability
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: thanos-store
+  ports:
+    - name: grpc
+      port: 10901
+      targetPort: grpc
+    - name: http
+      port: 10902
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: thanos-store
+  namespace: monitoring
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-store

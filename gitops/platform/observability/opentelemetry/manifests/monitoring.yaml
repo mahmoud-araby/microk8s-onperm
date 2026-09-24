@@ -1,0 +1,46 @@
+# Prometheus scraping of the collectors (picked up cluster-wide per the monitoring contract).
+#   :8888 collector self-telemetry (otelcol_* : refused/dropped/failed spans, queue sizes)
+#   :8889 Prometheus exporter of the gateway (OTLP app metrics + spanmetrics traces_span_metrics_*)
+# honorLabels keeps the exported job/namespace/service labels of the applications instead of the
+# collector pod's own labels.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: otel-collector-telemetry
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [opentelemetry-collector]
+  podMetricsEndpoints:
+    - portNumber: 8888
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          targetLabel: collector
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: otel-collector-exported-metrics
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: opentelemetry-collector
+      app.kubernetes.io/instance: observability.otel
+  podMetricsEndpoints:
+    - portNumber: 8889
+      path: /metrics
+      interval: 30s
+      honorLabels: true
+      metricRelabelings:
+        - action: labeldrop
+          regex: otel_scope_(name|version|schema_url)

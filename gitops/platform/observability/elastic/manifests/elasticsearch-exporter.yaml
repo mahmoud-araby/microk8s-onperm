@@ -1,0 +1,117 @@
+# Prometheus exporter for Elasticsearch cluster health / nodes / ILM / SLM / data streams
+# (ECK does not expose Prometheus metrics). Used by alerts ElasticsearchClusterRed/Yellow, disk & heap.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch-exporter
+  namespace: logging
+  labels: &labels
+    app.kubernetes.io/name: elasticsearch-exporter
+    app.kubernetes.io/part-of: observability
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch-exporter
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        workload-tier: observability
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.11.0 # pin: verify latest before upgrade
+          args:
+            - --es.uri=https://elasticsearch-es-http.logging.svc.cluster.local:9200
+            - --es.ca=/certs/ca.crt
+            - --es.all
+            - --es.ilm
+            - --collector.slm
+            - --es.data_stream
+            - --es.timeout=30s
+            - --web.listen-address=:9114
+          env:
+            - name: ES_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: es-user-exporter
+                  key: username
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: es-user-exporter
+                  key: password
+          ports:
+            - name: http-metrics
+              containerPort: 9114
+          livenessProbe:
+            tcpSocket:
+              port: http-metrics
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: http-metrics
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: ca
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: ca
+          secret:
+            secretName: elasticsearch-es-http-certs-public
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-exporter
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: elasticsearch-exporter
+    app.kubernetes.io/part-of: observability
+spec:
+  selector:
+    app.kubernetes.io/name: elasticsearch-exporter
+  ports:
+    - name: http-metrics
+      port: 9114
+      targetPort: http-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: elasticsearch-exporter
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: elasticsearch-exporter
+    app.kubernetes.io/part-of: observability
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch-exporter
+  endpoints:
+    - port: http-metrics
+      interval: 30s
+      scrapeTimeout: 25s
+      relabelings:
+        - targetLabel: es_cluster
+          replacement: elasticsearch

@@ -1,0 +1,141 @@
+# Tail-sampling tier "otel-sampler" (headless Service otel-sampler-collector-headless:4317, fed ONLY by the
+# gateway's loadbalancing exporter, keyed by traceID, so every span of a trace lands on the same replica).
+#
+# Policy (a trace is kept if ANY policy matches) - docs/capacity-planning.md "Traces":
+#   - any span with status ERROR
+#   - any HTTP 5xx server span
+#   - trace duration >= 1s (slow)
+#   - 10% probabilistic baseline of everything else
+# Kept traces -> Elastic APM Server (OTLP gRPC, TLS + secret token).
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-sampler
+  namespace: observability
+  labels:
+    platform.example.com/collector-role: tail-sampler
+    app.kubernetes.io/part-of: observability
+spec:
+  mode: statefulset # stable identities -> stable DNS answers for the loadbalancing exporter
+  image: otel/opentelemetry-collector-contrib:0.159.0 # pin: verify latest before upgrade
+  replicas: 3
+  podDisruptionBudget:
+    maxUnavailable: 1
+  nodeSelector:
+    workload-tier: observability
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/instance: observability.otel-sampler # label set by the operator: <namespace>.<name>
+  resources:
+    requests:
+      cpu: "1"
+      memory: 6Gi
+    limits:
+      memory: 8Gi
+  env:
+    - name: GOMEMLIMIT
+      value: 6800MiB
+    - name: ELASTIC_APM_SECRET_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: apm-server-credentials
+          key: secret-token
+  volumes:
+    - name: apm-ca
+      secret:
+        secretName: apm-server-credentials
+        items:
+          - key: ca.crt
+            path: ca.crt
+  volumeMounts:
+    - name: apm-ca
+      mountPath: /etc/apm
+      readOnly: true
+  observability:
+    metrics:
+      enableMetrics: false
+  config:
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+            max_recv_msg_size_mib: 32
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 85
+        spike_limit_percentage: 15
+      tail_sampling:
+        decision_wait: 10s
+        # ~15k RPS x ~1.5 traces/request split over 3 replicas, x decision_wait with headroom
+        num_traces: 400000
+        expected_new_traces_per_sec: 10000
+        decision_cache:
+          sampled_cache_size: 1000000
+          non_sampled_cache_size: 1000000
+        policies:
+          - name: keep-errors
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: keep-http-5xx
+            type: numeric_attribute
+            numeric_attribute:
+              key: http.response.status_code
+              min_value: 500
+              max_value: 599
+          - name: keep-slow
+            type: latency
+            latency:
+              threshold_ms: 1000
+          - name: baseline-10pct
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
+      batch:
+        send_batch_size: 4096
+        send_batch_max_size: 8192
+        timeout: 2s
+    exporters:
+      otlp_grpc/apm:
+        endpoint: apm-server-apm-http.logging.svc.cluster.local:8200
+        tls:
+          ca_file: /etc/apm/ca.crt
+        headers:
+          Authorization: Bearer ${env:ELASTIC_APM_SECRET_TOKEN}
+        sending_queue:
+          enabled: true
+          num_consumers: 20
+          queue_size: 10000
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 300s
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+          encoding: json
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, tail_sampling, batch]
+          exporters: [otlp_grpc/apm]

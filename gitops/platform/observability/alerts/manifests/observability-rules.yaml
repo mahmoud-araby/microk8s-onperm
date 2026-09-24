@@ -1,0 +1,155 @@
+# Alerts on the observability pipeline itself: Elasticsearch, Fluent Bit, OpenTelemetry Collector, Thanos.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: observability-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: observability-alerts
+    app.kubernetes.io/part-of: observability
+spec:
+  groups:
+  - name: observability.alerts
+    rules:
+    - alert: ElasticsearchClusterRed
+      expr: max by (cluster) (elasticsearch_cluster_health_status{color="red"}) == 1
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: Elasticsearch cluster {{ $labels.cluster }} is RED
+        description: At least one primary shard is unassigned - some log/APM data is not searchable and writes to it fail.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ElasticsearchClusterRed.md
+    - alert: ElasticsearchClusterYellow
+      expr: max by (cluster) (elasticsearch_cluster_health_status{color="yellow"}) == 1
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Elasticsearch cluster {{ $labels.cluster }} is YELLOW
+        description: Replica shards unassigned for 15 minutes (node loss, disk watermark or allocation filtering).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ElasticsearchClusterYellow.md
+    - alert: ElasticsearchDiskWatermark
+      expr: (1 - elasticsearch_filesystem_data_available_bytes / elasticsearch_filesystem_data_size_bytes) > 0.80
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Elasticsearch node {{ $labels.name }} disk {{ $value | humanizePercentage }} used
+        description: 'Approaching the 85% low watermark: shards stop being allocated to this node.'
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ElasticsearchDiskWatermark.md
+    - alert: ElasticsearchHeapHigh
+      expr: max by (cluster, name) (elasticsearch_jvm_memory_used_bytes{area="heap"} / elasticsearch_jvm_memory_max_bytes{area="heap"}) > 0.90
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Elasticsearch node {{ $labels.name }} heap {{ $value | humanizePercentage }}
+        description: Sustained heap pressure (GC storms, circuit breakers).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ElasticsearchHeapHigh.md
+    - alert: ElasticsearchExporterDown
+      expr: absent(up{job="elasticsearch-exporter"} == 1)
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: Elasticsearch exporter is down
+        description: Elasticsearch health is not monitored.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ElasticsearchExporterDown.md
+    - alert: FluentBitOutputErrors
+      expr: sum by (pod, name) (rate(fluentbit_output_errors_total[5m])) > 0
+      for: 10m
+      labels:
+        severity: warning
+        namespace: logging
+      annotations:
+        summary: Fluent Bit {{ $labels.pod }} output {{ $labels.name }} is failing
+        description: Chunks are being retried (Elasticsearch rejects or is unreachable). Logs are buffered on disk (8G per node).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/FluentBitOutputErrors.md
+    - alert: FluentBitRetriesExhausted
+      expr: sum by (pod, name) (increase(fluentbit_output_retries_failed_total[10m])) > 0
+      for: 0m
+      labels:
+        severity: critical
+        namespace: logging
+      annotations:
+        summary: Fluent Bit {{ $labels.pod }} dropped chunks after exhausting retries
+        description: Retry_Limit reached - LOG DATA WAS LOST on this node.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/FluentBitOutputErrors.md
+    - alert: FluentBitDroppedRecords
+      expr: sum by (pod, name) (increase(fluentbit_output_dropped_records_total[10m])) > 0
+      for: 0m
+      labels:
+        severity: critical
+        namespace: logging
+      annotations:
+        summary: Fluent Bit {{ $labels.pod }} dropped records
+        description: Records were dropped by output {{ $labels.name }} (e.g. mapping errors, buffer limit).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/FluentBitOutputErrors.md
+    - alert: OTelCollectorDroppingSpans
+      expr: |
+        sum by (namespace, pod, exporter) (rate({__name__=~"otelcol_exporter_send_failed_spans(_total)?"}[5m]))
+        /
+        (
+          sum by (namespace, pod, exporter) (rate({__name__=~"otelcol_exporter_sent_spans(_total)?"}[5m]))
+          +
+          sum by (namespace, pod, exporter) (rate({__name__=~"otelcol_exporter_send_failed_spans(_total)?"}[5m]))
+        ) > 0.01
+      for: 10m
+      labels:
+        severity: warning
+        namespace: observability
+      annotations:
+        summary: OTel collector {{ $labels.pod }} fails to export {{ $value | humanizePercentage }} of spans ({{ $labels.exporter }})
+        description: Exporter errors towards the sampler tier / Elastic APM. Spans are retried from the sending queue until it is full.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/OTelCollectorDroppingSpans.md
+    - alert: OTelCollectorQueueFull
+      expr: max by (namespace, pod, exporter) (otelcol_exporter_queue_size / otelcol_exporter_queue_capacity) > 0.8
+      for: 5m
+      labels:
+        severity: critical
+        namespace: observability
+      annotations:
+        summary: OTel collector {{ $labels.pod }} sending queue {{ $value | humanizePercentage }} full ({{ $labels.exporter }})
+        description: When the queue is full, new telemetry is DROPPED. Scale the collector or fix the downstream (APM Server / Elasticsearch).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/OTelCollectorDroppingSpans.md
+    - alert: OTelCollectorEnqueueFailed
+      expr: sum by (namespace, pod, exporter) (rate({__name__=~"otelcol_exporter_enqueue_failed_(spans|metric_points|log_records)(_total)?"}[5m])) > 0
+      for: 2m
+      labels:
+        severity: critical
+        namespace: observability
+      annotations:
+        summary: OTel collector {{ $labels.pod }} is dropping telemetry (queue full)
+        description: Telemetry could not be enqueued and was dropped ({{ $labels.exporter }}).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/OTelCollectorDroppingSpans.md
+    - alert: OTelCollectorRefusingData
+      expr: sum by (namespace, pod, receiver) (rate({__name__=~"otelcol_receiver_refused_(spans|metric_points|log_records)(_total)?"}[5m])) > 0
+      for: 5m
+      labels:
+        severity: warning
+        namespace: observability
+      annotations:
+        summary: OTel collector {{ $labels.pod }} refuses incoming telemetry
+        description: 'memory_limiter back-pressure: SDKs retry, then drop. HPA should add replicas; check limits.'
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/OTelCollectorDroppingSpans.md
+    - alert: ThanosCompactHalted
+      expr: max(thanos_compact_halted) == 1
+      for: 5m
+      labels:
+        severity: critical
+        namespace: monitoring
+      annotations:
+        summary: Thanos compactor halted
+        description: Compaction/downsampling/retention stopped (usually overlapping blocks). Object storage will grow unbounded.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ThanosCompactHalted.md
+    - alert: ThanosSidecarUploadFailing
+      expr: sum by (pod) (increase(thanos_shipper_upload_failures_total[30m])) > 0
+      for: 30m
+      labels:
+        severity: warning
+        namespace: monitoring
+      annotations:
+        summary: Thanos sidecar {{ $labels.pod }} fails to upload blocks
+        description: Blocks are not shipped to object storage; long-term metrics will have gaps once local retention (15d) expires.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ThanosSidecarUploadFailing.md

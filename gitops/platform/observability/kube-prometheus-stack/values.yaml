@@ -1,0 +1,674 @@
+# kube-prometheus-stack values - sized for ~1,000,000 users (~15k RPS peak, see docs/capacity-planning.md).
+# Chart: prometheus-community/kube-prometheus-stack 91.4.1 (pin in application.yaml).
+#
+# Monitoring contract (docs/conventions.md): Prometheus selects EVERY ServiceMonitor / PodMonitor /
+# PrometheusRule / Probe / ScrapeConfig in EVERY namespace - no release label required.
+
+# Keep the default naming: services are kube-prometheus-stack-{prometheus,alertmanager,grafana}.
+fullnameOverride: ""
+cleanPrometheusOperatorObjectNames: false
+
+commonLabels:
+  app.kubernetes.io/part-of: observability
+
+crds:
+  enabled: true
+
+# ---------------------------------------------------------------------------------------------------------
+# Default rules. MicroK8s runs kube-apiserver, controller-manager, scheduler, kube-proxy and kubelet inside a
+# single process ("kubelite") and uses dqlite instead of etcd -> rules for components we do not scrape are off.
+# ---------------------------------------------------------------------------------------------------------
+defaultRules:
+  create: true
+  rules:
+    etcd: false # MicroK8s uses dqlite, there is no etcd
+    kubeControllerManager: false # runs inside kubelite, not scraped (see kubeControllerManager below)
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+    windows: false
+    kubernetesStorage: true
+  additionalRuleLabels:
+    cluster: microk8s-prod
+  # Alerts replaced by platform-specific alerts in gitops/platform/observability/alerts
+  disabled:
+    KubePersistentVolumeFillingUp: true # replaced by PlatformPVCFillingUp / PlatformPVCFillingUpPredicted
+    KubeNodePressure: true # replaced by NodeUnderPressure (platform runbook)
+
+# ---------------------------------------------------------------------------------------------------------
+# Alertmanager (HA, 3 replicas, gossip cluster managed by the operator)
+# Secrets (PagerDuty/Opsgenie keys, Slack webhook, SMTP password) are mounted from the Secret
+# "alertmanager-receivers" (ExternalSecret -> Vault secret/platform/alertmanager) at
+# /etc/alertmanager/secrets/alertmanager-receivers/<key> and referenced with *_file settings.
+# ---------------------------------------------------------------------------------------------------------
+alertmanager:
+  enabled: true
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  config:
+    global:
+      resolve_timeout: 5m
+      slack_api_url_file: /etc/alertmanager/secrets/alertmanager-receivers/slack-webhook-url
+      opsgenie_api_key_file: /etc/alertmanager/secrets/alertmanager-receivers/opsgenie-api-key
+      smtp_smarthost: smtp.example.local:587 # placeholder
+      smtp_from: alertmanager@example.com
+      smtp_auth_username: alertmanager@example.com
+      smtp_auth_password_file: /etc/alertmanager/secrets/alertmanager-receivers/smtp-password
+      smtp_require_tls: true
+    templates:
+      - /etc/alertmanager/config/*.tmpl
+    route:
+      receiver: platform-warning
+      group_by: [alertname, cluster, namespace, service, tenant]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Dead man's switch: Watchdog must reach the external heartbeat monitor every minute.
+        - receiver: deadmans-switch
+          matchers: ['alertname = "Watchdog"']
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 1m
+        - receiver: "null"
+          matchers: ['alertname = "InfoInhibitor"']
+        # Tenant routing: alerts carrying a tenant label (added by the SLO rules from the namespace
+        # tenant-<name>) are copied to the tenant's channel, then continue to the platform routing below.
+        # Add one route per tenant (or let tenants ship AlertmanagerConfig CRs, see alertmanagerSpec below).
+        - receiver: tenant-acme
+          matchers: ['tenant = "acme"']
+          continue: true
+        - receiver: tenant-globex
+          matchers: ['tenant = "globex"']
+          continue: true
+        # Critical -> paging (PagerDuty). Switch receiver to "oncall-opsgenie" if Opsgenie is used.
+        - receiver: oncall-critical
+          matchers: ['severity = "critical"']
+          group_wait: 10s
+          group_interval: 1m
+          repeat_interval: 1h
+          continue: true
+        # Critical is also posted to Slack for visibility (and nothing else afterwards).
+        - receiver: platform-warning
+          matchers: ['severity = "critical"']
+        - receiver: platform-warning
+          matchers: ['severity = "warning"']
+        - receiver: platform-info
+          matchers: ['severity = "info"']
+    inhibit_rules:
+      # A firing critical alert silences the warning/info variant of the same alert on the same object.
+      - source_matchers: ['severity = "critical"']
+        target_matchers: ['severity =~ "warning|info"']
+        equal: [alertname, cluster, namespace, service]
+      - source_matchers: ['severity = "warning"']
+        target_matchers: ['severity = "info"']
+        equal: [alertname, cluster, namespace, service]
+      # InfoInhibitor (default rules) mutes info alerts when nothing else fires in the namespace.
+      - source_matchers: ['alertname = "InfoInhibitor"']
+        target_matchers: ['severity = "info"']
+        equal: [namespace]
+      # Fast-burn SLO page silences the slow-burn ticket for the same SLO.
+      - source_matchers: ['slo_alert = "fast-burn"']
+        target_matchers: ['slo_alert = "slow-burn"']
+        equal: [namespace, service, slo]
+      # Node down silences everything scheduled on that node.
+      - source_matchers: ['alertname =~ "KubeNodeNotReady|KubeNodeUnreachable"']
+        target_matchers: ['alertname !~ "KubeNodeNotReady|KubeNodeUnreachable"']
+        equal: [node]
+      # Elasticsearch red silences yellow.
+      - source_matchers: ['alertname = "ElasticsearchClusterRed"']
+        target_matchers: ['alertname = "ElasticsearchClusterYellow"']
+        equal: [cluster]
+      # Redis without master (gitops/platform/data/redis alerts) silences its replication alerts.
+      - source_matchers: ['alertname = "RedisNoMaster"']
+        target_matchers: ['alertname =~ "RedisReplicationBroken|RedisMissingReplicas"']
+        equal: [namespace]
+    receivers:
+      - name: "null"
+      - name: deadmans-switch
+        webhook_configs:
+          - url_file: /etc/alertmanager/secrets/alertmanager-receivers/deadmans-switch-url
+            send_resolved: false
+      - name: oncall-critical
+        pagerduty_configs:
+          - routing_key_file: /etc/alertmanager/secrets/alertmanager-receivers/pagerduty-routing-key
+            severity: critical
+            send_resolved: true
+            description: '{{ template "platform.title" . }}'
+            details:
+              summary: '{{ template "platform.summary" . }}'
+              runbook: '{{ (index .Alerts 0).Annotations.runbook_url }}'
+              tenant: '{{ .CommonLabels.tenant }}'
+              namespace: '{{ .CommonLabels.namespace }}'
+      - name: oncall-opsgenie
+        opsgenie_configs:
+          - send_resolved: true
+            priority: P1
+            message: '{{ template "platform.title" . }}'
+            description: '{{ template "platform.summary" . }}'
+            tags: 'microk8s,{{ .CommonLabels.namespace }},{{ .CommonLabels.tenant }}'
+      - name: platform-warning
+        slack_configs:
+          - channel: "#platform-alerts"
+            send_resolved: true
+            title: '{{ template "platform.title" . }}'
+            text: '{{ template "platform.summary" . }}'
+            actions:
+              - type: button
+                text: Runbook
+                url: '{{ (index .Alerts 0).Annotations.runbook_url }}'
+              - type: button
+                text: Grafana
+                url: https://grafana.ops.example.local/alerting/list
+        email_configs:
+          - to: platform-team@example.com
+            send_resolved: true
+            headers:
+              Subject: '{{ template "platform.title" . }}'
+      - name: platform-info
+        slack_configs:
+          - channel: "#platform-info"
+            send_resolved: false
+            title: '{{ template "platform.title" . }}'
+            text: '{{ template "platform.summary" . }}'
+      - name: tenant-acme
+        slack_configs:
+          - channel: "#tenant-acme-alerts"
+            send_resolved: true
+            title: '{{ template "platform.title" . }}'
+            text: '{{ template "platform.summary" . }}'
+      - name: tenant-globex
+        slack_configs:
+          - channel: "#tenant-globex-alerts"
+            send_resolved: true
+            title: '{{ template "platform.title" . }}'
+            text: '{{ template "platform.summary" . }}'
+  templateFiles:
+    platform.tmpl: |-
+      {{ define "platform.title" -}}
+      [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}{{ if .CommonLabels.tenant }} tenant={{ .CommonLabels.tenant }}{{ end }}{{ if .CommonLabels.namespace }} ns={{ .CommonLabels.namespace }}{{ end }}
+      {{- end }}
+      {{ define "platform.summary" -}}
+      {{ range .Alerts -}}
+      *{{ .Labels.severity | toUpper }}* {{ .Annotations.summary }}
+      {{ .Annotations.description }}
+      {{ if .Annotations.runbook_url }}Runbook: {{ .Annotations.runbook_url }}{{ end }}
+      {{ end -}}
+      {{- end }}
+  alertmanagerSpec:
+    replicas: 3
+    retention: 120h
+    logFormat: json
+    externalUrl: https://grafana.ops.example.local/alerting
+    secrets:
+      - alertmanager-receivers
+    # Tenants may ship their own AlertmanagerConfig CRs (label below); the operator scopes them to the
+    # tenant namespace automatically (matcher namespace="<ns>").
+    alertmanagerConfigSelector:
+      matchLabels:
+        platform.example.com/alertmanager-config: "true"
+    alertmanagerConfigNamespaceSelector: {}
+    alertmanagerConfigMatcherStrategy:
+      type: OnNamespace
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: longhorn
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 10Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+    nodeSelector:
+      workload-tier: observability
+    podAntiAffinity: hard
+    podAntiAffinityTopologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: alertmanager
+
+# ---------------------------------------------------------------------------------------------------------
+# Grafana (HA: 2 replicas, shared Postgres DB, unified alerting gossip via the headless service)
+# ---------------------------------------------------------------------------------------------------------
+grafana:
+  enabled: true
+  replicas: 2
+  headlessService: true
+  defaultDashboardsEnabled: true
+  defaultDashboardsTimezone: utc
+  defaultDashboardsEditable: false
+  admin:
+    existingSecret: grafana-admin # ExternalSecret -> Vault secret/platform/grafana (break-glass admin)
+    userKey: admin-user
+    passwordKey: admin-password
+  # GF_DATABASE_USER / GF_DATABASE_PASSWORD / GF_SECURITY_SECRET_KEY / GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+  # and ES_GRAFANA_USER / ES_GRAFANA_PASSWORD come from ExternalSecret "grafana-env" (see manifests/).
+  envFromSecrets:
+    - name: grafana-env
+  persistence:
+    enabled: false # state lives in Postgres (CNPG pg-main, database "grafana")
+  podDisruptionBudget:
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  nodeSelector:
+    workload-tier: observability
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+  # CA of the ECK self-signed HTTP certificate (copied from the logging namespace, see manifests/).
+  extraSecretMounts:
+    - name: elasticsearch-ca
+      secretName: elasticsearch-ca
+      optional: true # Grafana starts even before ECK has issued its certificate
+      defaultMode: 0440
+      mountPath: /etc/grafana/elasticsearch-ca
+      readOnly: true
+  grafana.ini:
+    server:
+      domain: grafana.ops.example.local
+      root_url: https://grafana.ops.example.local
+      enable_gzip: true
+    database:
+      type: postgres
+      host: pg-main-rw.data-postgres.svc.cluster.local:5432 # direct (session features), not through PgBouncer
+      name: grafana
+      ssl_mode: require
+      max_open_conn: 20
+      max_idle_conn: 10
+      conn_max_lifetime: 14400
+    security:
+      cookie_secure: true
+      disable_initial_admin_creation: false
+      disable_gravatar: true
+    users:
+      allow_sign_up: false
+      auto_assign_org: true
+      auto_assign_org_role: Viewer
+    auth:
+      oauth_allow_insecure_email_lookup: false
+      signout_redirect_url: https://keycloak.ops.example.local/realms/platform/protocol/openid-connect/logout?redirect_uri=https%3A%2F%2Fgrafana.ops.example.local%2Flogin
+    # OIDC via Keycloak realm "platform" (client "grafana", confidential, PKCE). The browser uses the ops
+    # hostname; back-channel calls use the in-cluster Keycloak service.
+    auth.generic_oauth:
+      enabled: true
+      name: Keycloak
+      icon: signin
+      client_id: grafana
+      # client_secret -> env GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+      scopes: openid profile email groups
+      auth_url: https://keycloak.ops.example.local/realms/platform/protocol/openid-connect/auth
+      token_url: http://keycloak.keycloak.svc.cluster.local:8080/realms/platform/protocol/openid-connect/token
+      api_url: http://keycloak.keycloak.svc.cluster.local:8080/realms/platform/protocol/openid-connect/userinfo
+      use_pkce: true
+      use_refresh_token: true
+      allow_sign_up: true
+      login_attribute_path: preferred_username
+      email_attribute_path: email
+      groups_attribute_path: groups
+      role_attribute_path: "contains(groups[*], 'platform-admins') && 'Admin' || contains(groups[*], 'platform-operators') && 'Editor' || 'Viewer'"
+      role_attribute_strict: false
+      allow_assign_grafana_admin: true
+    unified_alerting:
+      enabled: true
+      ha_peers: kube-prometheus-stack-grafana-headless.monitoring.svc.cluster.local:9094
+      ha_listen_address: ${POD_IP}:9094
+      ha_advertise_address: ${POD_IP}:9094
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+      check_for_plugin_updates: false
+    log:
+      mode: console
+    log.console:
+      format: json
+    dashboards:
+      default_home_dashboard_path: /tmp/dashboards/Platform/platform-overview.json
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+        allowUiUpdates: false
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+      isDefaultDatasource: true
+      name: Prometheus
+      uid: prometheus
+      alertmanager:
+        enabled: true
+        name: Alertmanager
+        uid: alertmanager
+  additionalDataSources:
+    - name: Thanos
+      uid: thanos
+      type: prometheus
+      access: proxy
+      url: http://thanos-query-frontend.monitoring.svc.cluster.local:9090
+      jsonData:
+        httpMethod: POST
+        prometheusType: Thanos
+        timeInterval: 30s
+        exemplarTraceIdDestinations:
+          - name: trace_id
+            urlDisplayLabel: Open trace in Elastic APM
+            url: https://kibana.ops.example.local/app/apm/link-to/trace/${__value.raw}
+    - name: Elasticsearch Logs
+      uid: elasticsearch-logs
+      type: elasticsearch
+      access: proxy
+      url: https://elasticsearch-es-http.logging.svc.cluster.local:9200
+      basicAuth: true
+      basicAuthUser: $ES_GRAFANA_USER
+      jsonData:
+        index: "logs-*-k8s"
+        timeField: "@timestamp"
+        logMessageField: message
+        logLevelField: level
+        maxConcurrentShardRequests: 5
+        tlsAuthWithCACert: true
+        dataLinks:
+          - field: trace_id
+            url: https://kibana.ops.example.local/app/apm/link-to/trace/${__value.raw}
+      secureJsonData:
+        basicAuthPassword: $ES_GRAFANA_PASSWORD
+        tlsCACert: $__file{/etc/grafana/elasticsearch-ca/ca.crt}
+    - name: Elastic APM Traces
+      uid: elastic-apm-traces
+      type: elasticsearch
+      access: proxy
+      url: https://elasticsearch-es-http.logging.svc.cluster.local:9200
+      basicAuth: true
+      basicAuthUser: $ES_GRAFANA_USER
+      jsonData:
+        index: "traces-apm*"
+        timeField: "@timestamp"
+        maxConcurrentShardRequests: 5
+        tlsAuthWithCACert: true
+      secureJsonData:
+        basicAuthPassword: $ES_GRAFANA_PASSWORD
+        tlsCACert: $__file{/etc/grafana/elasticsearch-ca/ca.crt}
+    - name: Elastic APM Errors
+      uid: elastic-apm-errors
+      type: elasticsearch
+      access: proxy
+      url: https://elasticsearch-es-http.logging.svc.cluster.local:9200
+      basicAuth: true
+      basicAuthUser: $ES_GRAFANA_USER
+      jsonData:
+        index: "logs-apm.error-*"
+        timeField: "@timestamp"
+        tlsAuthWithCACert: true
+      secureJsonData:
+        basicAuthPassword: $ES_GRAFANA_PASSWORD
+        tlsCACert: $__file{/etc/grafana/elasticsearch-ca/ca.crt}
+  serviceMonitor:
+    enabled: true
+
+# ---------------------------------------------------------------------------------------------------------
+# Kubernetes component scraping on MicroK8s
+# ---------------------------------------------------------------------------------------------------------
+kubeApiServer:
+  enabled: true # exposed through the default/kubernetes service (port 16443 on MicroK8s)
+kubelet:
+  enabled: true # :10250, cAdvisor + resource + probes
+  serviceMonitor:
+    cAdvisorMetricRelabelings:
+      # Drop high-cardinality, low-value cAdvisor series (1M-user scale -> thousands of pods).
+      - sourceLabels: [__name__]
+        regex: container_(tasks_state|memory_failures_total|blkio_device_usage_total|network_tcp_usage_total|network_udp_usage_total)
+        action: drop
+      - sourceLabels: [__name__, scope]
+        regex: container_memory_failures_total;hierarchy
+        action: drop
+# kube-controller-manager, kube-scheduler and kube-proxy run inside the single "kubelite" process on
+# MicroK8s. They share one Go/Prometheus registry, so their /metrics endpoints return the same (merged)
+# series already scraped from the apiserver/kubelet -> scraping them would duplicate series. Keep disabled.
+# (If needed: enable with `endpoints: [<node IPs>]`, `service.port/targetPort: 10257|10259`, https +
+#  insecureSkipVerify, and drop duplicates with metricRelabelings.)
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+# MicroK8s uses dqlite (no etcd endpoints to scrape).
+kubeEtcd:
+  enabled: false
+# MicroK8s "dns" addon = CoreDNS in kube-system with label k8s-app=kube-dns.
+coreDns:
+  enabled: true
+kubeDns:
+  enabled: false
+
+kube-state-metrics:
+  replicas: 1 # >1 replica duplicates every kube_* series; use autosharding (StatefulSet) if it gets too big
+  nodeSelector:
+    workload-tier: observability
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  # Expose tenant / version labels so alerts & dashboards can aggregate per tenant.
+  metricLabelsAllowlist:
+    - namespaces=[platform.example.com/tenant,platform.example.com/category]
+    - pods=[app.kubernetes.io/name,app.kubernetes.io/version,version,platform.example.com/tenant,platform.example.com/language]
+    - deployments=[app.kubernetes.io/name,version,platform.example.com/tenant]
+    - persistentvolumeclaims=[app.kubernetes.io/name]
+  prometheus:
+    monitor:
+      enabled: true
+      honorLabels: true
+
+prometheus-node-exporter:
+  # Runs on EVERY node (including tainted edge/data pools).
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  prometheus:
+    monitor:
+      enabled: true
+
+# ---------------------------------------------------------------------------------------------------------
+# Prometheus Operator
+# ---------------------------------------------------------------------------------------------------------
+prometheusOperator:
+  enabled: true
+  logFormat: json
+  nodeSelector:
+    workload-tier: observability
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  admissionWebhooks:
+    enabled: true
+    failurePolicy: Fail
+    certManager:
+      enabled: true # cert-manager is installed at wave -15; self-signed issuer created by the chart
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# ---------------------------------------------------------------------------------------------------------
+# Prometheus (HA pair + Thanos sidecar)
+# ---------------------------------------------------------------------------------------------------------
+prometheus:
+  enabled: true
+  # Headless service kube-prometheus-stack-thanos-discovery (gRPC 10901) used by Thanos Query (dnssrv+).
+  thanosService:
+    enabled: true
+  thanosServiceMonitor:
+    enabled: true
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  prometheusSpec:
+    replicas: 2 # HA pair; Thanos Query / compactor deduplicate on prometheus_replica
+    shards: 1 # raise (functional sharding) when active series > ~10M per replica
+    replicaExternalLabelName: prometheus_replica
+    externalLabels:
+      cluster: microk8s-prod
+    scrapeInterval: 30s
+    scrapeTimeout: 10s
+    evaluationInterval: 30s
+    retention: 15d
+    retentionSize: 420GB # keep below the PVC size (WAL + compaction headroom)
+    walCompression: true
+    logFormat: json
+    enableAdminAPI: false
+    # Exemplars (trace_id) from OTel spanmetrics / app histograms -> jump from Grafana to Elastic APM.
+    enableFeatures:
+      - exemplar-storage
+      - memory-snapshot-on-shutdown
+    exemplars:
+      maxSize: 200000
+    # The OpenTelemetry Collector exposes metrics for scraping (both replicas get identical data);
+    # remote-write stays off to keep the HA pair consistent.
+    enableRemoteWriteReceiver: false
+
+    # ---- Monitoring contract: select everything, everywhere ----
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+    ruleSelectorNilUsesHelmValues: false
+    ruleSelector: {}
+    ruleNamespaceSelector: {}
+    probeSelectorNilUsesHelmValues: false
+    probeSelector: {}
+    probeNamespaceSelector: {}
+    scrapeConfigSelectorNilUsesHelmValues: false
+    scrapeConfigSelector: {}
+    scrapeConfigNamespaceSelector: {}
+
+    # Guard rails against cardinality explosions from a single target.
+    enforcedSampleLimit: 200000
+    enforcedLabelLimit: 64
+    enforcedLabelValueLengthLimit: 2048
+
+    # ---- Scraping workloads behind Istio STRICT mTLS (standard Istio cert-mount pattern) ----
+    # The mesh enforces PeerAuthentication STRICT cluster-wide. Prometheus gets an Istio sidecar that
+    # intercepts NO traffic (includeInboundPorts/includeOutboundIPRanges empty) and only writes the workload
+    # certificate to a shared in-memory volume mounted at /etc/prom-certs. Scrape configs of meshed
+    # workloads then use scheme https + those certs: charts/microservice & charts/frontend do it with
+    # serviceMonitor.istioMtls=true; any other ServiceMonitor/PodMonitor can set `scrapeClass: istio-mtls`.
+    # Injection: the monitoring namespace is deliberately NOT labelled istio-injection=enabled (that would
+    # mesh Grafana/Alertmanager/operator webhooks too); Istio's object-selector webhook injects pods
+    # labelled sidecar.istio.io/inject=true in un-labelled namespaces, so only Prometheus gets a sidecar.
+    # It must also not be labelled istio-injection=disabled (that would block the object selector).
+    podMetadata:
+      labels:
+        sidecar.istio.io/inject: "true"
+      annotations:
+        sidecar.istio.io/inject: "true"
+        traffic.sidecar.istio.io/includeInboundPorts: ""
+        traffic.sidecar.istio.io/includeOutboundIPRanges: ""
+        proxy.istio.io/config: '{"proxyMetadata":{"OUTPUT_CERTS":"/etc/istio-output-certs"}}'
+        sidecar.istio.io/userVolumeMount: '[{"name":"istio-certs","mountPath":"/etc/istio-output-certs"}]'
+    volumes:
+      - name: istio-certs
+        emptyDir:
+          medium: Memory
+    volumeMounts:
+      - name: istio-certs
+        mountPath: /etc/prom-certs/
+    scrapeClasses:
+      - name: istio-mtls
+        tlsConfig:
+          caFile: /etc/prom-certs/root-cert.pem
+          certFile: /etc/prom-certs/cert-chain.pem
+          keyFile: /etc/prom-certs/key.pem
+          insecureSkipVerify: true # SPIFFE identities, not DNS names
+
+    # ---- Sizing: ~3-5M active series per replica at 1M users (services x pods x istio labels) ----
+    resources:
+      requests:
+        cpu: "4"
+        memory: 24Gi
+      limits:
+        memory: 40Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          # Prometheus replicates itself (HA pair) and ships blocks to object storage via Thanos,
+          # so the single-replica Longhorn class is used (docs/conventions.md "Storage classes").
+          storageClassName: longhorn-db
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 500Gi
+    nodeSelector:
+      workload-tier: observability
+    podAntiAffinity: hard
+    podAntiAffinityTopologyKey: kubernetes.io/hostname
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+
+    # ---- Thanos sidecar: uploads 2h blocks to S3 (MinIO); Secret created by thanos/manifests ----
+    thanos:
+      image: quay.io/thanos/thanos:v0.42.4 # pin: verify latest before upgrade
+      version: v0.42.4
+      objectStorageConfig:
+        existingSecret:
+          name: thanos-objstore
+          key: objstore.yml
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          memory: 2Gi
+    # Local compaction must stay enabled only when no object storage is configured; with the Thanos
+    # sidecar uploading blocks, the operator sets min=max block duration=2h automatically.
+    disableCompaction: false
+
+# Thanos Ruler is not used (rules evaluate in Prometheus; long-range SLO rules use recording rules).
+thanosRuler:
+  enabled: false
+
+windowsMonitoring:
+  enabled: false

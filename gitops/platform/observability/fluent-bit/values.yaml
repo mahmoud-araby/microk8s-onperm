@@ -1,0 +1,348 @@
+# Fluent Bit - node log shipper (DaemonSet on EVERY node) -> Elasticsearch (ECK, namespace logging).
+# Chart: fluent/fluent-bit 0.58.2 (pin in application.yaml).
+#
+# Index naming (monitoring contract "logs-<namespace>"):
+#   Logstash_Format On + Logstash_Prefix_Key $es_index_prefix ("logs-<namespace>", set by the Lua filter)
+#   + Logstash_DateFormat "k8s" (a constant strftime string)  =>  data stream  logs-<namespace>-k8s
+#   Rollover/retention is done by ILM on the data stream (template "logs-k8s", see ../elastic), so no
+#   date suffix is needed; Kibana/Grafana data views: logs-*-k8s (all) or logs-<namespace>-* (one namespace).
+#
+# Credentials: dedicated least-privilege file-realm user "fluent-bit" (Secret es-user-fluent-bit, created
+# by ExternalSecret from Vault in ../elastic/manifests). Fluent Bit runs in the same namespace as
+# Elasticsearch, so neither the elastic superuser secret nor a reflector copy is needed. TLS is verified
+# against the ECK HTTP CA (Secret elasticsearch-es-http-certs-public, same namespace).
+
+kind: DaemonSet
+
+image:
+  repository: cr.fluentbit.io/fluent/fluent-bit
+  tag: "" # chart appVersion (5.1.x)
+  pullPolicy: IfNotPresent
+
+testFramework:
+  enabled: false
+
+priorityClassName: system-node-critical
+
+# Runs on every node, whatever the taints (edge, data, control plane, observability, apps).
+tolerations:
+  - operator: Exists
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 10%
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Root is required to read /var/log/pods (root-owned) and write the buffer/offset DB on the host.
+podSecurityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+rbac:
+  create: true
+  nodeAccess: false
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  # path defaults to /api/v2/metrics/prometheus (fluentbit_output_errors_total, retries, storage metrics)
+
+prometheusRule:
+  enabled: false # alerts live in gitops/platform/observability/alerts
+
+dashboards:
+  enabled: true # upstream Fluent Bit dashboard, picked up by the Grafana sidecar (all namespaces)
+  labelKey: grafana_dashboard
+  labelValue: "1"
+  annotations:
+    grafana_folder: Platform
+
+env:
+  - name: ES_USER
+    valueFrom:
+      secretKeyRef:
+        name: es-user-fluent-bit
+        key: username
+  - name: ES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: es-user-fluent-bit
+        key: password
+  - name: NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+
+# MicroK8s uses containerd: container logs are CRI files under /var/log/pods (symlinked from
+# /var/log/containers); there is no /var/lib/docker.
+daemonSetVolumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+  - name: etcmachineid
+    hostPath:
+      path: /etc/machine-id
+      type: File
+  # Offsets DB + filesystem buffer survive pod restarts (no log loss / duplication on upgrade).
+  - name: state
+    hostPath:
+      path: /var/lib/fluent-bit
+      type: DirectoryOrCreate
+daemonSetVolumeMounts:
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+  - name: etcmachineid
+    mountPath: /etc/machine-id
+    readOnly: true
+  - name: state
+    mountPath: /var/fluent-bit/state
+
+extraVolumes:
+  - name: es-ca
+    secret:
+      secretName: elasticsearch-es-http-certs-public
+extraVolumeMounts:
+  - name: es-ca
+    mountPath: /fluent-bit/tls
+    readOnly: true
+
+flush: 1
+logLevel: info
+metricsPort: 2020
+
+# Tenant enrichment + target data stream name.
+luaScripts:
+  enrich.lua: |
+    -- Adds:
+    --   tenant          : namespace label platform.example.com/tenant, else pod label, else the app's own
+    --                     tenant_id field (pooled services in shared-services), else "tenant-<x>" namespace
+    --                     name pattern, else "platform".
+    --   es_index_prefix : "logs-<namespace>" (-> data stream logs-<namespace>-k8s)
+    function enrich(tag, timestamp, record)
+      local k = record["kubernetes"]
+      local ns = "unknown"
+      local tenant = nil
+      -- namespace metadata (Namespace_Labels On) is stored under "kubernetes_namespace"
+      local kn = record["kubernetes_namespace"]
+      if kn ~= nil and kn["labels"] ~= nil then
+        tenant = kn["labels"]["platform.example.com/tenant"]
+      end
+      if k ~= nil then
+        ns = k["namespace_name"] or ns
+        if (tenant == nil or tenant == "") and k["labels"] ~= nil then
+          tenant = k["labels"]["platform.example.com/tenant"]
+        end
+      end
+      -- app JSON logs / Istio & Kong access logs carry tenant_id ("-" or "shared" when the header is absent)
+      if tenant == nil or tenant == "" then
+        local t = record["tenant_id"]
+        if t ~= nil and t ~= "" and t ~= "-" then tenant = t end
+      end
+      if tenant == nil or tenant == "" then
+        tenant = string.match(ns, "^tenant%-(.+)$") or "platform"
+      end
+      record["tenant"] = tenant
+      record["es_index_prefix"] = "logs-" .. ns
+      return 2, timestamp, record
+    end
+
+config:
+  service: |
+    [SERVICE]
+        Daemon                    Off
+        Flush                     {{ .Values.flush }}
+        Log_Level                 {{ .Values.logLevel }}
+        Parsers_File              /fluent-bit/etc/parsers.conf
+        Parsers_File              /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server               On
+        HTTP_Listen               0.0.0.0
+        HTTP_Port                 {{ .Values.metricsPort }}
+        Health_Check              On
+        # Filesystem buffering: chunks spill to disk when Elasticsearch is slow/unavailable.
+        storage.path              /var/fluent-bit/state/flb-storage/
+        storage.sync              normal
+        storage.checksum          off
+        storage.max_chunks_up     128
+        storage.backlog.mem_limit 64M
+        storage.metrics           on
+
+  inputs: |
+    [INPUT]
+        Name                tail
+        Tag                 kube.*
+        Path                /var/log/containers/*.log
+        # never ship our own logs (avoids feedback loops when ES rejects documents)
+        Exclude_Path        /var/log/containers/fluent-bit-*_logging_*.log
+        multiline.parser    cri
+        DB                  /var/fluent-bit/state/flb_kube.db
+        DB.locking          true
+        storage.type        filesystem
+        Mem_Buf_Limit       64MB
+        Buffer_Chunk_Size   512k
+        Buffer_Max_Size     5M
+        Skip_Long_Lines     On
+        Refresh_Interval    10
+        Rotate_Wait         30
+
+    # MicroK8s services (kubelite = apiserver/kubelet/scheduler/controller-manager, containerd, dqlite)
+    [INPUT]
+        Name                systemd
+        Tag                 host.*
+        Path                /var/log/journal
+        Systemd_Filter      _SYSTEMD_UNIT=snap.microk8s.daemon-kubelite.service
+        Systemd_Filter      _SYSTEMD_UNIT=snap.microk8s.daemon-containerd.service
+        Systemd_Filter      _SYSTEMD_UNIT=snap.microk8s.daemon-k8s-dqlite.service
+        Systemd_Filter_Type Or
+        Read_From_Tail      On
+        Strip_Underscores   On
+        DB                  /var/fluent-bit/state/flb_journal.db
+        storage.type        filesystem
+
+  filters: |
+    # Re-assemble multi-line stack traces of non-JSON workloads (JSON apps log them in one field).
+    [FILTER]
+        Name                  multiline
+        Match                 kube.*
+        multiline.key_content log
+        multiline.parser      java, python, go
+        emitter_storage.type  filesystem
+        emitter_mem_buf_limit 32MB
+
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        # JSON app logs (contract: trace_id, span_id, tenant_id, level, message) become top-level fields
+        Merge_Log           On
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Labels              On
+        Annotations         Off
+        Namespace_Labels    On
+        Kube_Meta_Cache_TTL 300s
+        Kube_Meta_Namespace_Cache_TTL 300
+        Buffer_Size         0
+
+    # Istio sidecars / gateways: default (TEXT) Envoy access log format. JSON access logs (Telemetry API
+    # with encoding JSON) are already merged by the kubernetes filter.
+    [FILTER]
+        Name         parser
+        Match        kube.*_istio-proxy-*
+        Key_Name     log
+        Parser       istio_envoy_text
+        Reserve_Data On
+        Preserve_Key Off
+
+    # Kong proxy access log (nginx combined); JSON log formats are merged by the kubernetes filter.
+    [FILTER]
+        Name         parser
+        Match        kube.*_kong_proxy-*
+        Key_Name     log
+        Parser       kong_nginx_combined
+        Reserve_Data On
+        Preserve_Key Off
+
+    [FILTER]
+        Name    lua
+        Match   kube.*
+        script  /fluent-bit/scripts/enrich.lua
+        call    enrich
+
+    [FILTER]
+        Name    modify
+        Match   host.*
+        Add     tenant platform
+        Add     node ${NODE_NAME}
+
+  outputs: |
+    [OUTPUT]
+        Name                     es
+        Alias                    es-k8s
+        Match                    kube.*
+        Host                     elasticsearch-es-http.logging.svc.cluster.local
+        Port                     9200
+        HTTP_User                ${ES_USER}
+        HTTP_Passwd              ${ES_PASSWORD}
+        tls                      On
+        tls.verify               On
+        tls.ca_file              /fluent-bit/tls/ca.crt
+        tls.vhost                elasticsearch-es-http.logging.svc.cluster.local
+        compress                 gzip
+        Logstash_Format          On
+        Logstash_Prefix          logs-unknown
+        Logstash_Prefix_Key      $es_index_prefix
+        Logstash_DateFormat      k8s
+        Time_Key                 @timestamp
+        Time_Key_Nanos           On
+        Suppress_Type_Name       On
+        Replace_Dots             On
+        Write_Operation          create
+        Generate_ID              On
+        Buffer_Size              512KB
+        Trace_Error              Off
+        Workers                  2
+        Retry_Limit              10
+        storage.total_limit_size 8G
+
+    [OUTPUT]
+        Name                     es
+        Alias                    es-node
+        Match                    host.*
+        Host                     elasticsearch-es-http.logging.svc.cluster.local
+        Port                     9200
+        HTTP_User                ${ES_USER}
+        HTTP_Passwd              ${ES_PASSWORD}
+        tls                      On
+        tls.verify               On
+        tls.ca_file              /fluent-bit/tls/ca.crt
+        tls.vhost                elasticsearch-es-http.logging.svc.cluster.local
+        compress                 gzip
+        Logstash_Format          On
+        Logstash_Prefix          logs-node
+        Logstash_DateFormat      k8s
+        Time_Key                 @timestamp
+        Suppress_Type_Name       On
+        Replace_Dots             On
+        Write_Operation          create
+        Generate_ID              On
+        Retry_Limit              10
+        storage.total_limit_size 1G
+
+  customParsers: |
+    [PARSER]
+        Name        istio_envoy_text
+        Format      regex
+        Regex       ^\[(?<start_time>[^\]]+)\] "(?<method>\S+) (?<path>\S+) (?<protocol>[^"]+)" (?<response_code>\d+) (?<response_flags>\S+) (?<response_code_details>\S+) (?<connection_termination_details>\S+) "(?<upstream_transport_failure_reason>[^"]*)" (?<bytes_received>\d+) (?<bytes_sent>\d+) (?<duration>\d+) (?<upstream_service_time>\S+) "(?<x_forwarded_for>[^"]*)" "(?<user_agent>[^"]*)" "(?<request_id>[^"]*)" "(?<authority>[^"]*)" "(?<upstream_host>[^"]*)" (?<upstream_cluster>\S+) (?<upstream_local_address>\S+) (?<downstream_local_address>\S+) (?<downstream_remote_address>\S+) (?<requested_server_name>\S+) (?<route_name>\S+)$
+        Time_Key    start_time
+        Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+        Time_Keep   On
+        Types       response_code:integer bytes_received:integer bytes_sent:integer duration:integer
+
+    [PARSER]
+        Name        kong_nginx_combined
+        Format      regex
+        Regex       ^(?<remote_addr>[^ ]*) - (?<remote_user>[^ ]*) \[(?<time_local>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^"]*?)(?: +(?<protocol>\S*))?)?" (?<response_code>\d{3}) (?<bytes_sent>\d+) "(?<referer>[^"]*)" "(?<user_agent>[^"]*)"(?: "(?<x_forwarded_for>[^"]*)")?.*$
+        Time_Key    time_local
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+        Time_Keep   On
+        Types       response_code:integer bytes_sent:integer

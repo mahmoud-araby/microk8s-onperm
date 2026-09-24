@@ -1,0 +1,341 @@
+# Service Level Objectives for every mesh service (Istio server-side telemetry, reporter="destination").
+#   Availability SLO: 99.9% of requests are not 5xx over 30 days   (error budget 0.1%)
+#   Latency SLO:      99% of requests complete in < 500 ms           (budget 1%)
+# Multi-window, multi-burn-rate alerts (Google SRE Workbook ch.5):
+#   page   (critical, slo_alert=fast-burn): 14.4x over 1h AND 5m, or 6x over 6h AND 30m
+#   ticket (warning,  slo_alert=slow-burn): 3x over 1d AND 2h,   or 1x over 3d AND 6h
+# Fast burn inhibits slow burn (Alertmanager inhibit rule). Services below 0.1 rps are ignored.
+# Per-service targets different from the defaults: copy the alert with a namespace/service matcher.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: slo-rules
+    app.kubernetes.io/part-of: observability
+spec:
+  groups:
+  - name: slo-sli.recording
+    interval: 1m
+    rules:
+    - record: slo:sli_requests:rate5m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination"}[5m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_errors:rate5m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination", response_code=~"5.."}[5m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+        or
+        slo:sli_requests:rate5m * 0
+    - record: slo:sli_error:ratio_rate5m
+      expr: slo:sli_errors:rate5m / slo:sli_requests:rate5m
+    - record: slo:sli_latency_fast:rate5m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_bucket{reporter="destination", le="500"}[5m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_total:rate5m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_count{reporter="destination"}[5m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_slow:ratio_rate5m
+      expr: 1 - (slo:sli_latency_fast:rate5m / slo:sli_latency_total:rate5m)
+    - record: slo:sli_requests:rate30m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination"}[30m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_errors:rate30m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination", response_code=~"5.."}[30m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+        or
+        slo:sli_requests:rate30m * 0
+    - record: slo:sli_error:ratio_rate30m
+      expr: slo:sli_errors:rate30m / slo:sli_requests:rate30m
+    - record: slo:sli_latency_fast:rate30m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_bucket{reporter="destination", le="500"}[30m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_total:rate30m
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_count{reporter="destination"}[30m]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_slow:ratio_rate30m
+      expr: 1 - (slo:sli_latency_fast:rate30m / slo:sli_latency_total:rate30m)
+    - record: slo:sli_requests:rate1h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination"}[1h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_errors:rate1h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination", response_code=~"5.."}[1h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+        or
+        slo:sli_requests:rate1h * 0
+    - record: slo:sli_error:ratio_rate1h
+      expr: slo:sli_errors:rate1h / slo:sli_requests:rate1h
+    - record: slo:sli_latency_fast:rate1h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_bucket{reporter="destination", le="500"}[1h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_total:rate1h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_count{reporter="destination"}[1h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_slow:ratio_rate1h
+      expr: 1 - (slo:sli_latency_fast:rate1h / slo:sli_latency_total:rate1h)
+    - record: slo:sli_requests:rate2h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination"}[2h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_errors:rate2h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination", response_code=~"5.."}[2h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+        or
+        slo:sli_requests:rate2h * 0
+    - record: slo:sli_error:ratio_rate2h
+      expr: slo:sli_errors:rate2h / slo:sli_requests:rate2h
+    - record: slo:sli_latency_fast:rate2h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_bucket{reporter="destination", le="500"}[2h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_total:rate2h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_count{reporter="destination"}[2h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_slow:ratio_rate2h
+      expr: 1 - (slo:sli_latency_fast:rate2h / slo:sli_latency_total:rate2h)
+    - record: slo:sli_requests:rate6h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination"}[6h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_errors:rate6h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_requests_total{reporter="destination", response_code=~"5.."}[6h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+        or
+        slo:sli_requests:rate6h * 0
+    - record: slo:sli_error:ratio_rate6h
+      expr: slo:sli_errors:rate6h / slo:sli_requests:rate6h
+    - record: slo:sli_latency_fast:rate6h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_bucket{reporter="destination", le="500"}[6h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_total:rate6h
+      expr: |-
+        label_replace(
+          sum by (namespace, service) (
+            label_replace(rate(istio_request_duration_milliseconds_count{reporter="destination"}[6h]), "service", "$1", "destination_service_name", "(.*)")
+          ),
+          "tenant", "$1", "namespace", "tenant-(.+)"
+        )
+    - record: slo:sli_latency_slow:ratio_rate6h
+      expr: 1 - (slo:sli_latency_fast:rate6h / slo:sli_latency_total:rate6h)
+  - name: slo-sli-long.recording
+    interval: 5m
+    rules:
+    - record: slo:sli_error:ratio_rate1d
+      expr: |-
+        sum_over_time(slo:sli_errors:rate5m[1d])
+        /
+        sum_over_time(slo:sli_requests:rate5m[1d])
+    - record: slo:sli_latency_slow:ratio_rate1d
+      expr: 1 - (sum_over_time(slo:sli_latency_fast:rate5m[1d]) / sum_over_time(slo:sli_latency_total:rate5m[1d]))
+    - record: slo:sli_error:ratio_rate3d
+      expr: |-
+        sum_over_time(slo:sli_errors:rate5m[3d])
+        /
+        sum_over_time(slo:sli_requests:rate5m[3d])
+    - record: slo:sli_latency_slow:ratio_rate3d
+      expr: 1 - (sum_over_time(slo:sli_latency_fast:rate5m[3d]) / sum_over_time(slo:sli_latency_total:rate5m[3d]))
+    - record: slo:availability_error_budget_remaining:ratio30d
+      expr: |-
+        1 - (
+          (sum_over_time(slo:sli_errors:rate5m[30d]) / sum_over_time(slo:sli_requests:rate5m[30d]))
+          / (1 - 0.999)
+        )
+    - record: tenant:sli_requests:rate5m
+      expr: sum by (tenant) (slo:sli_requests:rate5m)
+    - record: tenant:sli_error:ratio_rate5m
+      expr: sum by (tenant) (slo:sli_errors:rate5m) / sum by (tenant) (slo:sli_requests:rate5m)
+  - name: slo-burn-rate.alerts
+    rules:
+    - alert: SLOAvailabilityBudgetBurnFast
+      expr: |
+        (
+        (
+          slo:sli_error:ratio_rate1h > (14.4 * 0.001)
+          and
+          slo:sli_error:ratio_rate5m > (14.4 * 0.001)
+        ) or (
+          slo:sli_error:ratio_rate6h > (6 * 0.001)
+          and
+          slo:sli_error:ratio_rate30m > (6 * 0.001)
+        )
+        )
+        and on (namespace, service)
+        slo:sli_requests:rate1h > 0.1
+      for: 2m
+      labels:
+        severity: critical
+        slo: availability
+        slo_alert: fast-burn
+      annotations:
+        summary: '{{ $labels.namespace }}/{{ $labels.service }} is burning its 99.9% availability error budget fast'
+        description: 'Error ratio over the last 1h/6h exceeds 14.4x/6x the budget (2%/5% of the 30-day budget spent). Tenant: {{ $labels.tenant }}. Current 5m error ratio: {{ with printf `slo:sli_error:ratio_rate5m{namespace="%s",service="%s"}` $labels.namespace
+          $labels.service | query }}{{ . | first | value | humanizePercentage }}{{ end }}.'
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SLOAvailabilityBudgetBurn.md
+        dashboard_url: https://grafana.ops.example.local/d/platform-overview
+    - alert: SLOAvailabilityBudgetBurnSlow
+      expr: |
+        (
+        (
+          slo:sli_error:ratio_rate1d > (3 * 0.001)
+          and
+          slo:sli_error:ratio_rate2h > (3 * 0.001)
+        ) or (
+          slo:sli_error:ratio_rate3d > (1 * 0.001)
+          and
+          slo:sli_error:ratio_rate6h > (1 * 0.001)
+        )
+        )
+        and on (namespace, service)
+        slo:sli_requests:rate1h > 0.1
+      for: 15m
+      labels:
+        severity: warning
+        slo: availability
+        slo_alert: slow-burn
+      annotations:
+        summary: '{{ $labels.namespace }}/{{ $labels.service }} is steadily consuming its availability error budget'
+        description: 'Error ratio over 1d/3d exceeds 3x/1x the 99.9% budget (10% of the 30-day budget per ~day). Tenant: {{ $labels.tenant }}.'
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SLOAvailabilityBudgetBurn.md
+        dashboard_url: https://grafana.ops.example.local/d/platform-overview
+    - alert: SLOLatencyBudgetBurnFast
+      expr: |
+        (
+        (
+          slo:sli_latency_slow:ratio_rate1h > (14.4 * 0.01)
+          and
+          slo:sli_latency_slow:ratio_rate5m > (14.4 * 0.01)
+        ) or (
+          slo:sli_latency_slow:ratio_rate6h > (6 * 0.01)
+          and
+          slo:sli_latency_slow:ratio_rate30m > (6 * 0.01)
+        )
+        )
+        and on (namespace, service)
+        slo:sli_requests:rate1h > 0.1
+      for: 2m
+      labels:
+        severity: critical
+        slo: latency
+        slo_alert: fast-burn
+      annotations:
+        summary: '{{ $labels.namespace }}/{{ $labels.service }} latency SLO (99% < 500ms) burning fast'
+        description: 'More than 14.4x/6x the allowed share of requests slower than 500 ms over 1h/6h. Tenant: {{ $labels.tenant }}.'
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SLOLatencyBudgetBurn.md
+        dashboard_url: https://grafana.ops.example.local/d/microservice-red
+    - alert: SLOLatencyBudgetBurnSlow
+      expr: |
+        (
+        (
+          slo:sli_latency_slow:ratio_rate1d > (3 * 0.01)
+          and
+          slo:sli_latency_slow:ratio_rate2h > (3 * 0.01)
+        ) or (
+          slo:sli_latency_slow:ratio_rate3d > (1 * 0.01)
+          and
+          slo:sli_latency_slow:ratio_rate6h > (1 * 0.01)
+        )
+        )
+        and on (namespace, service)
+        slo:sli_requests:rate1h > 0.1
+      for: 15m
+      labels:
+        severity: warning
+        slo: latency
+        slo_alert: slow-burn
+      annotations:
+        summary: '{{ $labels.namespace }}/{{ $labels.service }} latency SLO (99% < 500ms) degrading'
+        description: 'Share of requests slower than 500 ms over 1d/3d exceeds 3x/1x the latency budget. Tenant: {{ $labels.tenant }}.'
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/SLOLatencyBudgetBurn.md
+        dashboard_url: https://grafana.ops.example.local/d/microservice-red

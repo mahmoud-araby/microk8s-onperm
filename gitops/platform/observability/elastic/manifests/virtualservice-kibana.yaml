@@ -1,0 +1,22 @@
+# kibana.ops.example.local -> Kibana, via the Istio internal gateway (ops tooling is never public).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: kibana
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: kibana
+    app.kubernetes.io/part-of: observability
+spec:
+  hosts:
+    - kibana.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - name: kibana
+      route:
+        - destination:
+            host: kibana-kb-http.logging.svc.cluster.local
+            port:
+              number: 5601
+      timeout: 300s

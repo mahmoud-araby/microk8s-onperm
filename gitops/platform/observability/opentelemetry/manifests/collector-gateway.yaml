@@ -1,0 +1,242 @@
+# Gateway collector "otel"  ->  Service "otel-collector" (operator naming: <name>-collector)
+#   otel-collector.observability.svc.cluster.local:4317 (OTLP gRPC) / :4318 (OTLP HTTP)   <- contract endpoint
+#
+# Every service (SDK or operator auto-instrumentation), Kong and the Istio mesh send OTLP here.
+#   traces  -> spanmetrics (RED metrics on 100% of spans, BEFORE sampling)
+#           -> loadbalancing exporter keyed by traceID -> "otel-sampler" tier (tail sampling needs all spans
+#              of a trace on the same collector; a plain Service would spread them across replicas)
+#   metrics -> Prometheus exporter :8889 (scraped by BOTH Prometheus replicas via the PodMonitor below;
+#              pull instead of remote-write keeps the HA pair identical)
+#   logs    -> Elastic APM (OTLP) - correlated with traces in Kibana (stdout logs still go via Fluent Bit)
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel
+  namespace: observability
+  labels:
+    platform.example.com/collector-role: gateway
+    app.kubernetes.io/part-of: observability
+spec:
+  mode: deployment
+  image: otel/opentelemetry-collector-contrib:0.159.0 # pin: verify latest before upgrade
+  replicas: 3
+  autoscaler:
+    minReplicas: 3
+    maxReplicas: 12
+    targetCPUUtilization: 65
+    targetMemoryUtilization: 75
+  podDisruptionBudget:
+    maxUnavailable: 1
+  nodeSelector:
+    workload-tier: observability
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/instance: observability.otel # label set by the operator: <namespace>.<name>
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  env:
+    - name: GOMEMLIMIT
+      value: 3200MiB
+    - name: ELASTIC_APM_SECRET_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: apm-server-credentials
+          key: secret-token
+  volumes:
+    - name: apm-ca
+      secret:
+        secretName: apm-server-credentials
+        items:
+          - key: ca.crt
+            path: ca.crt
+  volumeMounts:
+    - name: apm-ca
+      mountPath: /etc/apm
+      readOnly: true
+  observability:
+    metrics:
+      enableMetrics: false # own PodMonitor below (internal telemetry :8888 + prometheus exporter :8889)
+  config:
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+            max_recv_msg_size_mib: 16
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 20
+      # Drop probe / scrape noise before it costs anything.
+      filter/noise:
+        error_mode: ignore
+        traces:
+          span:
+            - IsMatch(attributes["url.path"], "^/(health/(live|ready|startup)|metrics)$")
+            - IsMatch(attributes["http.target"], "^/(health/(live|ready|startup)|metrics)$")
+      k8s_attributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.node.name
+          labels:
+            - tag_name: service.version.major
+              key: version
+              from: pod
+            - tag_name: tenant.id
+              key: platform.example.com/tenant
+              from: namespace
+            - tag_name: platform.language
+              key: platform.example.com/language
+              from: pod
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.ip
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: connection
+      resource/cluster:
+        attributes:
+          - key: k8s.cluster.name
+            value: microk8s-prod
+            action: upsert
+          - key: deployment.environment.name
+            value: production
+            action: insert
+      # Tenant: SDK/chart value (OTEL_RESOURCE_ATTRIBUTES tenant.id) wins, else the namespace label,
+      # else "platform" (pooled / platform components).
+      transform/tenant:
+        error_mode: ignore
+        trace_statements:
+          - context: resource
+            statements:
+              - set(attributes["tenant.id"], "platform") where attributes["tenant.id"] == nil
+        metric_statements:
+          - context: resource
+            statements:
+              - set(attributes["tenant.id"], "platform") where attributes["tenant.id"] == nil
+        log_statements:
+          - context: resource
+            statements:
+              - set(attributes["tenant.id"], "platform") where attributes["tenant.id"] == nil
+      # Prometheus exporter keeps resource attributes in target_info only; promote the few we aggregate on.
+      transform/promote:
+        error_mode: ignore
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["tenant"], resource.attributes["tenant.id"])
+              - set(attributes["namespace"], resource.attributes["k8s.namespace.name"])
+              - set(attributes["service_version"], resource.attributes["service.version"])
+      batch:
+        send_batch_size: 8192
+        send_batch_max_size: 16384
+        timeout: 2s
+    connectors:
+      span_metrics:
+        namespace: traces.span.metrics
+        histogram:
+          unit: ms
+          explicit:
+            buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2500ms, 5s, 10s]
+        dimensions:
+          - name: http.request.method
+          - name: http.response.status_code
+          - name: rpc.grpc.status_code
+        exemplars:
+          enabled: true
+        metrics_flush_interval: 15s
+        metrics_expiration: 5m
+        resource_metrics_key_attributes:
+          - service.name
+          - service.version
+          - k8s.namespace.name
+          - tenant.id
+    exporters:
+      load_balancing/sampler:
+        routing_key: traceID
+        protocol:
+          otlp:
+            timeout: 10s
+            tls:
+              insecure: true
+            sending_queue:
+              enabled: true
+              num_consumers: 20
+              queue_size: 10000
+        resolver:
+          dns:
+            hostname: otel-sampler-collector-headless.observability.svc.cluster.local
+            port: "4317"
+            interval: 15s
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        enable_open_metrics: true # exemplars (trace_id) for Grafana -> APM links
+        metric_expiration: 10m
+        resource_to_telemetry_conversion:
+          enabled: false
+      otlp_grpc/apm:
+        endpoint: apm-server-apm-http.logging.svc.cluster.local:8200
+        tls:
+          ca_file: /etc/apm/ca.crt
+        headers:
+          Authorization: Bearer ${env:ELASTIC_APM_SECRET_TOKEN}
+        sending_queue:
+          enabled: true
+          num_consumers: 10
+          queue_size: 5000
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 300s
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+          encoding: json
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, filter/noise, k8s_attributes, resource/cluster, transform/tenant, batch]
+          exporters: [span_metrics, load_balancing/sampler]
+        metrics:
+          receivers: [otlp, span_metrics]
+          processors: [memory_limiter, k8s_attributes, resource/cluster, transform/tenant, transform/promote, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, resource/cluster, transform/tenant, batch]
+          exporters: [otlp_grpc/apm]

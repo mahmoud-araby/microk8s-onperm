@@ -1,0 +1,100 @@
+# prometheus-community/prometheus-blackbox-exporter 11.18.0 (pin in application.yaml).
+# Service: blackbox-exporter.monitoring.svc.cluster.local:9115 (used as prober by the Probe CRs).
+fullnameOverride: blackbox-exporter
+
+replicas: 2
+podDisruptionBudget:
+  minAvailable: 1
+
+nodeSelector:
+  workload-tier: observability
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# Internal CA (ClusterIssuer internal-ca) to verify *.ops.example.local / *.internal.example.local.
+extraSecretMounts:
+  - name: internal-ca
+    mountPath: /etc/blackbox/internal-ca
+    secretName: internal-ca-bundle
+    readOnly: true
+    defaultMode: 0444
+
+config:
+  modules:
+    # Public endpoints: must answer 2xx over valid public TLS (Let's Encrypt), HTTP/1.1 or HTTP/2.
+    http_2xx:
+      prober: http
+      timeout: 5s
+      http:
+        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+        valid_status_codes: [] # 2xx
+        follow_redirects: true
+        fail_if_not_ssl: true
+        preferred_ip_protocol: ip4
+        headers:
+          User-Agent: platform-synthetics/blackbox
+    # API health endpoint: 2xx + a JSON body (no HTML error page from a proxy).
+    http_health_json:
+      prober: http
+      timeout: 5s
+      http:
+        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+        fail_if_not_ssl: true
+        preferred_ip_protocol: ip4
+        fail_if_body_not_matches_regexp:
+          - '^\s*[\{\[]'
+        headers:
+          Accept: application/json
+          User-Agent: platform-synthetics/blackbox
+    # Ops UIs behind SSO: reachable + TLS valid (internal CA). 401/403/redirect to Keycloak = healthy.
+    http_ops_ui:
+      prober: http
+      timeout: 5s
+      http:
+        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+        valid_status_codes: [200, 301, 302, 303, 307, 308, 401, 403]
+        follow_redirects: false
+        fail_if_not_ssl: true
+        preferred_ip_protocol: ip4
+        tls_config:
+          ca_file: /etc/blackbox/internal-ca/ca.crt
+    # In-cluster plain HTTP health endpoints.
+    http_2xx_incluster:
+      prober: http
+      timeout: 5s
+      http:
+        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+        preferred_ip_protocol: ip4
+    # In-cluster HTTPS endpoints with ECK/self-signed certificates that require auth (401 = up).
+    https_auth_incluster:
+      prober: http
+      timeout: 5s
+      http:
+        valid_status_codes: [200, 401]
+        preferred_ip_protocol: ip4
+        tls_config:
+          insecure_skip_verify: true # ECK self-signed CA; certificate expiry is watched by ECK itself
+    tcp_connect:
+      prober: tcp
+      timeout: 5s
+      tcp:
+        preferred_ip_protocol: ip4
+
+serviceMonitor:
+  selfMonitor:
+    enabled: true
+  enabled: false # targets are declared with Probe CRs (manifests/probes.yaml)
+
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]

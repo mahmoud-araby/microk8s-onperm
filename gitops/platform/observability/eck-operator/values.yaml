@@ -1,0 +1,50 @@
+# ECK operator - chart elastic/eck-operator 3.5.0 (pin in application.yaml).
+installCRDs: true
+replicaCount: 1 # leader-elected; the operator is not in the data path
+
+# Only reconcile the namespaces that host Elastic resources.
+managedNamespaces: [logging]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector:
+  workload-tier: platform
+
+podDisruptionBudget:
+  enabled: false
+
+webhook:
+  enabled: true
+  failurePolicy: Ignore
+
+config:
+  logVerbosity: "0"
+  # Plain-HTTP metrics on 9090 scraped by the PodMonitor below.
+  metrics:
+    port: "9090"
+    secureMode:
+      enabled: false
+  # Copy zone labels onto ES pods -> used by spec.nodeSets[].zoneAwareness (shard allocation awareness).
+  exposedNodeLabels:
+    - topology.kubernetes.io/.*
+    - failure-domain.beta.kubernetes.io/.*
+  validateStorageClass: true
+  setDefaultSecurityContext: "auto-detect"
+
+# No telemetry to Elastic from an on-prem cluster.
+telemetry:
+  disabled: true
+
+podMonitor:
+  enabled: true
+  interval: 1m
+  scrapeTimeout: 30s
+
+serviceMonitor:
+  enabled: false

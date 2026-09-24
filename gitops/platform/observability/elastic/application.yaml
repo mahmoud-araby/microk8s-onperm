@@ -1,0 +1,44 @@
+# Elastic Stack (ECK CRs) in namespace "logging": Elasticsearch "elasticsearch", Kibana "kibana",
+# APM Server "apm-server" (service apm-server-apm-http:8200), file-realm users, ILM/index templates/SLM
+# bootstrap job, Elasticsearch exporter. Requires the ECK operator (../eck-operator, wave -10).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: elastic
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  labels:
+    app.kubernetes.io/part-of: observability
+    platform.example.com/category: observability
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: logging
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/platform/observability/elastic/manifests
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: observability
+        platform.example.com/category: observability
+        # ECK manages its own TLS (transport + HTTP); sidecars break ES bootstrap/transport -> out of the mesh.
+        istio-injection: disabled
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

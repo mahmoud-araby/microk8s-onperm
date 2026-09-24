@@ -1,0 +1,194 @@
+# Platform alerts: nodes, storage (PVC, Longhorn), certificates, GitOps (Argo CD), progressive delivery
+# (Argo Rollouts). Each alert links to docs/runbooks/<RunbookName>.md.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: platform-alerts
+    app.kubernetes.io/part-of: observability
+spec:
+  groups:
+  - name: platform.alerts
+    rules:
+    - alert: NodeUnderPressure
+      expr: max by (node, condition) (kube_node_status_condition{condition=~"MemoryPressure|DiskPressure|PIDPressure", status="true"}) == 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: Node {{ $labels.node }} reports {{ $labels.condition }}
+        description: The kubelet on {{ $labels.node }} reports {{ $labels.condition }}; pods may be evicted. Check the workload-tier pool capacity.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/NodeUnderPressure.md
+    - alert: NodeDiskPressureCritical
+      expr: max by (node) (kube_node_status_condition{condition="DiskPressure", status="true"}) == 1
+      for: 15m
+      labels:
+        severity: critical
+      annotations:
+        summary: Node {{ $labels.node }} has had DiskPressure for 15 minutes
+        description: Image GC / evictions are not recovering disk space on {{ $labels.node }} (MicroK8s data dir /var/snap/microk8s/common).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/NodeDiskPressureCritical.md
+    - alert: PlatformPVCFillingUp
+      expr: |
+        (
+          kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.15
+        )
+        and kubelet_volume_stats_used_bytes > 0
+        unless on (namespace, persistentvolumeclaim)
+          kube_persistentvolumeclaim_access_mode{access_mode="ReadOnlyMany"} == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} free
+        description: Less than 15% free space left on the volume.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/PlatformPVCFillingUp.md
+    - alert: PlatformPVCAlmostFull
+      expr: kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.05 and kubelet_volume_stats_used_bytes > 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} has less than 5% free space
+        description: Expand the Longhorn volume (allowVolumeExpansion) or free space now.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/PlatformPVCFillingUp.md
+    - alert: PlatformPVCFillingUpPredicted
+      expr: |
+        (
+          kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.40
+        )
+        and predict_linear(kubelet_volume_stats_available_bytes[6h], 4 * 24 * 3600) < 0
+        and kubelet_volume_stats_used_bytes > 0
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} will fill up within 4 days
+        description: Based on the last 6h growth trend.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/PlatformPVCFillingUp.md
+    - alert: LonghornVolumeDegraded
+      expr: max by (volume, pvc, pvc_namespace) (longhorn_volume_robustness) == 2
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: Longhorn volume {{ $labels.volume }} ({{ $labels.pvc_namespace }}/{{ $labels.pvc }}) is degraded
+        description: One or more replicas are unhealthy; Longhorn is rebuilding. Check node/disk health in longhorn-system.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/LonghornVolumeDegraded.md
+    - alert: LonghornVolumeFaulted
+      expr: max by (volume, pvc, pvc_namespace) (longhorn_volume_robustness) == 3
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: Longhorn volume {{ $labels.volume }} ({{ $labels.pvc_namespace }}/{{ $labels.pvc }}) is FAULTED
+        description: All replicas failed - data is unavailable. Restore from backup (Velero/Longhorn backup) if salvage fails.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/LonghornVolumeDegraded.md
+    - alert: LonghornNodeStorageAlmostFull
+      expr: (longhorn_node_storage_usage_bytes / longhorn_node_storage_capacity_bytes) > 0.85
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Longhorn storage on node {{ $labels.node }} is {{ $value | humanizePercentage }} used
+        description: Scheduling of new replicas will fail soon.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/LonghornNodeStorageAlmostFull.md
+    - alert: CertificateExpiringSoon
+      expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 14 * 24 * 3600
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in {{ $value | humanizeDuration }}
+        description: cert-manager did not renew the certificate 14 days before expiry. Check the Certificate/CertificateRequest/Order status.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/CertificateExpiringSoon.md
+    - alert: CertificateExpiryCritical
+      expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 3 * 24 * 3600
+      for: 10m
+      labels:
+        severity: critical
+      annotations:
+        summary: Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in {{ $value | humanizeDuration }}
+        description: Renewal is failing; outage imminent.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/CertificateExpiringSoon.md
+    - alert: CertificateNotReady
+      expr: max by (namespace, name) (certmanager_certificate_ready_status{condition="False"}) == 1
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Certificate {{ $labels.namespace }}/{{ $labels.name }} is not ready
+        description: The certificate has been NotReady for 15 minutes.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/CertificateExpiringSoon.md
+    - alert: TLSEndpointCertificateExpiring
+      expr: (probe_ssl_earliest_cert_expiry - time()) < 14 * 24 * 3600
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: TLS certificate of {{ $labels.instance }} expires in {{ $value | humanizeDuration }}
+        description: Seen by the blackbox exporter on the live endpoint (covers certificates not managed by cert-manager).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/CertificateExpiringSoon.md
+    - alert: ArgoCDAppDegraded
+      expr: max by (name, project, dest_namespace) (argocd_app_info{health_status="Degraded"}) == 1
+      for: 15m
+      labels:
+        severity: warning
+        namespace: argocd
+      annotations:
+        summary: Argo CD application {{ $labels.name }} is Degraded
+        description: Application {{ $labels.name }} (project {{ $labels.project }}) has been Degraded for 15 minutes.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ArgoCDAppDegraded.md
+    - alert: ArgoCDAppMissing
+      expr: max by (name, project) (argocd_app_info{health_status="Missing"}) == 1
+      for: 30m
+      labels:
+        severity: warning
+        namespace: argocd
+      annotations:
+        summary: Argo CD application {{ $labels.name }} has missing resources
+        description: Resources of {{ $labels.name }} are missing for 30 minutes.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ArgoCDAppDegraded.md
+    - alert: ArgoCDAppOutOfSync
+      expr: max by (name, project, dest_namespace) (argocd_app_info{sync_status="OutOfSync"}) == 1
+      for: 30m
+      labels:
+        severity: warning
+        namespace: argocd
+      annotations:
+        summary: Argo CD application {{ $labels.name }} is OutOfSync
+        description: Git and cluster state differ for 30 minutes (auto-sync failing, or manual change blocked by sync windows).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ArgoCDAppOutOfSync.md
+    - alert: ArgoCDAppSyncFailed
+      expr: sum by (name, project) (increase(argocd_app_sync_total{phase=~"Error|Failed"}[15m])) > 0
+      for: 0m
+      labels:
+        severity: warning
+        namespace: argocd
+      annotations:
+        summary: Argo CD sync of {{ $labels.name }} failed
+        description: At least one sync operation failed in the last 15 minutes.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/ArgoCDAppOutOfSync.md
+    - alert: RolloutAborted
+      expr: |
+        max by (namespace, name) (rollout_info{phase="Degraded"}) == 1
+        or
+        max by (namespace, name) (rollout_phase{phase=~"Aborted|Error|Timeout"}) == 1
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: Argo Rollout {{ $labels.namespace }}/{{ $labels.name }} aborted / degraded
+        description: The canary was aborted (failed analysis or manual abort) and traffic was shifted back to stable. Inspect the AnalysisRun and the canary metrics.
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/RolloutAborted.md
+    - alert: RolloutAnalysisFailed
+      expr: max by (namespace, name) (analysis_run_info{phase=~"Failed|Error"}) == 1
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: AnalysisRun {{ $labels.namespace }}/{{ $labels.name }} failed
+        description: Prometheus analysis of a canary failed (success rate / p95 latency thresholds).
+        runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks/RolloutAborted.md

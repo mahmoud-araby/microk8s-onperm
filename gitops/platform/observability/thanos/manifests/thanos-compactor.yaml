@@ -1,0 +1,113 @@
+# Thanos Compactor: compaction, downsampling and retention of the object-storage bucket.
+# MUST run as a singleton (replicas: 1) per bucket.
+# Retention: raw 30d, 5m-downsampled 180d, 1h-downsampled 2y.
+# Deduplicates the Prometheus HA pair (vertical compaction on prometheus_replica, penalty algorithm).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thanos-compactor
+  namespace: monitoring
+  labels: &labels
+    app.kubernetes.io/name: thanos-compactor
+    app.kubernetes.io/component: compactor
+    app.kubernetes.io/part-of: observability
+spec:
+  replicas: 1
+  serviceName: thanos-compactor
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thanos-compactor
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      serviceAccountName: thanos
+      nodeSelector:
+        workload-tier: observability
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: thanos-compactor
+          image: quay.io/thanos/thanos:v0.42.4 # pin: verify latest before upgrade
+          args:
+            - compact
+            - --wait
+            - --log.level=info
+            - --log.format=json
+            - --data-dir=/var/thanos/compact
+            - --http-address=0.0.0.0:10902
+            - --objstore.config-file=/etc/thanos/objstore/objstore.yml
+            - --retention.resolution-raw=30d
+            - --retention.resolution-5m=180d
+            - --retention.resolution-1h=2y
+            - --deduplication.replica-label=prometheus_replica
+            - --deduplication.func=penalty
+            - --delete-delay=48h
+            - --compact.concurrency=2
+            - --downsample.concurrency=2
+            - --compact.cleanup-interval=5m
+          ports:
+            - name: http
+              containerPort: 10902
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 10Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/thanos/compact
+            - name: objstore
+              mountPath: /etc/thanos/objstore
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: objstore
+          secret:
+            secretName: thanos-objstore
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # Scratch space for compaction (largest block group x2); rebuildable -> single-replica class.
+        storageClassName: longhorn-db
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 300Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-compactor
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: thanos-compactor
+    app.kubernetes.io/part-of: observability
+spec:
+  selector:
+    app.kubernetes.io/name: thanos-compactor
+  ports:
+    - name: http
+      port: 10902
+      targetPort: http

@@ -1,0 +1,80 @@
+# Auto-instrumentation (OpenTelemetry Operator). Application pods opt in per language with an annotation
+# referencing this CR across namespaces:
+#   instrumentation.opentelemetry.io/inject-java:   "observability/platform-instrumentation"
+#   instrumentation.opentelemetry.io/inject-dotnet: "observability/platform-instrumentation"
+#   instrumentation.opentelemetry.io/inject-python: "observability/platform-instrumentation"
+# (dotnet on Alpine/musl images also needs instrumentation.opentelemetry.io/otel-dotnet-auto-runtime: "linux-musl-x64")
+#
+# All SDKs export OTLP/HTTP to the gateway collector; every span is exported (parentbased_always_on) because
+# sampling is decided centrally by the tail-sampling tier. Logs stay on stdout (Fluent Bit) to avoid
+# double ingestion -> OTEL_LOGS_EXPORTER=none.
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: platform-instrumentation
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability
+spec:
+  exporter:
+    endpoint: http://otel-collector.observability.svc.cluster.local:4318
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: parentbased_always_on
+  resource:
+    addK8sUIDAttributes: true
+  env:
+    - name: OTEL_EXPORTER_OTLP_PROTOCOL
+      value: http/protobuf
+    - name: OTEL_LOGS_EXPORTER
+      value: none
+    - name: OTEL_METRICS_EXPORTER
+      value: otlp
+    - name: OTEL_METRIC_EXPORT_INTERVAL
+      value: "30000"
+    - name: OTEL_SEMCONV_STABILITY_OPT_IN
+      value: http
+  java:
+    env:
+      - name: OTEL_INSTRUMENTATION_LOGBACK_MDC_ADD_BAGGAGE
+        value: "true"
+      # trace_id/span_id are put in the logging MDC by the agent -> JSON logs (contract fields)
+      - name: OTEL_INSTRUMENTATION_COMMON_DB_STATEMENT_SANITIZER_ENABLED
+        value: "true"
+      - name: OTEL_INSTRUMENTATION_HTTP_SERVER_CAPTURE_REQUEST_HEADERS
+        value: X-Tenant-ID,X-Correlation-ID
+    resources:
+      limits:
+        cpu: 500m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+  dotnet:
+    env:
+      - name: OTEL_DOTNET_AUTO_LOGS_ENABLED
+        value: "false"
+      - name: OTEL_DOTNET_AUTO_TRACES_ASPNETCORE_INSTRUMENTATION_ENABLED
+        value: "true"
+      - name: OTEL_DOTNET_AUTO_METRICS_ASPNETCORE_INSTRUMENTATION_ENABLED
+        value: "true"
+      - name: OTEL_DOTNET_AUTO_HTTP_INSTRUMENTATION_CAPTURE_REQUEST_HEADERS
+        value: X-Tenant-ID,X-Correlation-ID
+  python:
+    env:
+      # inject otelTraceID/otelSpanID into stdlib logging records (JSON formatter maps them to trace_id/span_id)
+      - name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED
+        value: "true"
+      - name: OTEL_PYTHON_EXCLUDED_URLS
+        value: "health/live,health/ready,health/startup,metrics"
+      - name: OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST
+        value: X-Tenant-ID,X-Correlation-ID
+    resourceRequirements: # init container that copies the python SDK
+      limits:
+        cpu: 500m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
