@@ -29,7 +29,7 @@ traffic mix before go-live and revisit quarterly.
 | `platform` | 6 | 16 vCPU, 64 GB | Istio control plane, Keycloak, Vault, Harbor, operators |
 | `data` | 6 | 32 vCPU, 128 GB, 2×2 TB NVMe | Postgres, Redis, RabbitMQ, Kafka (tainted) |
 | `apps` | 12 → 30 | 32 vCPU, 64 GB | Tenant workloads (cluster autoscaling = add nodes via Ansible `add-node.yml`) |
-| `observability` | 8 | 16–32 vCPU, 64–128 GB; 3 × 8 TB NVMe (ES hot), 2 × 16 TB (ES warm), 3 × 2 TB (Prometheus/Thanos/OTel) | Elasticsearch, Prometheus, Thanos, Grafana, OTel |
+| `observability` | 10 | 5 × (16 vCPU, 64 GB, 2 TB NVMe) for Prometheus/Thanos/Kibana/APM/OTel + 3 × ES hot (32 vCPU, 128 GB, 8 TB NVMe) + 2 × ES warm (16 vCPU, 64 GB, 16 TB) | Elasticsearch, Prometheus, Thanos, Grafana, OTel |
 
 Spread every pool across ≥ 3 racks / failure domains and label nodes with `topology.kubernetes.io/zone`.
 
