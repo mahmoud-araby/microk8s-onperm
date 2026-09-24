@@ -11,7 +11,7 @@ RUN npm run build
 # ---- runtime -------------------------------------------------------------------------------------------------------
 # nginx-unprivileged runs as UID 101 and listens on 8080; its writable paths live in /tmp and are group-0 writable,
 # so it also runs fine when the chart forces runAsUser 10001 (platform contract) with readOnlyRootFilesystem.
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.29-alpine
 ARG APP_VERSION=dev
 LABEL org.opencontainers.image.title="web" \
       org.opencontainers.image.version="${APP_VERSION}" \
