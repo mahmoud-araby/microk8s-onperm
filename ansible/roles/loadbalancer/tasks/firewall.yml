@@ -1,0 +1,96 @@
+---
+# Order matters: SSH is allowed BEFORE ufw is enabled so we never lock ourselves out.
+- name: Allow SSH from admin networks
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ lb_firewall_ssh_port | string }}"
+    proto: tcp
+    comment: ssh-admin
+  loop: "{{ lb_firewall_admin_cidrs }}"
+
+- name: Allow VRRP between the load balancers
+  community.general.ufw:
+    rule: allow
+    src: "{{ hostvars[item]['lb_vrrp_address'] | default(hostvars[item]['ansible_host']) }}"
+    proto: vrrp
+    comment: keepalived-lb
+  loop: "{{ groups['loadbalancers'] | difference([inventory_hostname]) }}"
+
+- name: Allow HTTP/HTTPS to the public VIP from anywhere
+  community.general.ufw:
+    rule: allow
+    dest: "{{ lb_public_vip }}"
+    port: "{{ item }}"
+    proto: tcp
+    comment: lb-public
+  loop: ["80", "443"]
+
+- name: Allow HTTP/HTTPS to the internal VIP from internal networks
+  community.general.ufw:
+    rule: allow
+    src: "{{ item.0 }}"
+    dest: "{{ lb_internal_vip }}"
+    port: "{{ item.1 }}"
+    proto: tcp
+    comment: lb-internal
+  loop: "{{ lb_internal_allowed_cidrs | product(['80', '443']) | list }}"
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1 }}"
+
+- name: Allow the Kubernetes API on the internal VIP
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    dest: "{{ lb_internal_vip }}"
+    port: "{{ lb_k8s_api_port | string }}"
+    proto: tcp
+    comment: lb-k8s-api
+  loop: "{{ lb_k8s_api_allowed_cidrs }}"
+  when: lb_k8s_api_enabled | bool
+
+- name: Allow Kafka on the internal VIP
+  community.general.ufw:
+    rule: allow
+    src: "{{ item.0 }}"
+    dest: "{{ lb_internal_vip }}"
+    port: "{{ item.1 | string }}"
+    proto: tcp
+    comment: lb-kafka
+  loop: "{{ lb_kafka_allowed_cidrs | product([lb_kafka_bootstrap_port] + (lb_kafka_brokers | map(attribute='listen_port') | list)) | list }}"
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1 }}"
+  when:
+    - lb_kafka_enabled | bool
+    - lb_kafka_bootstrap_address | length > 0
+
+- name: Allow metrics scraping (HAProxy exporter, node exporter)
+  community.general.ufw:
+    rule: allow
+    src: "{{ item.0 }}"
+    port: "{{ item.1 | string }}"
+    proto: tcp
+    comment: lb-metrics
+  loop: >-
+    {{ lb_stats_allowed_cidrs | union(lb_metrics_allowed_cidrs)
+       | product([lb_stats_port] + ([lb_node_exporter_port] if lb_node_exporter_enabled | bool else [])) | list }}
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1 }}"
+
+- name: Allow outgoing traffic by default
+  community.general.ufw:
+    default: allow
+    direction: outgoing
+
+- name: Allow routed traffic (IPVS NAT mode)
+  community.general.ufw:
+    default: allow
+    direction: routed
+  when: lb_pure_l4_ipvs | bool
+
+- name: Deny incoming traffic by default and enable ufw
+  community.general.ufw:
+    state: enabled
+    default: deny
+    direction: incoming
+    logging: "low"

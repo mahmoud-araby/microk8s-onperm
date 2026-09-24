@@ -1,0 +1,46 @@
+---
+- name: Chroot log socket directory
+  ansible.builtin.file:
+    path: /var/lib/haproxy/dev
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: HAProxy JSON log file via rsyslog
+  ansible.builtin.template:
+    src: rsyslog-haproxy.conf.j2
+    dest: /etc/rsyslog.d/49-haproxy.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart rsyslog
+
+- name: Rotate the HAProxy log
+  ansible.builtin.template:
+    src: logrotate-haproxy.j2
+    dest: /etc/logrotate.d/haproxy
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Journald size limit (keepalived, system logs)
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/60-loadbalancer.conf
+    content: |
+      # Managed by Ansible (role: loadbalancer)
+      [Journal]
+      SystemMaxUse={{ lb_journald_max_use }}
+      Compress=yes
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald

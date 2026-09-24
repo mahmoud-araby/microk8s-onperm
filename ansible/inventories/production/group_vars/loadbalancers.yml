@@ -1,0 +1,51 @@
+---
+# ---------------------------------------------------------------------------
+# Edge load balancer pair - PRODUCTION (lb-01 / lb-02, 8 vCPU / 16 GiB, 2x 10 GbE)
+# VIPs / mode / backends: group_vars/all/loadbalancer.yml. Role defaults: roles/loadbalancer.
+# ---------------------------------------------------------------------------
+
+# NICs: ens224 = DMZ (public VIP), ens192 = internal/management (internal VIP, VRRP, SSH)
+lb_public_vip_interface: ens224
+lb_public_vip_prefix: 32
+lb_internal_vip_interface: ens192
+lb_internal_vip_prefix: 32
+lb_public_vip_router_id: 61          # unique per L2 segment (the masters' API VIP uses 51)
+lb_internal_vip_router_id: 62
+lb_vrrp_active_active: true          # public VIP homes on lb-01, internal VIP on lb-02
+
+# HAProxy 3.0 LTS from ppa:vbernat/haproxy-3.0 (use `distro` on noble for an air-gapped mirror: 2.8)
+lb_haproxy_source: ppa
+lb_haproxy_major: "3.0"
+
+# Capacity: ~50k concurrent sessions / 15-20k req/s peak for 1M users; 4x headroom.
+lb_global_maxconn: 200000
+lb_public_maxconn: 150000
+lb_internal_maxconn: 30000
+
+# Per-source-IP limits on the public VIP (Kong applies per-consumer / per-tenant limits)
+lb_rate_limit_enabled: true
+lb_rate_limit_http_req_per_10s: 2000
+lb_rate_limit_conn_cur: 500
+lb_rate_limit_exempt_cidrs: []
+
+# TLS (l7): internal wildcard certs come from cert-manager (issuer internal-ca) in the cluster;
+# public certs from inventories/production/files/lb-certs/*.pem (ansible-vault encrypted) or add the
+# Kong-namespace Certificate Secrets here once issued (see docs/load-balancing.md "TLS").
+lb_tls_k8s_secrets:
+  - {namespace: istio-internal, name: ops-wildcard-tls}
+  - {namespace: istio-internal, name: internal-wildcard-tls}
+lb_backend_reencrypt: true
+lb_backend_tls_verify: false         # true + inventories/production/files/internal-ca.crt to verify Kong/Istio
+lb_hsts_enabled: false               # Kong already sets HSTS per route where required
+
+# Who may reach the internal VIP / the API through the LB
+lb_internal_allowed_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+lb_k8s_api_allowed_cidrs: "{{ platform_admin_cidrs }}"
+lb_kafka_allowed_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+
+# WAF hook (Coraza SPOA) - disabled; see docs/load-balancing.md "WAF"
+lb_waf_enabled: false

@@ -1,0 +1,55 @@
+---
+- name: Load conntrack module at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/loadbalancer.conf
+    content: |
+      # Managed by Ansible (role: loadbalancer)
+      nf_conntrack
+      {{ 'ip_vs' if lb_pure_l4_ipvs | bool else '' }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Size the conntrack hash table
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/loadbalancer-conntrack.conf
+    content: |
+      # Managed by Ansible (role: loadbalancer)
+      options nf_conntrack hashsize={{ lb_conntrack_hashsize }}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Load kernel modules now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ ['nf_conntrack'] + (['ip_vs'] if lb_pure_l4_ipvs | bool else []) }}"
+
+- name: Apply conntrack hash size at runtime
+  ansible.builtin.shell: |
+    set -eu
+    f=/sys/module/nf_conntrack/parameters/hashsize
+    if [ "$(cat "$f")" != "{{ lb_conntrack_hashsize }}" ]; then
+      echo {{ lb_conntrack_hashsize }} > "$f"
+      echo changed
+    fi
+  args:
+    executable: /bin/bash
+  register: _lb_hashsize
+  changed_when: "'changed' in _lb_hashsize.stdout"
+
+- name: Apply load balancer kernel parameters
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: "{{ lb_sysctl_file }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop: >-
+    {{ lb_sysctl
+       | combine({'net.ipv4.ip_forward': 1} if lb_pure_l4_ipvs | bool else {})
+       | combine(lb_sysctl_extra) | dict2items }}
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"

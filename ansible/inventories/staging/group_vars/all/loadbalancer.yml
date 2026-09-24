@@ -1,0 +1,17 @@
+---
+# ---------------------------------------------------------------------------
+# Edge load balancer - STAGING (single node; keepalived still owns the VIPs so the config is
+# identical to production). See production/group_vars/all/loadbalancer.yml for the comments.
+# ---------------------------------------------------------------------------
+lb_mode: l7
+lb_subnet_cidr: 10.20.20.0/24
+
+lb_public_vip: 203.0.113.38          # outside the MetalLB public-pool (203.0.113.40-49)
+lb_internal_vip: 10.20.20.10
+
+lb_backend_kong_vip: "{{ (metallb_pools['public-pool']['addresses'][0] | split('-'))[0] }}"
+lb_backend_istio_internal_vip: "{{ (metallb_pools['internal-pool']['addresses'][0] | split('-'))[0] }}"
+
+lb_kafka_enabled: true
+lb_kafka_bootstrap_address: 10.20.100.20
+lb_kafka_brokers: []                 # staging clients use the per-broker VIPs directly

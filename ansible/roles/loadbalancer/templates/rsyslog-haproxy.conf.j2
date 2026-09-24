@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# role: loadbalancer - HAProxy logs (JSON, one object per line) from the chroot socket to {{ lb_log_file }}.
+# Ship the file with Fluent Bit / Elastic Agent to Elasticsearch (index logs-loadbalancer).
+$AddUnixListenSocket /var/lib/haproxy/dev/log
+template(name="HaproxyJson" type="string" string="%msg:2:$%\n")
+if $programname startswith 'haproxy' then {
+  action(type="omfile" file="{{ lb_log_file }}" template="HaproxyJson" fileCreateMode="0640" fileOwner="syslog" fileGroup="adm")
+  stop
+}

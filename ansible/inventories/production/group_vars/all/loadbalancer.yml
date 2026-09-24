@@ -1,0 +1,36 @@
+---
+# ---------------------------------------------------------------------------
+# Edge load balancers - PRODUCTION (role: loadbalancer, group `loadbalancers`)
+# docs/load-balancing.md, docs/conventions.md "Load balancing (L7 with optional L4)".
+# In group_vars/all because the VIPs are also referenced by docs / DNS / cluster-side config.
+# ---------------------------------------------------------------------------
+
+# l7 (default): HAProxy terminates TLS, Kong/Istio trust X-Forwarded-For from lb_subnet_cidr.
+# l4          : TLS passthrough + PROXY protocol v2 -> switch Kong/Istio to PROXY protocol first
+#               (gitops/platform/core/kong/values.yaml "Edge load balancer", istio-internal/values.yaml).
+lb_mode: l7
+
+# Network the LB nodes live in = the source address Kong/Istio see (trusted_ips).
+lb_subnet_cidr: 10.10.20.0/24
+
+# Floating VIPs (keepalived). DNS: api/app/*.api/*.app.example.com -> lb_public_vip (public A record,
+# usually via a 1:1 NAT on the perimeter firewall); *.ops/*.internal.example.local,
+# k8s-api-lb.ops.example.local, kafka.internal.example.local -> lb_internal_vip.
+lb_public_vip: 203.0.113.5          # DMZ VLAN, outside the MetalLB public-pool
+lb_internal_vip: 10.10.20.10
+
+# Backends = the MetalLB LoadBalancer VIPs of the gateways. Defaults: first address of each pool
+# (network.yml); pin the same IPs in GitOps with the metallb.io/loadBalancerIPs annotation.
+lb_backend_kong_vip: "{{ (metallb_pools['public-pool']['addresses'][0] | split('-'))[0] }}"
+lb_backend_istio_internal_vip: "{{ (metallb_pools['internal-pool']['addresses'][0] | split('-'))[0] }}"
+
+# Kafka external listener (Strimzi LoadBalancer VIPs in internal-pool; pin them in 20-kafka.yaml with
+# bootstrap.loadBalancerIP / brokers[].loadBalancerIP). Broker ids = Strimzi node ids of pool `brokers`.
+lb_kafka_enabled: true
+lb_kafka_bootstrap_address: 10.10.100.20
+lb_kafka_brokers:
+  - {id: 3, listen_port: 9095, address: 10.10.100.21}
+  - {id: 4, listen_port: 9096, address: 10.10.100.22}
+  - {id: 5, listen_port: 9097, address: 10.10.100.23}
+  - {id: 6, listen_port: 9098, address: 10.10.100.24}
+  - {id: 7, listen_port: 9099, address: 10.10.100.25}

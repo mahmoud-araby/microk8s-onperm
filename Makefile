@@ -42,6 +42,17 @@ upgrade: ## Rolling MicroK8s upgrade, one node at a time
 backup: ## Back up the dqlite datastore
 	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/backup.yml $(ANSIBLE_OPTS)
 
+## ---------- Edge load balancers, external Vault / MinIO, storage ----------
+.PHONY: lb lb-certs lb-check vault-server minio-server storage-prep
+lb: ## Deploy HAProxy + keepalived edge load balancers (L7 default, lb_mode=l4 optional)
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/loadbalancers.yml $(ANSIBLE_OPTS)
+
+lb-certs: ## Sync TLS certificates to the load balancers (run daily)
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/loadbalancers.yml --tags lb_certs $(ANSIBLE_OPTS)
+
+lb-check: ## Dry-run the load balancer configuration (diff only)
+	cd ansible && ansible-playbook -i ../$(INVENTORY) playbooks/loadbalancers.yml --check --diff $(ANSIBLE_OPTS)
+
 ## ---------- Validation ----------
 .PHONY: lint yamllint helm-lint helm-template ansible-lint validate
 yamllint: ## Lint all YAML

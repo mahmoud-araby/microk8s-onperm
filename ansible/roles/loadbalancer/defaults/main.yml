@@ -1,0 +1,275 @@
+---
+# ===========================================================================
+# role: loadbalancer - HAProxy + keepalived edge load balancer pair in front of the cluster
+# (inventory group `loadbalancers`, docs/load-balancing.md, docs/conventions.md
+# "Load balancing (L7 with optional L4)").
+#
+#   public VIP   (lb_public_vip)   :80/:443  -> Kong proxy MetalLB VIP (public-pool)
+#   internal VIP (lb_internal_vip) :80/:443  -> Istio internal gateway MetalLB VIP (internal-pool)
+#                                  :16443    -> Kubernetes API on the masters      [always L4]
+#                                  :9094+    -> Kafka external listener (Strimzi)  [always L4]
+#
+# Environment values (VIPs, interfaces, backends) live in
+# inventories/<env>/group_vars/all/loadbalancer.yml and group_vars/loadbalancers.yml.
+# ===========================================================================
+
+# --- Mode -----------------------------------------------------------------------
+# l7 : HAProxy terminates TLS (HTTP/2), WAF hook, per-IP rate limiting, X-Forwarded-* headers,
+#      re-encrypts to Kong / Istio. Kong/Istio trust the LB IPs for X-Forwarded-For (default).
+# l4 : TCP passthrough with PROXY protocol v2; Kong/Istio terminate TLS and must be switched to
+#      PROXY protocol (see gitops/platform/core/kong/values.yaml, istio-internal/values.yaml).
+lb_mode: l7
+
+# Optional raw-L4 alternative for :80/:443: keepalived LVS/IPVS virtual_servers instead of
+# HAProxy frontends (Kubernetes API, Kafka and the stats endpoint stay on HAProxy).
+# See lb_ipvs_virtual_servers below and docs/load-balancing.md before enabling.
+lb_pure_l4_ipvs: false
+
+# --- HAProxy package ------------------------------------------------------------
+# ppa    : ppa:vbernat/haproxy-<major> (LTS branch, same major on jammy and noble)
+# distro : Ubuntu archive (noble = 2.8 LTS; jammy ships 2.4 which is too old -> refused)
+lb_haproxy_source: ppa
+lb_haproxy_major: "3.0"
+lb_haproxy_min_version: "2.8"
+lb_haproxy_ppa: "ppa:vbernat/haproxy-{{ lb_haproxy_major }}"
+
+# --- Virtual IPs (keepalived / VRRP) -------------------------------------------------
+lb_public_vip: ""
+lb_public_vip_prefix: 32
+lb_public_vip_interface: "{{ ansible_facts['default_ipv4']['interface'] | default('eth0') }}"
+lb_public_vip_router_id: 61
+lb_internal_vip: ""
+lb_internal_vip_prefix: 32
+lb_internal_vip_interface: "{{ ansible_facts['default_ipv4']['interface'] | default('eth0') }}"
+lb_internal_vip_router_id: 62
+# Address used for VRRP unicast adverts (and as the peer address on the other LBs)
+lb_vrrp_address: "{{ ansible_host }}"
+# true : public VIP homes on the first LB, internal VIP on the last one (both LBs carry traffic)
+# false: both VIPs home on the first LB (the other one is a pure standby)
+lb_vrrp_active_active: true
+# Seconds a recovered higher-priority node waits before taking its VIP back
+lb_vrrp_preempt_delay: 30
+# VRRP PASS authentication (max 8 characters) - from ansible-vault (vault_lb_keepalived_auth_pass)
+lb_keepalived_auth_pass: "{{ vault_lb_keepalived_auth_pass | default('') }}"
+
+# --- Backends (cluster side) --------------------------------------------------------
+# Kong proxy LoadBalancer Service VIP (MetalLB public-pool) and Istio internal gateway VIP
+# (MetalLB internal-pool). Pin them in GitOps with the metallb.io/loadBalancerIPs annotation so
+# they cannot move (gitops/platform/core/kong/values.yaml, istio-internal/values.yaml).
+lb_backend_kong_vip: ""
+lb_backend_istio_internal_vip: ""
+lb_kong_https_port: 443
+lb_kong_http_port: 80
+lb_istio_https_port: 443
+lb_istio_http_port: 80
+lb_istio_status_port: 15021
+# Server lists; default = the single MetalLB VIP. Point them at several addresses (e.g. edge
+# nodes with a NodePort) to let HAProxy balance and health-check individual targets.
+lb_kong_servers:
+  - {name: kong-vip, address: "{{ lb_backend_kong_vip }}"}
+lb_istio_internal_servers:
+  - {name: istio-internal-vip, address: "{{ lb_backend_istio_internal_vip }}"}
+lb_backend_server_maxconn: 50000
+
+# Kong health check: http = GET / on the TLS port with Host lb_kong_health_host, any status
+# below 500 means "Kong is up" (404 "no Route matched" is fine); tcp = connect only.
+# (Kong's status listener :8100 is not exposed by the proxy LoadBalancer Service.)
+lb_kong_health_check: http
+lb_kong_health_host: "api.{{ platform_domain | default('example.com') }}"
+
+# --- Domains / host routing ------------------------------------------------------------
+lb_public_domains:
+  - "{{ platform_domain | default('example.com') }}"
+lb_internal_domains:
+  - "{{ platform_internal_domain | default('example.local') }}"
+
+# --- Kubernetes API (always L4) --------------------------------------------------------
+lb_k8s_api_enabled: true
+lb_k8s_api_port: 16443
+# Inventory hostnames of the API servers (address = microk8s_advertise_address | ansible_host)
+lb_k8s_api_masters: "{{ groups['microk8s_masters'] | default([]) }}"
+lb_k8s_api_allowed_cidrs: "{{ platform_admin_cidrs | default(['10.0.0.0/8']) }}"
+
+# --- Kafka external listener (always L4, TLS passthrough) ------------------------------
+# Kafka clients bootstrap on :9094 and then connect to the ADVERTISED address of every broker.
+# To keep all Kafka traffic on the LB, give each broker its own listen port here and set the
+# Strimzi external listener `configuration.brokers[].advertisedHost/advertisedPort` to
+# kafka.internal.<domain>:<listen_port> (docs/load-balancing.md "Kafka").
+lb_kafka_enabled: true
+lb_kafka_bootstrap_port: 9094
+lb_kafka_bootstrap_address: ""        # Strimzi kafka-kafka-external-bootstrap LoadBalancer VIP
+lb_kafka_backend_port: 9094
+lb_kafka_brokers: []                  # [{id: 3, listen_port: 9095, address: 10.10.100.21}, ...]
+lb_kafka_allowed_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+
+# --- Client access ----------------------------------------------------------------------
+# Internal VIP (ops tooling, internal APIs, k8s API excluded - see lb_k8s_api_allowed_cidrs)
+lb_internal_allowed_cidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+# --- TLS (l7 mode) ----------------------------------------------------------------------------
+lb_tls_dir: /etc/haproxy/certs                  # every *.pem = cert + chain + key; SNI picks the match
+lb_tls_default_dir: /etc/haproxy/default-tls    # self-signed fallback cert (unknown SNI / no SNI)
+lb_tls_generate_default_cert: true
+# Sources (combined):
+#  1. lb_tls_certs_local_dir/*.pem on the controller (ansible-vault encrypted files are decrypted)
+#  2. lb_tls_certs: [{name: api-example-com, content: "{{ vault_lb_tls_api_pem }}"}]
+#  3. lb_tls_k8s_secrets: kubernetes.io/tls Secrets issued by cert-manager in the cluster, read
+#     through kubeconfig_path on the controller (renewals are picked up by re-running
+#     `playbooks/loadbalancers.yml --tags lb_certs`, e.g. from a daily CI job)
+lb_tls_certs_local_dir: "{{ inventory_dir }}/files/lb-certs"
+lb_tls_certs: []
+lb_tls_k8s_secrets: []                          # [{namespace: istio-internal, name: ops-wildcard-tls}]
+lb_tls_kubeconfig: "{{ kubeconfig_path | default(inventory_dir ~ '/.kubeconfig') }}"
+lb_tls_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+lb_tls_ciphersuites: "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+lb_tls_min_version: TLSv1.2
+lb_tls_alpn: "h2,http/1.1"
+lb_tls_session_cache_size: 1000000              # ~200 bytes each -> ~200 MB
+lb_hsts_enabled: false
+lb_hsts_value: "max-age=31536000; includeSubDomains"
+
+# Re-encryption to Kong / Istio (l7). false = plain HTTP to Kong :80 / Istio :80 (not recommended).
+lb_backend_reencrypt: true
+lb_backend_tls_verify: false
+lb_backend_ca_src: "{{ inventory_dir }}/files/internal-ca.crt"
+lb_backend_ca_file: /etc/haproxy/ca/backend-ca.crt
+
+# ACME HTTP-01 passthrough: /.well-known/acme-challenge/* on :80 goes to Kong (cert-manager
+# solver) instead of the HTTPS redirect.
+lb_acme_passthrough: true
+
+# --- Request handling (l7) -------------------------------------------------------------------
+lb_request_id_header: X-Request-ID
+lb_request_id_trust_client: false     # true = keep a client-supplied X-Request-ID
+lb_strip_client_forwarded_headers: true   # drop client X-Forwarded-*/X-Real-IP on the public VIP
+lb_max_body_size_bytes: 0                  # 0 = unlimited here (Kong enforces client_max_body_size)
+
+# Per-IP rate limiting with stick-tables (public VIP). Clients behind carrier-grade NAT share
+# an IP, so keep the limits generous and let Kong do per-consumer limits.
+lb_rate_limit_enabled: true
+lb_rate_limit_table_size: 2m
+lb_rate_limit_http_req_per_10s: 2000    # 200 req/s sustained per source IP
+lb_rate_limit_http_err_per_10s: 1000    # 4xx/5xx storms (scanners)
+lb_rate_limit_conn_cur: 500             # concurrent connections per source IP
+lb_rate_limit_conn_rate_per_10s: 1000   # new connections per source IP
+lb_rate_limit_exempt_cidrs: []          # partners / monitoring / NAT gateways
+
+# --- Capacity ----------------------------------------------------------------------------------
+# 1M users -> ~50k concurrent sessions, 15-20k req/s peak (ansible/README.md sizing).
+# Each established connection costs ~2 x tune.bufsize (32 KiB) worst case -> 16 GiB RAM for 200k.
+lb_global_maxconn: 200000
+lb_public_maxconn: 150000
+lb_internal_maxconn: 30000
+lb_nbthread: 0                          # 0 = HAProxy default (all CPUs)
+lb_hard_stop_after: 15m                 # old workers after a reload drain for at most this long
+lb_timeouts:
+  connect: 5s
+  client: 30s
+  server: 60s
+  http_request: 10s                     # slowloris: full request headers within 10s
+  http_keep_alive: 10s
+  queue: 30s
+  tunnel: 1h                            # websockets / gRPC streams
+  client_fin: 10s
+  server_fin: 10s
+  check: 5s
+  tcp_client: 1h                        # L4 frontends (k8s API watches, Kafka)
+  tcp_server: 1h
+
+# --- WAF hook (Coraza SPOA, disabled) ----------------------------------------------------------
+# Install/run coraza-spoa separately (github.com/corazawaf/coraza-spoa, OWASP CRS) listening on
+# lb_waf_spoa_address. HAProxy sends every public request to it and denies with 403 when Coraza
+# returns action "deny".
+lb_waf_enabled: false
+lb_waf_spoa_address: 127.0.0.1:9000
+lb_waf_app_name: platform
+lb_waf_fail_open: true                   # SPOA down/timeout -> let the request through
+
+# --- Error pages -------------------------------------------------------------------------------
+lb_error_pages_dir: /etc/haproxy/errors-platform
+lb_error_pages:
+  400: Bad Request
+  403: Forbidden
+  408: Request Timeout
+  429: Too Many Requests
+  500: Internal Server Error
+  502: Bad Gateway
+  503: Service Unavailable
+  504: Gateway Timeout
+
+# --- L4 mode -------------------------------------------------------------------------------------
+lb_l4_send_proxy_v2: true
+
+# --- Stats / metrics -------------------------------------------------------------------------------
+# HAProxy native Prometheus exporter at http://<ansible_host>:<lb_stats_port>/metrics
+lb_stats_bind_address: "{{ ansible_host }}"
+lb_stats_port: 8404
+lb_stats_allowed_cidrs: "{{ (platform_node_cidrs | default([])) + (platform_admin_cidrs | default([])) }}"
+lb_stats_user: admin
+lb_stats_password: "{{ vault_lb_stats_password | default('') }}"   # empty -> no HTML stats page
+lb_health_port: 8405                    # 127.0.0.1 only; used by the keepalived health script
+lb_node_exporter_enabled: true
+lb_node_exporter_port: 9100
+lb_textfile_dir: /var/lib/prometheus/node-exporter   # keepalived notify -> lb_vrrp_master metric
+
+# --- Logging -----------------------------------------------------------------------------------
+lb_log_file: /var/log/haproxy.log
+lb_log_retention_days: 14
+lb_journald_max_use: 2G
+
+# --- Kernel -------------------------------------------------------------------------------------
+lb_sysctl_file: /etc/sysctl.d/60-loadbalancer.conf
+lb_conntrack_hashsize: 524288
+lb_sysctl:
+  net.ipv4.ip_nonlocal_bind: 1          # bind VIPs that currently live on the peer
+  net.ipv6.ip_nonlocal_bind: 1
+  net.core.somaxconn: 65535
+  net.core.netdev_max_backlog: 250000
+  net.ipv4.tcp_max_syn_backlog: 65535
+  net.ipv4.ip_local_port_range: "1024 65535"
+  net.ipv4.tcp_tw_reuse: 1
+  net.ipv4.tcp_fin_timeout: 15
+  net.ipv4.tcp_syncookies: 1
+  net.ipv4.tcp_slow_start_after_idle: 0
+  net.core.rmem_max: 16777216
+  net.core.wmem_max: 16777216
+  net.ipv4.tcp_rmem: "4096 87380 16777216"
+  net.ipv4.tcp_wmem: "4096 65536 16777216"
+  fs.file-max: 4194304
+  fs.nr_open: 4194304
+  net.netfilter.nf_conntrack_max: 2097152
+  net.netfilter.nf_conntrack_tcp_timeout_established: 3600
+  net.netfilter.nf_conntrack_tcp_timeout_time_wait: 30
+lb_sysctl_extra: {}
+
+# --- Firewall (ufw) ------------------------------------------------------------------------------
+lb_firewall_enabled: "{{ common_firewall_enabled | default(true) }}"
+lb_firewall_admin_cidrs: "{{ platform_admin_cidrs | default([]) }}"
+lb_firewall_ssh_port: "{{ hardening_ssh_port | default(22) }}"
+lb_metrics_allowed_cidrs: "{{ platform_node_cidrs | default([]) }}"
+
+# --- Optional: pure L4 with keepalived IPVS (lb_pure_l4_ipvs: true) --------------------------------
+# lb_kind NAT : replies must route back through the LB (backends' default gateway = LB) - rarely
+#               true for Kubernetes edge nodes; DR : real servers must own the VIP on lo with
+#               arp_ignore=1/arp_announce=2 and listen on the same port. Read docs first.
+lb_ipvs_virtual_servers:
+  - vip: "{{ lb_public_vip }}"
+    port: 443
+    lb_algo: wlc
+    lb_kind: NAT
+    real_servers: "{{ lb_kong_servers | map(attribute='address') | map('regex_replace', '$', ':443') | list }}"
+  - vip: "{{ lb_public_vip }}"
+    port: 80
+    lb_algo: wlc
+    lb_kind: NAT
+    real_servers: "{{ lb_kong_servers | map(attribute='address') | map('regex_replace', '$', ':80') | list }}"
+  - vip: "{{ lb_internal_vip }}"
+    port: 443
+    lb_algo: wlc
+    lb_kind: NAT
+    real_servers: "{{ lb_istio_internal_servers | map(attribute='address') | map('regex_replace', '$', ':443') | list }}"

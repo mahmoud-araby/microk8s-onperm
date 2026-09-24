@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+{{ lb_log_file }} {
+    daily
+    rotate {{ lb_log_retention_days }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    postrotate
+        [ ! -x /usr/lib/rsyslog/rsyslog-rotate ] || /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}

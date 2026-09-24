@@ -1,0 +1,141 @@
+---
+# TLS material for l7 mode. Every file in lb_tls_dir is a PEM bundle (certificate + chain + key);
+# HAProxy loads the directory and picks the certificate by SNI. The self-signed default certificate
+# is only served for unknown SNI names / clients without SNI.
+- name: Certificate directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ lb_tls_dir }}"
+    - "{{ lb_tls_default_dir }}"
+
+- name: Default certificate private key
+  community.crypto.openssl_privatekey:
+    path: "{{ lb_tls_default_dir }}/default.pem.key"
+    type: ECC
+    curve: secp256r1
+    owner: root
+    group: root
+    mode: "0600"
+  when: lb_tls_generate_default_cert | bool
+  notify: Reload haproxy
+
+- name: Default certificate signing request
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ lb_tls_default_dir }}/default.pem.key"
+    common_name: "{{ inventory_hostname }}.invalid"
+    subject_alt_name:
+      - "DNS:{{ inventory_hostname }}.invalid"
+  register: _lb_default_csr
+  changed_when: false
+  when: lb_tls_generate_default_cert | bool
+
+- name: Default self-signed certificate (key loaded from default.pem.key)
+  community.crypto.x509_certificate:
+    path: "{{ lb_tls_default_dir }}/default.pem"
+    privatekey_path: "{{ lb_tls_default_dir }}/default.pem.key"
+    csr_content: "{{ _lb_default_csr.csr }}"
+    provider: selfsigned
+    selfsigned_not_after: "+3650d"
+    owner: root
+    group: root
+    mode: "0644"
+  when: lb_tls_generate_default_cert | bool
+  notify: Reload haproxy
+
+- name: Certificates from the inventory (files/lb-certs/*.pem, ansible-vault encrypted)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ lb_tls_dir }}/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ query('ansible.builtin.fileglob', lb_tls_certs_local_dir ~ '/*.pem') }}"
+  loop_control:
+    label: "{{ item | basename }}"
+  notify: Reload haproxy
+
+- name: Certificates from variables (lb_tls_certs)
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ lb_tls_dir }}/{{ item.name }}.pem"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ lb_tls_certs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  notify: Reload haproxy
+
+- name: Read cert-manager issued TLS Secrets from the cluster
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ lb_tls_kubeconfig }}"
+    api_version: v1
+    kind: Secret
+    namespace: "{{ item.namespace }}"
+    name: "{{ item.name }}"
+  loop: "{{ lb_tls_k8s_secrets }}"
+  loop_control:
+    label: "{{ item.namespace }}/{{ item.name }}"
+  register: _lb_k8s_tls
+  delegate_to: localhost
+  run_once: true
+  become: false
+  no_log: true
+  # Before the cluster exists (site.yml runs this play first) or when the API is unreachable, the
+  # certificates are simply skipped; re-run with --tags lb_certs once cert-manager has issued them.
+  failed_when: false
+  when:
+    - lb_tls_k8s_secrets | length > 0
+    - lb_tls_kubeconfig is file
+
+- name: Install cluster certificates as PEM bundles
+  ansible.builtin.copy:
+    content: |
+      {{ item.resources[0].data['tls.crt'] | b64decode | trim }}
+      {{ item.resources[0].data['tls.key'] | b64decode | trim }}
+    dest: "{{ lb_tls_dir }}/k8s-{{ item.item.namespace }}-{{ item.item.name }}.pem"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _lb_k8s_tls.results | default([]) | selectattr('resources', 'defined') | selectattr('resources') | list }}"
+  loop_control:
+    label: "{{ item.item.namespace }}/{{ item.item.name }}"
+  no_log: true
+  notify: Reload haproxy
+
+- name: Report missing cluster certificates
+  ansible.builtin.debug:
+    msg: >-
+      TLS Secret {{ item.item.namespace }}/{{ item.item.name }} not available
+      ({{ item.msg | default('not issued yet') }}) - skipped, the default certificate is served for it
+  loop: >-
+    {{ (_lb_k8s_tls.results | default([]) | rejectattr('skipped', 'defined') | rejectattr('resources', 'defined') | list)
+       + (_lb_k8s_tls.results | default([]) | selectattr('resources', 'defined') | rejectattr('resources') | list) }}
+  loop_control:
+    label: "{{ item.item.namespace }}/{{ item.item.name }}"
+
+- name: Backend CA for re-encryption verification (internal CA)
+  when: lb_backend_tls_verify | bool
+  block:
+    - name: CA directory
+      ansible.builtin.file:
+        path: "{{ lb_backend_ca_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Backend CA certificate
+      ansible.builtin.copy:
+        src: "{{ lb_backend_ca_src }}"
+        dest: "{{ lb_backend_ca_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload haproxy

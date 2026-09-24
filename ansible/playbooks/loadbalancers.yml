@@ -1,0 +1,20 @@
+---
+# Edge load balancer pair (HAProxy + keepalived) in front of the cluster - docs/load-balancing.md.
+# Only needs the VIP / backend variables, so it can run before the cluster exists (backends simply
+# report DOWN until Kong / Istio / Kafka are synced by Argo CD).
+#   ansible-playbook -i inventories/production/hosts.yml playbooks/loadbalancers.yml --vault-id production@prompt
+#   ... --tags lb_certs      re-read cert-manager Secrets / cert files and hitlessly reload HAProxy
+#   ... --tags lb_haproxy    re-render haproxy.cfg only (validated with haproxy -c, hitless reload)
+#   ... -e lb_mode=l4        switch to TLS passthrough (switch Kong/Istio to PROXY protocol FIRST)
+- name: Edge load balancers
+  hosts: loadbalancers
+  become: true
+  gather_facts: true
+  # One LB at a time: the peer keeps (or takes over) the VIPs while this one is reconfigured.
+  serial: 1
+  max_fail_percentage: 0
+  roles:
+    - role: hardening
+      tags: [hardening]
+    - role: loadbalancer
+      tags: [loadbalancer]

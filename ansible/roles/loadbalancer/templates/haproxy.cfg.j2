@@ -1,0 +1,409 @@
+# {{ ansible_managed }}
+# role: loadbalancer - mode {{ lb_mode }}{{ ' + IPVS for :80/:443' if lb_pure_l4_ipvs | bool else '' }}
+# public VIP {{ lb_public_vip }} -> Kong, internal VIP {{ lb_internal_vip }} -> Istio internal gateway
+# Validated with `haproxy -c` before it is written; reloads are hitless (master-worker + expose-fd).
+{% set l7 = (lb_mode == 'l7') %}
+{% set http_frontends = not (lb_pure_l4_ipvs | bool) %}
+{% set pub_domains = lb_public_domains %}
+{% set int_domains = lb_internal_domains %}
+{% set be_ssl = l7 and (lb_backend_reencrypt | bool) %}
+{% if lb_backend_tls_verify | bool %}
+{%   set be_verify = 'verify required ca-file ' ~ lb_backend_ca_file %}
+{% else %}
+{%   set be_verify = 'verify none' %}
+{% endif %}
+
+global
+    log /dev/log local0 info
+    chroot /var/lib/haproxy
+    user haproxy
+    group haproxy
+    pidfile /run/haproxy.pid
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    maxconn {{ lb_global_maxconn }}
+{% if (lb_nbthread | int) > 0 %}
+    nbthread {{ lb_nbthread }}
+{% endif %}
+    hard-stop-after {{ lb_hard_stop_after }}
+    ca-base /etc/ssl/certs
+    ssl-default-bind-ciphers {{ lb_tls_ciphers }}
+    ssl-default-bind-ciphersuites {{ lb_tls_ciphersuites }}
+    ssl-default-bind-options ssl-min-ver {{ lb_tls_min_version }} no-tls-tickets
+    ssl-default-server-ciphers {{ lb_tls_ciphers }}
+    ssl-default-server-ciphersuites {{ lb_tls_ciphersuites }}
+    ssl-default-server-options ssl-min-ver {{ lb_tls_min_version }}
+    tune.ssl.cachesize {{ lb_tls_session_cache_size }}
+    tune.ssl.lifetime 600
+    tune.bufsize 16384
+    tune.http.logurilen 2048
+
+# ---------------------------------------------------------------------------------------------
+# Admin listeners (not logged)
+# ---------------------------------------------------------------------------------------------
+defaults admin_defaults
+    mode http
+    timeout connect {{ lb_timeouts.connect }}
+    timeout client {{ lb_timeouts.client }}
+    timeout server {{ lb_timeouts.server }}
+    timeout http-request {{ lb_timeouts.http_request }}
+
+# Local health endpoint for keepalived (vrrp_script chk_haproxy) - loopback only
+frontend fe_health
+    bind 127.0.0.1:{{ lb_health_port }}
+    monitor-uri /healthz
+
+# Prometheus metrics + stats page (restricted to lb_stats_allowed_cidrs, also enforced by ufw)
+frontend fe_stats
+    bind {{ lb_stats_bind_address }}:{{ lb_stats_port }}
+    acl stats_allowed src 127.0.0.1/32 {{ lb_stats_allowed_cidrs | join(' ') }}
+    http-request deny deny_status 403 if !stats_allowed
+    http-request use-service prometheus-exporter if { path /metrics }
+{% if lb_stats_password | length > 0 %}
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats show-legends
+    stats auth {{ lb_stats_user }}:{{ lb_stats_password }}
+{% endif %}
+    acl is_metrics path /metrics
+    acl is_stats path_beg /stats
+    http-request return status 404 content-type text/plain string "not found" unless is_metrics || is_stats
+
+# ---------------------------------------------------------------------------------------------
+# HTTP defaults (JSON access log, one line per request -> /var/log/haproxy.log via rsyslog)
+# ---------------------------------------------------------------------------------------------
+defaults http_defaults
+    log global
+    mode http
+    option dontlognull
+    option redispatch
+    option http-keep-alive
+    retries 3
+    timeout connect {{ lb_timeouts.connect }}
+    timeout client {{ lb_timeouts.client }}
+    timeout server {{ lb_timeouts.server }}
+    timeout http-request {{ lb_timeouts.http_request }}
+    timeout http-keep-alive {{ lb_timeouts.http_keep_alive }}
+    timeout queue {{ lb_timeouts.queue }}
+    timeout tunnel {{ lb_timeouts.tunnel }}
+    timeout client-fin {{ lb_timeouts.client_fin }}
+    timeout server-fin {{ lb_timeouts.server_fin }}
+    timeout check {{ lb_timeouts.check }}
+    log-format '{"timestamp":"%[date,utime(%Y-%m-%dT%H:%M:%SZ)]","type":"http","request_id":"%ID","client_ip":"%ci","client_port":%cp,"frontend":"%f","backend":"%b","server":"%s","method":"%HM","host":"%[capture.req.hdr(0),json(utf8s)]","uri":"%[capture.req.uri,json(utf8s)]","http_version":"%HV","status":%ST,"bytes_sent":%B,"bytes_received":%U,"time_request_ms":%TR,"time_queue_ms":%Tw,"time_connect_ms":%Tc,"time_response_ms":%Tr,"time_total_ms":%Ta,"termination_state":"%tsc","retries":%rc,"actconn":%ac,"feconn":%fc,"beconn":%bc,"srvconn":%sc,"tls_version":"%sslv","tls_cipher":"%sslc","user_agent":"%[capture.req.hdr(1),json(utf8s)]"}'
+{% if lb_error_pages | length > 0 %}
+{%   for code in lb_error_pages %}
+    errorfile {{ code }} {{ lb_error_pages_dir }}/{{ code }}.http
+{%   endfor %}
+{% endif %}
+
+{% if http_frontends and l7 %}
+# ---------------------------------------------------------------------------------------------
+# L7 mode: TLS termination on both VIPs
+# ---------------------------------------------------------------------------------------------
+{% if lb_rate_limit_enabled | bool %}
+# Per-source-IP counters for the public VIP (IPv4 is stored as v4-mapped IPv6)
+backend st_src_public
+    stick-table type ipv6 size {{ lb_rate_limit_table_size }} expire 60s store conn_cur,conn_rate(10s),http_req_rate(10s),http_err_rate(10s)
+
+{% endif %}
+frontend fe_public_http
+    bind {{ lb_public_vip }}:80
+    maxconn {{ lb_public_maxconn }}
+    http-request capture req.hdr(host) len 128
+    http-request capture req.hdr(user-agent) len 256
+    unique-id-format %[uuid(4)]
+{% if lb_acme_passthrough | bool %}
+    acl acme path_beg /.well-known/acme-challenge/
+    option forwardfor
+    http-request redirect scheme https code 301 unless acme
+    http-request set-header X-Forwarded-Proto http if acme
+    use_backend be_kong_http if acme
+{% else %}
+    http-request redirect scheme https code 301
+{% endif %}
+
+frontend fe_public_https
+    bind {{ lb_public_vip }}:443 ssl crt {{ lb_tls_default_dir }}/default.pem crt {{ lb_tls_dir }}/ alpn {{ lb_tls_alpn }} curves X25519:P-256:P-384
+    maxconn {{ lb_public_maxconn }}
+    option forwardfor
+    unique-id-format %[uuid(4)]
+{% if lb_rate_limit_exempt_cidrs | length > 0 %}
+    acl rl_exempt src {{ lb_rate_limit_exempt_cidrs | join(' ') }}
+{% else %}
+    acl rl_exempt always_false
+{% endif %}
+{% if lb_rate_limit_enabled | bool %}
+    # --- per-IP connection + request limits (429 JSON error page)
+    tcp-request connection track-sc0 src table st_src_public unless rl_exempt
+    tcp-request connection reject if { sc0_conn_cur gt {{ lb_rate_limit_conn_cur }} } !rl_exempt
+    tcp-request connection reject if { sc0_conn_rate gt {{ lb_rate_limit_conn_rate_per_10s }} } !rl_exempt
+    http-request deny deny_status 429 if { sc0_http_req_rate gt {{ lb_rate_limit_http_req_per_10s }} } !rl_exempt
+    http-request deny deny_status 429 if { sc0_http_err_rate gt {{ lb_rate_limit_http_err_per_10s }} } !rl_exempt
+{% endif %}
+    http-request capture req.hdr(host) len 128
+    http-request capture req.hdr(user-agent) len 256
+{% if (lb_max_body_size_bytes | int) > 0 %}
+    http-request deny deny_status 413 if { req.hdr_val(content-length) gt {{ lb_max_body_size_bytes }} }
+{% endif %}
+    # --- host routing: only public domains are served on the public VIP
+    acl host_public req.hdr(host),field(1,:),lower -m end {% for d in pub_domains %}.{{ d }} {% endfor %}
+
+    acl host_public req.hdr(host),field(1,:),lower -m str {{ pub_domains | join(' ') }}
+    http-request return status 404 content-type application/json string '{"status":404,"error":"Not Found"}' if !host_public
+{% if lb_waf_enabled | bool %}
+    # --- WAF (Coraza SPOA, OWASP CRS)
+    option http-buffer-request
+    filter spoe engine coraza config /etc/haproxy/coraza-spoe.cfg
+    http-request deny deny_status 403 if { var(txn.coraza.action) -m str deny }
+{%   if not (lb_waf_fail_open | bool) %}
+    http-request deny deny_status 503 if { var(txn.coraza.error) -m found }
+{%   endif %}
+{% endif %}
+    # --- forwarding headers (Kong trusts the LB subnet: trusted_ips + real_ip_header X-Forwarded-For)
+{% if lb_strip_client_forwarded_headers | bool %}
+    http-request del-header X-Forwarded-For
+    http-request del-header X-Real-IP
+    http-request del-header Forwarded
+{% endif %}
+{% if lb_request_id_trust_client | bool %}
+    http-request set-header {{ lb_request_id_header }} %[unique-id] unless { req.hdr({{ lb_request_id_header }}) -m found }
+{% else %}
+    http-request set-header {{ lb_request_id_header }} %[unique-id]
+{% endif %}
+    http-request set-header X-Real-IP %[src]
+    http-request set-header X-Forwarded-Proto https
+    http-request set-header X-Forwarded-Port %[dst_port]
+    http-request set-header X-Forwarded-Host %[req.hdr(host)]
+{% if lb_hsts_enabled | bool %}
+    http-response set-header Strict-Transport-Security "{{ lb_hsts_value }}"
+{% endif %}
+    http-response del-header Server
+    default_backend be_kong_https
+
+frontend fe_internal_http
+    bind {{ lb_internal_vip }}:80
+    maxconn {{ lb_internal_maxconn }}
+    acl internal_allowed src {{ lb_internal_allowed_cidrs | join(' ') }}
+    http-request deny deny_status 403 if !internal_allowed
+    http-request capture req.hdr(host) len 128
+    http-request capture req.hdr(user-agent) len 256
+    http-request redirect scheme https code 301
+
+frontend fe_internal_https
+    bind {{ lb_internal_vip }}:443 ssl crt {{ lb_tls_default_dir }}/default.pem crt {{ lb_tls_dir }}/ alpn {{ lb_tls_alpn }} curves X25519:P-256:P-384
+    maxconn {{ lb_internal_maxconn }}
+    option forwardfor
+    # IP allow-list: the internal VIP is never reachable from outside the corporate networks
+    acl internal_allowed src {{ lb_internal_allowed_cidrs | join(' ') }}
+    http-request deny deny_status 403 if !internal_allowed
+    http-request capture req.hdr(host) len 128
+    http-request capture req.hdr(user-agent) len 256
+    unique-id-format %[uuid(4)]
+    http-request set-header {{ lb_request_id_header }} %[unique-id] unless { req.hdr({{ lb_request_id_header }}) -m found }
+    http-request set-header X-Real-IP %[src]
+    http-request set-header X-Forwarded-Proto https
+    http-request set-header X-Forwarded-Port %[dst_port]
+    http-request set-header X-Forwarded-Host %[req.hdr(host)]
+    # *.<internal domain> (incl. *.ops.<internal domain>) -> Istio internal gateway;
+    # public domains (split-horizon DNS for internal clients) -> Kong
+    acl host_internal req.hdr(host),field(1,:),lower -m end {% for d in int_domains %}.{{ d }} {% endfor %}
+
+    acl host_public req.hdr(host),field(1,:),lower -m end {% for d in pub_domains %}.{{ d }} {% endfor %}
+
+    acl host_public req.hdr(host),field(1,:),lower -m str {{ pub_domains | join(' ') }}
+    use_backend be_istio_internal_https if host_internal
+    use_backend be_kong_https if host_public
+    default_backend be_istio_internal_https
+
+backend be_kong_https
+    # L7 re-encrypt ({{ 'TLS, SNI = client Host' if be_ssl else 'plain HTTP' }}) to the Kong proxy VIP
+{% if lb_kong_health_check == 'http' %}
+    option httpchk
+    http-check send meth GET uri / ver HTTP/1.1 hdr Host {{ lb_kong_health_host }}
+    http-check expect rstatus ^[1-4][0-9][0-9]$
+{% endif %}
+    default-server inter 2s fall 3 rise 2 maxconn {{ lb_backend_server_maxconn }}{% if be_ssl %} ssl {{ be_verify }} sni req.hdr(host),field(1,:) check-sni {{ lb_kong_health_host }} alpn {{ lb_tls_alpn }}{% endif %}
+
+{% for s in lb_kong_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_kong_https_port if be_ssl else lb_kong_http_port }} check
+{% endfor %}
+
+backend be_kong_http
+    # ACME HTTP-01 challenges (cert-manager solver behind Kong) - plain HTTP
+    default-server inter 2s fall 3 rise 2
+{% for s in lb_kong_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_kong_http_port }} check
+{% endfor %}
+
+backend be_istio_internal_https
+    # Health: Istio gateway readiness on the status port
+    option httpchk
+    http-check send meth GET uri /healthz/ready ver HTTP/1.1
+    http-check expect status 200
+    default-server inter 2s fall 3 rise 2 maxconn {{ lb_backend_server_maxconn }}{% if be_ssl %} ssl {{ be_verify }} sni req.hdr(host),field(1,:) alpn {{ lb_tls_alpn }}{% endif %}
+
+{% for s in lb_istio_internal_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_istio_https_port if be_ssl else lb_istio_http_port }} check port {{ lb_istio_status_port }}{% if be_ssl %} no-check-ssl{% endif %}
+
+{% endfor %}
+{% if lb_waf_enabled | bool %}
+
+backend coraza-spoa
+    mode tcp
+    timeout connect 1s
+    timeout server 3m
+    server coraza {{ lb_waf_spoa_address }} check
+{% endif %}
+{% endif %}
+
+# ---------------------------------------------------------------------------------------------
+# TCP defaults (L4 passthrough, Kubernetes API, Kafka)
+# ---------------------------------------------------------------------------------------------
+defaults tcp_defaults
+    log global
+    mode tcp
+    option dontlognull
+    option redispatch
+    retries 3
+    timeout connect {{ lb_timeouts.connect }}
+    timeout client {{ lb_timeouts.tcp_client }}
+    timeout server {{ lb_timeouts.tcp_server }}
+    timeout client-fin {{ lb_timeouts.client_fin }}
+    timeout server-fin {{ lb_timeouts.server_fin }}
+    timeout check {{ lb_timeouts.check }}
+    log-format '{"timestamp":"%[date,utime(%Y-%m-%dT%H:%M:%SZ)]","type":"tcp","client_ip":"%ci","client_port":%cp,"frontend":"%f","backend":"%b","server":"%s","bytes_sent":%B,"bytes_received":%U,"time_queue_ms":%Tw,"time_connect_ms":%Tc,"time_total_ms":%Tt,"termination_state":"%ts","retries":%rc,"actconn":%ac,"feconn":%fc,"beconn":%bc,"srvconn":%sc}'
+{% if http_frontends and not l7 %}
+
+# ---------------------------------------------------------------------------------------------
+# L4 mode: TLS passthrough with PROXY protocol v2 (Kong/Istio terminate TLS)
+# ---------------------------------------------------------------------------------------------
+{% if lb_rate_limit_enabled | bool %}
+backend st_src_public_tcp
+    stick-table type ipv6 size {{ lb_rate_limit_table_size }} expire 60s store conn_cur,conn_rate(10s)
+
+{% endif %}
+frontend fe_public_http
+    bind {{ lb_public_vip }}:80
+    maxconn {{ lb_public_maxconn }}
+    timeout client {{ lb_timeouts.client }}
+    default_backend be_kong_http_pp
+
+frontend fe_public_https
+    bind {{ lb_public_vip }}:443
+    maxconn {{ lb_public_maxconn }}
+{% if lb_rate_limit_exempt_cidrs | length > 0 %}
+    acl rl_exempt src {{ lb_rate_limit_exempt_cidrs | join(' ') }}
+{% else %}
+    acl rl_exempt always_false
+{% endif %}
+{% if lb_rate_limit_enabled | bool %}
+    tcp-request connection track-sc0 src table st_src_public_tcp unless rl_exempt
+    tcp-request connection reject if { sc0_conn_cur gt {{ lb_rate_limit_conn_cur }} } !rl_exempt
+    tcp-request connection reject if { sc0_conn_rate gt {{ lb_rate_limit_conn_rate_per_10s }} } !rl_exempt
+{% endif %}
+    # Public VIP only ever forwards to Kong (internal hosts are not reachable from the Internet)
+    default_backend be_kong_tls_pp
+
+frontend fe_internal_http
+    bind {{ lb_internal_vip }}:80
+    maxconn {{ lb_internal_maxconn }}
+    acl internal_allowed src {{ lb_internal_allowed_cidrs | join(' ') }}
+    tcp-request connection reject if !internal_allowed
+    default_backend be_istio_internal_http_pp
+
+frontend fe_internal_https
+    bind {{ lb_internal_vip }}:443
+    maxconn {{ lb_internal_maxconn }}
+    acl internal_allowed src {{ lb_internal_allowed_cidrs | join(' ') }}
+    tcp-request connection reject if !internal_allowed
+    # SNI routing without terminating TLS
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req.ssl_hello_type 1 }
+    acl sni_internal req.ssl_sni,lower -m end {% for d in int_domains %}.{{ d }} {% endfor %}
+
+    acl sni_public req.ssl_sni,lower -m end {% for d in pub_domains %}.{{ d }} {% endfor %}
+
+    acl sni_public req.ssl_sni,lower -m str {{ pub_domains | join(' ') }}
+    use_backend be_istio_internal_tls_pp if sni_internal
+    use_backend be_kong_tls_pp if sni_public
+    default_backend be_istio_internal_tls_pp
+
+backend be_kong_tls_pp
+    default-server inter 2s fall 3 rise 2 maxconn {{ lb_backend_server_maxconn }}{% if lb_l4_send_proxy_v2 | bool %} send-proxy-v2{% endif %}
+
+{% for s in lb_kong_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_kong_https_port }} check
+{% endfor %}
+
+backend be_kong_http_pp
+    default-server inter 2s fall 3 rise 2 maxconn {{ lb_backend_server_maxconn }}{% if lb_l4_send_proxy_v2 | bool %} send-proxy-v2{% endif %}
+
+{% for s in lb_kong_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_kong_http_port }} check
+{% endfor %}
+
+backend be_istio_internal_tls_pp
+    option httpchk
+    http-check send meth GET uri /healthz/ready ver HTTP/1.1
+    http-check expect status 200
+    default-server inter 2s fall 3 rise 2 maxconn {{ lb_backend_server_maxconn }}{% if lb_l4_send_proxy_v2 | bool %} send-proxy-v2{% endif %}
+
+{% for s in lb_istio_internal_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_istio_https_port }} check port {{ lb_istio_status_port }}
+{% endfor %}
+
+backend be_istio_internal_http_pp
+    option httpchk
+    http-check send meth GET uri /healthz/ready ver HTTP/1.1
+    http-check expect status 200
+    default-server inter 2s fall 3 rise 2 maxconn {{ lb_backend_server_maxconn }}{% if lb_l4_send_proxy_v2 | bool %} send-proxy-v2{% endif %}
+
+{% for s in lb_istio_internal_servers %}
+    server {{ s.name }} {{ s.address }}:{{ lb_istio_http_port }} check port {{ lb_istio_status_port }}
+{% endfor %}
+{% endif %}
+{% if lb_k8s_api_enabled | bool and lb_k8s_api_masters | length > 0 %}
+
+# ---------------------------------------------------------------------------------------------
+# Kubernetes API (always L4, TLS passthrough; client certs / tokens reach kube-apiserver untouched)
+# ---------------------------------------------------------------------------------------------
+frontend fe_k8s_api
+    bind {{ lb_internal_vip }}:{{ lb_k8s_api_port }}
+    acl api_allowed src {{ lb_k8s_api_allowed_cidrs | join(' ') }}
+    tcp-request connection reject if !api_allowed
+    default_backend be_k8s_api
+
+backend be_k8s_api
+    balance leastconn
+    # TLS handshake check against every API server
+    default-server inter 3s fall 3 rise 2 check-ssl verify none
+{% for m in lb_k8s_api_masters %}
+    server {{ m }} {{ hostvars[m]['microk8s_advertise_address'] | default(hostvars[m]['ansible_host']) }}:16443 check
+{% endfor %}
+{% endif %}
+{% if lb_kafka_enabled | bool and lb_kafka_bootstrap_address | length > 0 %}
+
+# ---------------------------------------------------------------------------------------------
+# Kafka external listener (always L4, TLS passthrough to the Strimzi LoadBalancer VIPs)
+# ---------------------------------------------------------------------------------------------
+frontend fe_kafka_bootstrap
+    bind {{ lb_internal_vip }}:{{ lb_kafka_bootstrap_port }}
+    acl kafka_allowed src {{ lb_kafka_allowed_cidrs | join(' ') }}
+    tcp-request connection reject if !kafka_allowed
+    default_backend be_kafka_bootstrap
+
+backend be_kafka_bootstrap
+    server kafka-bootstrap {{ lb_kafka_bootstrap_address }}:{{ lb_kafka_backend_port }} check inter 5s fall 3 rise 2
+{% for b in lb_kafka_brokers %}
+
+frontend fe_kafka_broker_{{ b.id }}
+    bind {{ lb_internal_vip }}:{{ b.listen_port }}
+    acl kafka_allowed src {{ lb_kafka_allowed_cidrs | join(' ') }}
+    tcp-request connection reject if !kafka_allowed
+    default_backend be_kafka_broker_{{ b.id }}
+
+backend be_kafka_broker_{{ b.id }}
+    server kafka-{{ b.id }} {{ b.address }}:{{ b.port | default(lb_kafka_backend_port) }} check inter 5s fall 3 rise 2
+{% endfor %}
+{% endif %}

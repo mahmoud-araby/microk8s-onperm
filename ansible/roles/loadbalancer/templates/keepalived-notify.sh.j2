@@ -1,0 +1,13 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# role: loadbalancer - keepalived notify hook: $1=GROUP|INSTANCE $2=name $3=MASTER|BACKUP|FAULT|STOP $4=priority
+# Logs every transition and exposes it to the node-exporter textfile collector
+# (lb_vrrp_state{instance="VI_PUBLIC"} 1 = MASTER) for alerting on flapping / split brain.
+TYPE="$1"; NAME="$2"; STATE="$3"
+logger -t keepalived-notify "${TYPE} ${NAME} -> ${STATE}"
+DIR={{ lb_textfile_dir }}
+[ -d "$DIR" ] || exit 0
+case "$STATE" in MASTER) V=1 ;; *) V=0 ;; esac
+F="$DIR/lb_vrrp_${NAME}.prom"
+printf '# HELP lb_vrrp_master 1 when this node holds the VRRP instance VIP\n# TYPE lb_vrrp_master gauge\nlb_vrrp_master{instance="%s",state="%s"} %s\n' "$NAME" "$STATE" "$V" > "$F.$$" && mv -f "$F.$$" "$F"
+exit 0

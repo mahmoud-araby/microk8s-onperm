@@ -116,17 +116,24 @@ gateway:
     type: LoadBalancer
     annotations:
       metallb.io/address-pool: public-pool
-    externalTrafficPolicy: Local            # preserve client IP for ip-restriction / rate limiting / logs
+      # Pin the VIP the edge load balancers forward to (= lb_backend_kong_vip, first address of the
+      # public-pool in ansible/inventories/<env>/group_vars/all/network.yml):
+      metallb.io/loadBalancerIPs: 203.0.113.10
+    # Local = no SNAT: Kong sees the real client (no LB) or the LB address (trusted_ips, see env below).
+    # Keep it Local in both lb modes; MetalLB then only announces the VIP from nodes running a Kong pod.
+    externalTrafficPolicy: Local
+    # With the edge LB in front, optionally only accept the LB subnets on the VIP:
+    # loadBalancerSourceRanges: ["10.10.20.0/24"]
     http:
       enabled: true
       servicePort: 80
       containerPort: 8000
-      parameters: [reuseport, "backlog=16384"]
+      parameters: [reuseport, "backlog=16384"]          # lb_mode l4: [proxy_protocol, reuseport, "backlog=16384"]
     tls:
       enabled: true
       servicePort: 443
       containerPort: 8443
-      parameters: [http2, reuseport, "backlog=16384"]
+      parameters: [http2, reuseport, "backlog=16384"]   # lb_mode l4: [http2, proxy_protocol, reuseport, "backlog=16384"]
 
   admin:
     enabled: true
@@ -182,10 +189,19 @@ gateway:
     log_level: notice
     # ---- security
     headers: "latency_tokens,X-Kong-Request-Id"   # hide "Server: kong/x.y" but keep latency headers
-    # Client IPs arrive directly (MetalLB + externalTrafficPolicy Local), so X-Forwarded-For is NOT trusted.
-    # If an L7 load balancer / WAF is put in front, set trusted_ips to ITS CIDRs only:
-    # trusted_ips: "198.51.100.0/28"
-    # real_ip_header: X-Forwarded-For
+    # ---- client IP behind the edge load balancer (HAProxy pair, ansible role `loadbalancer`,
+    #      docs/load-balancing.md). Kong trusts X-Forwarded-For / X-Forwarded-Proto ONLY from the LB
+    #      subnets (production 10.10.20.0/24, staging 10.20.20.0/24 = lb_subnet_cidr); XFF sent by any
+    #      other source is ignored, so this is also safe for clients that reach the VIP directly.
+    #      Needs externalTrafficPolicy: Local (proxy Service below) so Kong sees the LB's own address.
+    # lb_mode: l7 (default) - HAProxy terminates TLS and appends the client IP to X-Forwarded-For:
+    trusted_ips: "10.10.20.0/24,10.20.20.0/24"
+    real_ip_header: X-Forwarded-For
+    real_ip_recursive: "on"
+    # lb_mode: l4 - HAProxy passes TLS through with PROXY protocol v2. Switch BEFORE changing lb_mode:
+    #   real_ip_header: proxy_protocol
+    #   + add "proxy_protocol" to gateway.proxy.http.parameters AND gateway.proxy.tls.parameters.
+    #   Afterwards every connection to the Kong VIP must carry a PROXY header (i.e. come through the LB).
     ssl_cipher_suite: intermediate
     ssl_protocols: TLSv1.2 TLSv1.3
     status_listen: 0.0.0.0:8100

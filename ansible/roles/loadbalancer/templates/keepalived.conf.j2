@@ -1,0 +1,102 @@
+# {{ ansible_managed }}
+# role: loadbalancer - VRRP for the public VIP {{ lb_public_vip }} and internal VIP {{ lb_internal_vip }}
+# (unicast adverts, PASS auth, VIP only lives where HAProxy runs and answers its health check).
+{% set lbs = groups['loadbalancers'] | sort %}
+{% set idx = lbs.index(inventory_hostname) %}
+{% set n = lbs | length %}
+{% set prio_public = 150 - (idx * 10) %}
+{% set prio_internal = (150 - ((n - 1 - idx) * 10)) if (lb_vrrp_active_active | bool) else prio_public %}
+global_defs {
+    router_id {{ inventory_hostname }}
+    enable_script_security
+    script_user root
+    vrrp_garp_master_delay 5
+    vrrp_garp_master_refresh 60
+}
+
+# HAProxy process must exist (FAULT state -> VIPs move immediately)
+vrrp_track_process track_haproxy {
+    process haproxy
+    quorum 1
+    delay 2
+}
+
+# ... and answer on its local monitor URI (catches a wedged / misconfigured process)
+vrrp_script chk_haproxy {
+    script "/etc/keepalived/check_haproxy.sh"
+    interval 2
+    timeout 3
+    fall 3
+    rise 2
+}
+{% for inst in [
+     {'name': 'VI_PUBLIC', 'vip': lb_public_vip, 'prefix': lb_public_vip_prefix, 'iface': lb_public_vip_interface, 'vrid': lb_public_vip_router_id, 'prio': prio_public},
+     {'name': 'VI_INTERNAL', 'vip': lb_internal_vip, 'prefix': lb_internal_vip_prefix, 'iface': lb_internal_vip_interface, 'vrid': lb_internal_vip_router_id, 'prio': prio_internal}] %}
+
+vrrp_instance {{ inst.name }} {
+    state BACKUP
+    interface {{ inst.iface }}
+    virtual_router_id {{ inst.vrid }}
+    priority {{ inst.prio }}
+    advert_int 1
+    preempt_delay {{ lb_vrrp_preempt_delay }}
+{% if n > 1 %}
+    unicast_src_ip {{ lb_vrrp_address }}
+    unicast_peer {
+{%   for host in lbs if host != inventory_hostname %}
+        {{ hostvars[host]['lb_vrrp_address'] | default(hostvars[host]['ansible_host']) }}
+{%   endfor %}
+    }
+{% else %}
+    # single load balancer (staging): no peers -> default multicast adverts, nobody listens
+{% endif %}
+    authentication {
+        auth_type PASS
+        auth_pass {{ lb_keepalived_auth_pass }}
+    }
+    virtual_ipaddress {
+        {{ inst.vip }}/{{ inst.prefix }} dev {{ inst.iface }}
+    }
+    track_process {
+        track_haproxy
+    }
+    track_script {
+        chk_haproxy
+    }
+    notify /etc/keepalived/notify.sh
+}
+{% endfor %}
+{% if lb_pure_l4_ipvs | bool %}
+
+# ---------------------------------------------------------------------------------------------
+# Optional raw L4 via LVS/IPVS (lb_pure_l4_ipvs: true). HAProxy does not bind these VIP:ports.
+#   lb_kind NAT : backends must route replies back through this LB (their default gateway)
+#   lb_kind DR  : backends own the VIP on lo (arp_ignore=1, arp_announce=2) and listen on the port
+# No TLS termination, no HTTP features, no PROXY protocol: client IP is preserved by routing.
+# ---------------------------------------------------------------------------------------------
+{% for vs in lb_ipvs_virtual_servers %}
+
+virtual_server {{ vs.vip }} {{ vs.port }} {
+    delay_loop 5
+    lb_algo {{ vs.lb_algo | default('wlc') }}
+    lb_kind {{ vs.lb_kind | default('NAT') }}
+    protocol TCP
+{% if vs.persistence_timeout is defined %}
+    persistence_timeout {{ vs.persistence_timeout }}
+{% endif %}
+{% for rs in vs.real_servers %}
+{%   set rs_addr = rs.split(':')[0] %}
+{%   set rs_port = (rs ~ ':' ~ vs.port).split(':')[1] %}
+
+    real_server {{ rs_addr }} {{ rs_port }} {
+        weight 1
+        TCP_CHECK {
+            connect_timeout 3
+            retry 3
+            delay_before_retry 2
+        }
+    }
+{% endfor %}
+}
+{% endfor %}
+{% endif %}

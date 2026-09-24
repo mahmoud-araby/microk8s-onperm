@@ -1,0 +1,92 @@
+---
+- name: Verify supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] in ['22.04', '24.04']
+    fail_msg: >-
+      {{ inventory_hostname }} runs {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }};
+      only Ubuntu 22.04 / 24.04 LTS are supported.
+    quiet: true
+  tags: [always]
+
+- name: Validate load balancer settings
+  ansible.builtin.assert:
+    that:
+      - lb_mode in ['l7', 'l4']
+      - lb_public_vip | length > 0
+      - lb_internal_vip | length > 0
+      - lb_public_vip != lb_internal_vip
+      - lb_public_vip_router_id | int != lb_internal_vip_router_id | int
+      - lb_backend_kong_vip | length > 0
+      - lb_backend_istio_internal_vip | length > 0
+      - lb_keepalived_auth_pass | length > 0
+      - lb_keepalived_auth_pass | length <= 8
+      - lb_haproxy_source in ['ppa', 'distro']
+      - lb_kong_health_check in ['http', 'tcp']
+      - not (lb_pure_l4_ipvs | bool and lb_waf_enabled | bool)
+    fail_msg: >-
+      Invalid loadbalancer settings: lb_mode must be l7|l4, both VIPs, the Kong / Istio internal backend
+      VIPs and vault_lb_keepalived_auth_pass (1-8 chars, ansible-vault) must be set, the VRRP router ids must
+      differ, and the WAF needs HAProxy frontends (lb_pure_l4_ipvs: false). See docs/load-balancing.md.
+    quiet: true
+  tags: [always]
+
+- name: LB VIPs are not inside a MetalLB pool
+  ansible.builtin.assert:
+    that: not (item.0 | ip_in_range(item.1))
+    fail_msg: "{{ item.0 }} lies inside MetalLB range {{ item.1 }} - pick a VIP outside the pools"
+    quiet: true
+  loop: >-
+    {{ [lb_public_vip, lb_internal_vip]
+       | product(metallb_pools | default({}) | dict2items | map(attribute='value.addresses') | flatten) | list }}
+  loop_control:
+    label: "{{ item.0 }} / {{ item.1 }}"
+  tags: [always]
+
+- name: Packages (HAProxy, keepalived, exporters)
+  ansible.builtin.import_tasks: packages.yml
+  tags: [lb_packages]
+
+- name: Kernel parameters
+  ansible.builtin.import_tasks: sysctl.yml
+  tags: [lb_sysctl, sysctl]
+
+- name: Logging (rsyslog JSON file, logrotate, journald)
+  ansible.builtin.import_tasks: logging.yml
+  tags: [lb_logging]
+
+- name: TLS certificates (l7 mode)
+  ansible.builtin.import_tasks: certs.yml
+  when:
+    - lb_mode == 'l7'
+    - not (lb_pure_l4_ipvs | bool)
+  tags: [lb_certs]
+
+- name: HAProxy configuration
+  ansible.builtin.import_tasks: haproxy.yml
+  tags: [lb_haproxy]
+
+- name: Keepalived (VRRP VIPs, optional IPVS)
+  ansible.builtin.import_tasks: keepalived.yml
+  tags: [lb_keepalived, keepalived]
+
+- name: Host firewall
+  ansible.builtin.import_tasks: firewall.yml
+  when: lb_firewall_enabled | bool
+  tags: [lb_firewall, firewall]
+
+- name: Apply pending reloads before verification
+  ansible.builtin.meta: flush_handlers
+  tags: [always]
+
+- name: Verify HAProxy answers on its local health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ lb_health_port }}/healthz"
+    status_code: 200
+  register: _lb_health
+  retries: 10
+  delay: 3
+  until: _lb_health.status == 200
+  changed_when: false
+  tags: [lb_haproxy, lb_verify]

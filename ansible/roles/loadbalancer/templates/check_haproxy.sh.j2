@@ -1,0 +1,4 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# role: loadbalancer - keepalived vrrp_script: the VIPs only live where HAProxy answers locally.
+exec /usr/bin/curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:{{ lb_health_port }}/healthz

@@ -4,11 +4,19 @@ labels:
   app: istio-ingressgateway
   istio: ingressgateway
 
+# Client IP: this PUBLIC gateway is reached directly on its MetalLB VIP (the edge load balancers only
+# forward the public VIP to Kong), so X-Forwarded-For is NOT trusted by default. If you route it through
+# the edge LB (docs/load-balancing.md), trust exactly one hop in l7 mode:
+# podAnnotations:
+#   proxy.istio.io/config: |
+#     gatewayTopology:
+#       numTrustedProxies: 1
+# or, in l4 mode (PROXY protocol v2):  gatewayTopology: {proxyProtocol: {}}
 service:
   type: LoadBalancer
   annotations:
     metallb.io/address-pool: public-pool
-  externalTrafficPolicy: Local          # preserve client source IP
+  externalTrafficPolicy: Local          # preserve client source IP (required for any of the above)
   ports:
     - {name: status-port, port: 15021, protocol: TCP, targetPort: 15021}
     - {name: http2, port: 80, protocol: TCP, targetPort: 80}

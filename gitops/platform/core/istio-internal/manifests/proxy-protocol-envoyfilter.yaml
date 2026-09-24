@@ -1,0 +1,43 @@
+# PROXY protocol on the internal gateway - ONLY for the edge load balancers in lb_mode: l4
+# (docs/load-balancing.md). Preferred: the gatewayTopology.proxyProtocol pod annotation described in
+# ../values.yaml. This EnvoyFilter is the explicit alternative that limits PROXY protocol to the
+# :80/:443 listeners (container ports 8080/8443), so VM mesh expansion on 15012/15443 keeps working
+# without a PROXY header. Uncomment together with lb_mode: l4; with l7 it would break every request.
+#
+# apiVersion: networking.istio.io/v1alpha3
+# kind: EnvoyFilter
+# metadata:
+#   name: internal-gateway-proxy-protocol
+#   namespace: istio-internal
+# spec:
+#   workloadSelector:
+#     labels:
+#       istio: internal-gateway
+#   configPatches:
+#     - applyTo: LISTENER
+#       match:
+#         context: GATEWAY
+#         listener:
+#           portNumber: 8443
+#       patch:
+#         operation: MERGE
+#         value:
+#           listener_filters:
+#             - name: envoy.filters.listener.proxy_protocol
+#               typed_config:
+#                 "@type": type.googleapis.com/envoy.extensions.filters.listener.proxy_protocol.v3.ProxyProtocol
+#             - name: envoy.filters.listener.tls_inspector
+#               typed_config:
+#                 "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+#     - applyTo: LISTENER
+#       match:
+#         context: GATEWAY
+#         listener:
+#           portNumber: 8080
+#       patch:
+#         operation: MERGE
+#         value:
+#           listener_filters:
+#             - name: envoy.filters.listener.proxy_protocol
+#               typed_config:
+#                 "@type": type.googleapis.com/envoy.extensions.filters.listener.proxy_protocol.v3.ProxyProtocol

@@ -1,0 +1,29 @@
+---
+- name: Keepalived scripts
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/keepalived/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - {src: check_haproxy.sh.j2, dest: check_haproxy.sh}
+    - {src: keepalived-notify.sh.j2, dest: notify.sh}
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Keepalived configuration
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0600"
+    validate: keepalived --config-test -f %s
+  notify: Reload keepalived
+
+- name: Enable and start keepalived
+  ansible.builtin.systemd_service:
+    name: keepalived
+    enabled: true
+    state: started

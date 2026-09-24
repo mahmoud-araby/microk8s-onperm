@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# role: loadbalancer - file descriptors for {{ lb_global_maxconn }} connections (x2: client + server side)
+[Service]
+LimitNOFILE=1048576
+Restart=always
+RestartSec=2s

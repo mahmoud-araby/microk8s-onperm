@@ -6,11 +6,33 @@ labels:
   app: istio-internal-gateway
   istio: internal-gateway
 
+# Client IP behind the edge load balancer (ansible role `loadbalancer`, docs/load-balancing.md).
+# lb_mode l7 (default): HAProxy on the internal VIP terminates TLS and appends the client IP to
+# X-Forwarded-For -> trust exactly ONE proxy hop, so Envoy's x-envoy-external-address, access logs and
+# AuthorizationPolicy remoteIpBlocks see the real client. (Merged with the chart's default pod annotations.)
+# NOTE: a client that bypasses the LB and talks to the MetalLB VIP directly could forge one XFF hop;
+# acceptable on the internal VLAN, or restrict with service.loadBalancerSourceRanges to the LB subnet.
+# lb_mode l4 (TLS passthrough + PROXY protocol v2): replace the annotation with
+#   proxy.istio.io/config: |
+#     gatewayTopology:
+#       numTrustedProxies: 0
+#       proxyProtocol: {}
+# (or the EnvoyFilter in manifests/ comments, docs/load-balancing.md) - every connection must then carry
+# a PROXY header, including VM mesh-expansion traffic on 15012/15443 -> keep those on a separate VIP.
+podAnnotations:
+  proxy.istio.io/config: |
+    gatewayTopology:
+      numTrustedProxies: 1
+
 service:
   type: LoadBalancer
   annotations:
     metallb.io/address-pool: internal-pool
+    # Pin the VIP the edge load balancers forward to (= lb_backend_istio_internal_vip):
+    metallb.io/loadBalancerIPs: 10.10.100.10
+  # Local = no SNAT: the gateway sees the LB address (l7) / PROXY header (l4) or the direct client.
   externalTrafficPolicy: Local
+  # loadBalancerSourceRanges: ["10.10.20.0/24"]
   ports:
     - {name: status-port, port: 15021, protocol: TCP, targetPort: 15021}
     - {name: http2, port: 80, protocol: TCP, targetPort: 80}

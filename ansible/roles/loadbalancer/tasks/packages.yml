@@ -1,0 +1,71 @@
+---
+- name: Add the HAProxy LTS PPA (vbernat)
+  ansible.builtin.apt_repository:
+    repo: "{{ lb_haproxy_ppa }}"
+    state: present
+    update_cache: true
+  when: lb_haproxy_source == 'ppa'
+
+- name: Pin HAProxy to the selected major version
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/haproxy
+    content: |
+      # Managed by Ansible (role: loadbalancer) - never jump HAProxy majors with apt upgrade
+      Package: haproxy
+      Pin: version {{ lb_haproxy_major }}.*
+      Pin-Priority: 1001
+    owner: root
+    group: root
+    mode: "0644"
+  when: lb_haproxy_source == 'ppa'
+
+- name: Install HAProxy
+  ansible.builtin.apt:
+    name: "{{ 'haproxy=' ~ lb_haproxy_major ~ '.*' if lb_haproxy_source == 'ppa' else 'haproxy' }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+
+- name: Install keepalived and tooling
+  ansible.builtin.apt:
+    name: "{{ ['keepalived', 'curl', 'rsyslog', 'python3-cryptography', 'socat']
+              + (['ipvsadm'] if lb_pure_l4_ipvs | bool else [])
+              + (['prometheus-node-exporter'] if lb_node_exporter_enabled | bool else []) }}"
+    state: present
+    lock_timeout: 300
+
+- name: Read installed HAProxy version
+  ansible.builtin.command: haproxy -v
+  register: _lb_haproxy_version
+  changed_when: false
+  check_mode: false
+
+- name: Require a supported HAProxy version
+  ansible.builtin.assert:
+    that: >-
+      (_lb_haproxy_version.stdout | regex_search('[0-9]+[.][0-9]+'))
+      is version(lb_haproxy_min_version, '>=')
+    fail_msg: >-
+      HAProxy {{ _lb_haproxy_version.stdout_lines | first }} is older than {{ lb_haproxy_min_version }}
+      (jammy's archive ships 2.4) - use lb_haproxy_source: ppa.
+    quiet: true
+
+- name: Node exporter listens on the management address only
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus-node-exporter
+    content: |
+      # Managed by Ansible (role: loadbalancer)
+      ARGS="--web.listen-address={{ ansible_host }}:{{ lb_node_exporter_port }} --collector.textfile.directory={{ lb_textfile_dir }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart node exporter
+  when: lb_node_exporter_enabled | bool
+
+- name: Enable node exporter
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter
+    enabled: true
+    state: started
+  when: lb_node_exporter_enabled | bool

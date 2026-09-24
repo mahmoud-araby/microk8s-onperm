@@ -13,7 +13,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"     # after the MetalLB webhook is ready
 spec:
   addresses:
-    - 203.0.113.10-203.0.113.19           # placeholder (TEST-NET-3)
+    - 203.0.113.10-203.0.113.30           # placeholder (TEST-NET-3); must match ansible group_vars/all/network.yml
   autoAssign: false
   avoidBuggyIPs: true
 ---
@@ -26,6 +26,6 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   addresses:
-    - 10.10.50.10-10.10.50.49             # placeholder
+    - 10.10.100.10-10.10.100.80           # placeholder; must match ansible group_vars/all/network.yml
   autoAssign: false
   avoidBuggyIPs: true

@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# role: loadbalancer - SPOE definition for the Coraza SPOA WAF agent (lb_waf_enabled).
+# Agent: https://github.com/corazawaf/coraza-spoa (OWASP CRS), listening on {{ lb_waf_spoa_address }}.
+[coraza]
+spoe-agent coraza-agent
+    messages coraza-req
+    option var-prefix coraza
+    option set-on-error error
+    timeout hello 2s
+    timeout idle 2m
+    timeout processing 500ms
+    use-backend coraza-spoa
+    log global
+
+spoe-message coraza-req
+    args app=str({{ lb_waf_app_name }}) id=unique-id src-ip=src src-port=src_port dst-ip=dst dst-port=dst_port method=method path=path query=query version=req.ver headers=req.hdrs body=req.body
+    event on-frontend-http-request

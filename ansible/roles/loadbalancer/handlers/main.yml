@@ -1,0 +1,35 @@
+---
+# HAProxy runs in master-worker mode (Ubuntu unit: -Ws, ExecReload re-validates with -c and sends
+# USR2). Listening sockets are passed to the new workers (expose-fd listeners): no dropped
+# connections; old workers finish in-flight requests for up to lb_hard_stop_after.
+- name: Reload haproxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: reloaded
+
+# Only for systemd drop-in changes (LimitNOFILE) - a restart drops open connections.
+- name: Restart haproxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: restarted
+    daemon_reload: true
+
+- name: Reload keepalived
+  ansible.builtin.systemd_service:
+    name: keepalived
+    state: reloaded
+
+- name: Restart rsyslog
+  ansible.builtin.systemd_service:
+    name: rsyslog
+    state: restarted
+
+- name: Restart journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+
+- name: Restart node exporter
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter
+    state: restarted

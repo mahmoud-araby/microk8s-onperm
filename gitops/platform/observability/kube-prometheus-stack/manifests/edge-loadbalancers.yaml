@@ -1,0 +1,69 @@
+# Edge load balancers (HAProxy + keepalived VMs, ansible/roles/loadbalancer) are outside the cluster:
+# scrape them statically. Keep targets in sync with the `loadbalancers` group in ansible/inventories/<env>/hosts.yml.
+# HAProxy native exporter :8404/metrics, node-exporter :9100 (incl. textfile metric lb_vrrp_master).
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: edge-loadbalancers
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: platform-observability
+spec:
+  scrapeInterval: 15s
+  metricsPath: /metrics
+  staticConfigs:
+    - targets: ["10.10.20.11:8404", "10.10.20.12:8404"]
+      labels: {job: haproxy, env: production}
+    - targets: ["10.10.20.11:9100", "10.10.20.12:9100"]
+      labels: {job: lb-node, env: production}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: edge-loadbalancers
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: platform-observability
+spec:
+  groups:
+    - name: edge-loadbalancers
+      rules:
+        - alert: LoadBalancerDown
+          expr: up{job=~"haproxy|lb-node"} == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "Edge load balancer {{ $labels.instance }} ({{ $labels.job }}) is not scrapeable"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/load-balancing.md#operations-cheat-sheet
+        - alert: LoadBalancerBackendDown
+          expr: haproxy_backend_active_servers{job="haproxy"} == 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "HAProxy backend {{ $labels.proxy }} on {{ $labels.instance }} has no healthy servers"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/load-balancing.md#operations-cheat-sheet
+        - alert: LoadBalancerFrontend5xxHigh
+          expr: |
+            sum by (instance, proxy) (rate(haproxy_frontend_http_responses_total{job="haproxy", code="5xx"}[5m]))
+              / sum by (instance, proxy) (rate(haproxy_frontend_http_responses_total{job="haproxy"}[5m])) > 0.05
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "More than 5% 5xx on HAProxy frontend {{ $labels.proxy }} ({{ $labels.instance }})"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/load-balancing.md#operations-cheat-sheet
+        - alert: LoadBalancerSessionsNearLimit
+          expr: haproxy_frontend_current_sessions{job="haproxy"} / haproxy_frontend_limit_sessions{job="haproxy"} > 0.8
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "HAProxy frontend {{ $labels.proxy }} on {{ $labels.instance }} is above 80% of its session limit"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/load-balancing.md#operations-cheat-sheet
+        - alert: LoadBalancerVIPNotHeldOnce
+          # Each VRRP instance (VIP) must be MASTER on exactly one LB: 0 = VIP down, 2 = split brain.
+          # The metric's own `instance` label (VRRP instance name) is renamed to exported_instance on scrape.
+          expr: sum by (exported_instance) (lb_vrrp_master{job="lb-node"}) != 1
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "VIP {{ $labels.exported_instance }} is held by {{ $value }} load balancers (expected 1)"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/load-balancing.md#operations-cheat-sheet

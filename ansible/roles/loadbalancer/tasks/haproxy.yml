@@ -1,0 +1,65 @@
+---
+- name: HAProxy systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/haproxy.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: HAProxy systemd limits
+  ansible.builtin.template:
+    src: haproxy-override.conf.j2
+    dest: /etc/systemd/system/haproxy.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart haproxy     # daemon-reload + restart (new LimitNOFILE needs a fresh master)
+
+- name: Error pages directory
+  ansible.builtin.file:
+    path: "{{ lb_error_pages_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: JSON error pages
+  ansible.builtin.template:
+    src: error.http.j2
+    dest: "{{ lb_error_pages_dir }}/{{ item.key }}.http"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ lb_error_pages | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: Reload haproxy
+
+- name: Coraza SPOE definition (WAF hook)
+  ansible.builtin.template:
+    src: coraza-spoe.cfg.j2
+    dest: /etc/haproxy/coraza-spoe.cfg
+    owner: root
+    group: root
+    mode: "0644"
+  when: lb_waf_enabled | bool
+  notify: Reload haproxy
+
+# `haproxy -c` runs against the rendered file before it replaces the live config: a broken
+# template never reaches the running process.
+- name: HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: haproxy
+    mode: "0640"
+    validate: haproxy -c -q -f %s
+  notify: Reload haproxy
+
+- name: Enable and start HAProxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    enabled: true
+    state: started
