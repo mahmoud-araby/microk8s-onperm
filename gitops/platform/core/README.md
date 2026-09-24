@@ -14,6 +14,11 @@ is in [`docs/conventions.md`](../../../docs/conventions.md).
 | `metallb` | metallb | metallb-system | metallb/metallb 0.16.1 | -15 | `public-pool`, `internal-pool` (L2 on edge nodes), BGP example |
 | `cert-manager` | cert-manager | cert-manager | jetstack/cert-manager v1.21.2 | -15 | ClusterIssuers `internal-ca`, `selfsigned-bootstrap`, `letsencrypt-prod`, `letsencrypt-staging`; wildcard certs for istio-internal |
 | `longhorn` | longhorn | longhorn-system | longhorn/longhorn 1.12.1 | -15 | StorageClasses `longhorn` (default, 3 replicas) and `longhorn-db` (1 replica, strict-local); RecurringJobs |
+| `local-path-provisioner` | local-path-provisioner | local-path-storage | rancher/local-path-provisioner v0.0.37 (git) | -15 | StorageClasses `local-nvme` and `local-nvme-minio` on disks mounted by Ansible `storage_prep` |
+| `csi-driver-nfs` | csi-driver-nfs | csi-nfs | csi-driver-nfs 4.13.4 | -15 | StorageClass `nfs-rwx` (RWX) against `nfs.storage.example.local:/exports/k8s` |
+| `csi-s3` | csi-s3 | csi-s3 | manifests (k8s-csi-s3 0.43.7) | -10 | Driver `ru.yandex.s3.csi` (geesefs), StorageClass `minio-s3`; mounts MinIO buckets into pods |
+| `minio-operator` | minio-operator | minio-operator | minio/operator 7.1.1 | -10 | MinIO operator (trusts the internal CA) |
+| `minio` | minio | minio | minio/tenant 7.1.1 | -5 | Tenant `minio`: 4 servers × 4 NVMe on `storage` nodes, EC, TLS, console on `minio-console.ops.example.local`. See [docs/storage.md](../../../docs/storage.md) |
 | `istio-base` | istio-base | istio-system | istio/base 1.30.5 | -10 | CRDs |
 | `istio-cni` | istio-cni | istio-system | istio/cni 1.30.5 | -10 | No privileged init containers, MicroK8s CNI paths |
 | `istiod` | istiod | istio-system | istio/istiod 1.30.5 | -10 | 3–6 replicas, PDB, JSON access logs, OTel tracing, `REGISTRY_ONLY` |
@@ -55,9 +60,9 @@ Every chart version carries the comment `# pin: verify latest before upgrade`.
 | -30 | `projects` (AppProjects) |
 | -25 | Argo CD (self-managed) |
 | -20 | `platform-core` category, `cluster-defaults` |
-| -15 | MetalLB, Longhorn, cert-manager (+ ClusterIssuers) |
-| -10 | Istio base / CNI / istiod, Vault, ESO (+ `vault-backend`), Kyverno, Rollouts, KEDA |
-| -5 | Gateways (Istio ingress, internal, egress, Kong), mesh config, hybrid, Keycloak, Harbor, Velero |
+| -15 | MetalLB, Longhorn, cert-manager (+ ClusterIssuers), local-path provisioner, NFS CSI |
+| -10 | Istio base / CNI / istiod, Vault, ESO (+ `vault-backend`), Kyverno, Rollouts, KEDA, MinIO operator, CSI S3 |
+| -5 | Gateways (Istio ingress, internal, egress, Kong), mesh config, hybrid, Keycloak, Harbor, Velero, MinIO tenant |
 | 0 / 5 | `platform-data` / `platform-observability` |
 | 10 / 20 | Tenants / applications (ApplicationSets) |
 
@@ -94,6 +99,8 @@ Two deviations from the global wave table:
 | `secret/platform/argo-rollouts` | `slack-token` | Rollouts notifications |
 | `secret/platform/keycloak` | `db-password` (shared with data/postgres), `admin-username`, `admin-password`, `client-{argocd,grafana,harbor,vault,kiali}` | Keycloak |
 | `secret/platform/harbor` | `admin-password`, `secret-key` (16 chars), `db-password` (shared with data/postgres) | Harbor |
+| `secret/platform/minio` | `root-user`, `root-password` (alphanumeric) | In-cluster MinIO tenant, bootstrap/provisioning Jobs |
+| `secret/platform/csi-s3` | `access-key`, `secret-key` | CSI S3 driver (`minio-s3` dynamic volumes in bucket `platform-pvc`) |
 | `secret/platform/redis` | `password` (owned by data/redis) | Harbor |
 | `secret/platform/kong` | `keycloak-<tenant>-rsa-public-key`, `partner-erp-jwt-secret` | Kong consumers |
 | `secret/platform/longhorn` | `s3-access-key`, `s3-secret-key`, `s3-endpoint`, `s3-ca-cert` | Longhorn backups |

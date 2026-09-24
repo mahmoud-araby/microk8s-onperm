@@ -16,7 +16,7 @@ spec:
   retentionPolicy: 30d
   configuration:
     destinationPath: s3://pg-backups/site-a/
-    endpointURL: https://minio.backup.example.local:9000 # PLACEHOLDER
+    endpointURL: https://minio.storage.example.local:9000 # PLACEHOLDER
     endpointCA:
       name: pg-main-backup-s3
       key: ca.crt

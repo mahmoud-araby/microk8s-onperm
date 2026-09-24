@@ -1,0 +1,72 @@
+# Platform tool images built from source and pushed to Harbor (Kyverno only admits harbor.ops.example.local images).
+# - mc    (MinIO client): tenant bucket-provisioning Job, MinIO bootstrap Job, chart sync mounts.
+# - minio (MinIO server): in-cluster MinIO tenant; upstream is source-only, so it is built from the release tag.
+name: tool-images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - images/**
+      - .github/workflows/tool-images.yml
+  pull_request:
+    paths:
+      - images/**
+      - .github/workflows/tool-images.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.image }})
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep the tags in sync with charts/*/values.yaml (mc) and gitops/platform/core/minio/values.yaml (minio).
+          - image: mc
+            release: RELEASE.2025-08-13T08-35-41Z
+            build_arg: MC_RELEASE
+          - image: minio
+            release: RELEASE.2025-10-15T17-29-55Z
+            build_arg: MINIO_RELEASE
+    env:
+      IMAGE_REF: harbor.ops.example.local/platform/${{ matrix.image }}:${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: |
+          docker build --pull --build-arg "${{ matrix.build_arg }}=${{ matrix.release }}" -t "$IMAGE_REF" "images/${{ matrix.image }}"
+          docker run --rm "$IMAGE_REF" --version
+      - name: Trivy scan (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REF }}
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+      - name: Push and sign
+        if: github.event_name != 'pull_request'
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          echo "$HARBOR_PASSWORD" | docker login harbor.ops.example.local -u "$HARBOR_USERNAME" --password-stdin
+          docker push "$IMAGE_REF"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REF")
+          curl -sSfL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-amd64
+          chmod +x /usr/local/bin/cosign
+          if [ -n "$COSIGN_PRIVATE_KEY" ]; then
+            cosign sign --yes --tlog-upload=false --key env://COSIGN_PRIVATE_KEY "$digest"
+          else
+            cosign sign --yes "$digest"
+          fi

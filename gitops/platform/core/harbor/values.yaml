@@ -55,7 +55,7 @@ persistence:
     # s3:
     #   region: us-east-1
     #   bucket: harbor-registry
-    #   regionendpoint: https://minio.backup.example.local:9000
+    #   regionendpoint: https://minio.storage.example.local:9000
     #   existingSecret: harbor-s3          # REGISTRY_STORAGE_S3_ACCESSKEY / _SECRETKEY
     #   secure: true
     #   v4auth: true

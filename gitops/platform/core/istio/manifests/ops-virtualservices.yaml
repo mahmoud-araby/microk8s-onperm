@@ -8,6 +8,7 @@
 #   kibana.ops.example.local    gitops/platform/observability/elastic/manifests/virtualservice-kibana.yaml
 #   rabbitmq.ops.example.local  gitops/platform/data/rabbitmq/manifests/60-virtualservice-ops.yaml
 #   kiali.ops.example.local     gitops/platform/observability/kiali/manifests/virtualservice-kiali.yaml
+#   minio-console.ops.example.local  gitops/platform/core/minio/manifests/40-ops-console.yaml
 # Argo CD UI + gRPC-web (server.insecure=true)
 apiVersion: networking.istio.io/v1
 kind: VirtualService

@@ -243,6 +243,10 @@ spec:
         tcpSocket:
           port: metrics
         periodSeconds: 20
+      readinessProbe:
+        tcpSocket:
+          port: metrics
+        periodSeconds: 10
       securityContext:
         {{- include "frontend.containerSecurityContext" . | nindent 8 }}
       resources:

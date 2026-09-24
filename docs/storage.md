@@ -346,16 +346,15 @@ tenant. Current consumers, as referenced in the manifests:
 
 | Consumer | Bucket (prefix) | Vault path → keys | Defined in | Endpoint in the manifest |
 |----------|-----------------|-------------------|------------|--------------------------|
-| Velero (BSL `default`) | `velero-backups` (`microk8s-prod`) | `secret/platform/velero` → `s3-access-key`, `s3-secret-key` | `core/velero/values.yaml`, `manifests/credentials.yaml` | `https://minio.backup.example.local:9000` (placeholder) |
+| Velero (BSL `default`) | `velero-backups` (`microk8s-prod`) | `secret/platform/velero` → `s3-access-key`, `s3-secret-key` | `core/velero/values.yaml`, `manifests/credentials.yaml` | `https://minio.storage.example.local:9000` |
 | Longhorn backup target | `longhorn-backups` (`microk8s-prod`) | `secret/platform/longhorn` → `s3-access-key`, `s3-secret-key`, `s3-endpoint`, `s3-ca-cert` | `core/longhorn/values.yaml`, `manifests/backup-credentials.yaml` | taken from Vault `s3-endpoint` |
-| CNPG barman-cloud (`pg-main`) | `pg-backups` (`site-a/`) | `secret/platform/postgres-backup` → `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY` (+ `ca.crt`) | `data/postgres/manifests/10-objectstore.yaml`, `00-externalsecrets.yaml` | `https://minio.backup.example.local:9000` (placeholder) |
+| CNPG barman-cloud (`pg-main`) | `pg-backups` (`site-a/`) | `secret/platform/postgres-backup` → `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY` (+ `ca.crt`) | `data/postgres/manifests/10-objectstore.yaml`, `00-externalsecrets.yaml` | `https://minio.storage.example.local:9000` |
 | Thanos (sidecar, store, compactor) | `thanos-metrics` (`microk8s-prod`) | `secret/platform/thanos` → `access-key`, `secret-key` | `observability/thanos/manifests/objstore-externalsecret.yaml` | `minio.storage.example.local:9000` |
 | Elasticsearch SLM (repository `minio-s3`) | `es-snapshots` | `secret/platform/elastic-snapshots` → `access-key`, `secret-key` | `observability/elastic/manifests/users-and-secrets.yaml`, `es-bootstrap-job.yaml`, `elasticsearch.yaml` | `minio.storage.example.local:9000` |
 | MicroK8s dqlite / PKI archives | `platform-dqlite` | `secret/platform/dqlite-s3` → `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`, `endpoint` | Ansible `minio_server` (role `backup` currently uses rsync) | – |
 | Harbor registry (optional S3 storage) | `harbor-registry` | `secret/platform/harbor-s3` → `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`, `endpoint` | commented block in `core/harbor/values.yaml` | – |
 
-Velero and CNPG still point at the placeholder host `minio.backup.example.local`, not at the convention
-`minio.storage.example.local`. Align them when you replace the placeholders. Buckets, users and Vault keys for all of these
+Buckets, users and Vault keys for all of these
 are created by Ansible `minio_server` (`minio_server_buckets`, `minio_server_consumers`).
 
 The in-cluster MinIO itself is protected by erasure coding and bucket versioning, which is not a backup. For buckets that

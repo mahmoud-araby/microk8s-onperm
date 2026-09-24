@@ -109,10 +109,13 @@ MetalLB address pools: `public-pool` (Kong, public ingress), `internal-pool` (Is
 
 - `longhorn` (default) — 3 replicas, for general stateful workloads.
 - `longhorn-db` — 1 replica, `dataLocality: strict-local`; for systems that replicate themselves (Postgres, Kafka, RabbitMQ, Redis, Elasticsearch).
+- `local-nvme-minio` — MinIO drives only: maps PVC `dataN-*` to `/mnt/local-nvme/dataN` (one NVMe per drive) on `storage` nodes.
 - `local-nvme` — local-path provisioner on `/mnt/local-nvme` (dedicated disk prepared by Ansible `storage_prep`), `WaitForFirstConsumer`;
   fastest option, node-bound: MinIO drives, scratch/generic ephemeral volumes, caches.
 - `nfs-rwx` — csi-driver-nfs against an on-prem NFS export (`nfs.storage.example.local:/exports/k8s`); ReadWriteMany shared files.
-- `minio-s3` — CSI S3 driver (FUSE, geesefs) mounting MinIO buckets as volumes (ReadWriteMany, eventual consistency, not for databases).
+- `minio-s3` — CSI S3 driver `ru.yandex.s3.csi` (FUSE, geesefs) mounting MinIO buckets as volumes (ReadWriteMany, eventual consistency,
+  not for databases). Dynamic volumes are prefixes in bucket `platform-pvc` (platform user, Vault `secret/platform/csi-s3`);
+  tenant buckets are mounted through static PVs (`charts/tenant` `data.objectStorage.volumes`) with `tenant-s3-credentials`.
 
 See [storage.md](storage.md) for the decision table (block vs file vs object vs ephemeral).
 
@@ -130,6 +133,8 @@ See [storage.md](storage.md) for the decision table (block vs file vs object vs 
   (keys `S3_ACCESS_KEY`, `S3_SECRET_KEY`) → Secret `tenant-s3-credentials` in the tenant namespace.
 - Env vars injected by `charts/microservice` when object storage is enabled: `S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_FORCE_PATH_STYLE`.
 - MinIO root credentials: Vault `secret/platform/minio` (in-cluster) and `secret/platform/minio-external` (VMs).
+- Images: MinIO is source-only upstream, so `harbor.ops.example.local/platform/{minio,mc}:<RELEASE tag>` are built from source by
+  `.github/workflows/tool-images.yml` (`images/minio`, `images/mc`).
 
 ## Load balancing (L7 with optional L4)
 
