@@ -1,0 +1,369 @@
+# Platform messaging topology (messaging-topology-operator, cluster reference "rabbitmq").
+# Tenant vhosts/users/policies are rendered by charts/tenant with the same patterns.
+#
+#   vhost "platform" (default queue type quorum)
+#   exchanges: orders.events (topic), integration (direct), platform.dlx (topic, dead letters)
+#   queues:    payments.order-created  <- orders.events "order.created"      DLQ payments.order-created.dlq
+#              integration.inbound     <- integration   "inbound"            DLQ integration.inbound.dlq
+#   policies:  platform-quorum-defaults (DLX + delivery-limit + max-length, all quorum queues)
+#              platform-dlq            (retention for *.dlq)
+#   operator policy: platform-guardrails (hard caps the vhost users cannot override)
+apiVersion: rabbitmq.com/v1beta1
+kind: Vhost
+metadata:
+  name: platform
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: platform
+  defaultQueueType: quorum
+  tags: [platform]
+  limits:
+    connections: 20000
+    queues: 5000
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+# --- policies -----------------------------------------------------------------------------------
+# One policy applies per queue (highest priority wins). Quorum queue replication factor is the
+# cluster size (3); "HA" in RabbitMQ 4.x == quorum queues (classic mirroring no longer exists).
+apiVersion: rabbitmq.com/v1beta1
+kind: Policy
+metadata:
+  name: platform-quorum-defaults
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: platform-quorum-defaults
+  vhost: platform
+  pattern: ".*"
+  applyTo: quorum_queues
+  priority: 0
+  definition:
+    dead-letter-exchange: platform.dlx
+    dead-letter-strategy: at-least-once # DLX without message loss (requires overflow reject-publish)
+    overflow: reject-publish # back-pressure publishers (confirms nack) instead of dropping
+    max-length: 2000000
+    delivery-limit: 20 # poison messages are dead-lettered after 20 redeliveries
+    target-group-size: 3
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Policy
+metadata:
+  name: platform-dlq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: platform-dlq
+  vhost: platform
+  pattern: "\\.dlq$"
+  applyTo: queues
+  priority: 10
+  definition:
+    max-length: 1000000
+    overflow: drop-head # keep the newest dead letters
+    message-ttl: 1209600000 # 14 days
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: OperatorPolicy
+metadata:
+  name: platform-guardrails
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: platform-guardrails
+  vhost: platform
+  pattern: ".*"
+  applyTo: queues
+  priority: 0
+  definition:
+    max-length-bytes: 10737418240 # 10 GiB per queue, whatever the user policy says
+    delivery-limit: 50
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+# --- exchanges ----------------------------------------------------------------------------------
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata:
+  name: platform-orders-events
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: orders.events
+  vhost: platform
+  type: topic
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata:
+  name: platform-integration
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: integration
+  vhost: platform
+  type: direct
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Exchange
+metadata:
+  name: platform-dlx
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: platform.dlx
+  vhost: platform
+  type: topic
+  durable: true
+  autoDelete: false
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+# --- queues -------------------------------------------------------------------------------------
+# x-dead-letter-routing-key = own name, so each queue's dead letters land in "<queue>.dlq".
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata:
+  name: payments-order-created
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: payments.order-created
+  vhost: platform
+  type: quorum
+  durable: true
+  autoDelete: false
+  deletionPolicy: retain # never delete messages when the CR is pruned
+  arguments:
+    x-dead-letter-routing-key: payments.order-created
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata:
+  name: payments-order-created-dlq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: payments.order-created.dlq
+  vhost: platform
+  type: quorum
+  durable: true
+  autoDelete: false
+  deletionPolicy: retain
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata:
+  name: integration-inbound
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: integration.inbound
+  vhost: platform
+  type: quorum
+  durable: true
+  autoDelete: false
+  deletionPolicy: retain
+  arguments:
+    x-dead-letter-routing-key: integration.inbound
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Queue
+metadata:
+  name: integration-inbound-dlq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  name: integration.inbound.dlq
+  vhost: platform
+  type: quorum
+  durable: true
+  autoDelete: false
+  deletionPolicy: retain
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+# --- bindings -----------------------------------------------------------------------------------
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: orders-events-to-payments-order-created
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  vhost: platform
+  source: orders.events
+  destination: payments.order-created
+  destinationType: queue
+  routingKey: order.created
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: dlx-to-payments-order-created-dlq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  vhost: platform
+  source: platform.dlx
+  destination: payments.order-created.dlq
+  destinationType: queue
+  routingKey: payments.order-created
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: integration-to-integration-inbound
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  vhost: platform
+  source: integration
+  destination: integration.inbound
+  destinationType: queue
+  routingKey: inbound
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Binding
+metadata:
+  name: dlx-to-integration-inbound-dlq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  vhost: platform
+  source: platform.dlx
+  destination: integration.inbound.dlq
+  destinationType: queue
+  routingKey: integration.inbound
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+# --- users & permissions (passwords from Vault via 00-externalsecrets.yaml) ---------------------
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: platform-app
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  tags: []
+  importCredentialsSecret:
+    name: rabbitmq-user-platform-app
+  limits:
+    connections: 5000
+    channels: 20000
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: platform-app-platform
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  vhost: platform
+  userReference:
+    name: platform-app
+  permissions:
+    configure: "^(orders|payments|notifications|audit)\\..*"
+    write: "^(orders|payments|notifications|audit|integration)(\\..*)?$"
+    read: "^(orders|payments|notifications|audit)\\..*"
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: User
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  tags: []
+  importCredentialsSecret:
+    name: rabbitmq-user-micro-integrator
+  limits:
+    connections: 200
+    channels: 2000
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Permission
+metadata:
+  name: micro-integrator-platform
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: topology
+    app.kubernetes.io/part-of: platform-data
+spec:
+  vhost: platform
+  userReference:
+    name: micro-integrator
+  permissions:
+    configure: "^$" # MI never declares topology (rabbitmq.queue.autodeclare=false)
+    write: "^(integration|orders\\.events)$"
+    read: "^integration\\.inbound$"
+  rabbitmqClusterReference:
+    name: rabbitmq

@@ -1,0 +1,58 @@
+# Platform databases (declarative CNPG Database CRs). Tenant databases are created the same way by
+# charts/tenant (data.postgres.databases -> Database "<tenant>_<db>" + owner role).
+# databaseReclaimPolicy: retain -> deleting the CR (or pruning it from Git) never drops data.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: pg-main-platform
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: platform-data
+spec:
+  cluster:
+    name: pg-main
+  name: platform # also created by initdb; the CR keeps ownership/extensions reconciled
+  owner: platform
+  ensure: present
+  databaseReclaimPolicy: retain
+  connectionLimit: -1
+  extensions:
+    - name: pg_stat_statements
+      ensure: present
+    - name: pgcrypto
+      ensure: present
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: pg-main-keycloak
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: platform-data
+spec:
+  cluster:
+    name: pg-main
+  name: keycloak
+  owner: keycloak
+  ensure: present
+  databaseReclaimPolicy: retain
+  encoding: UTF8
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: pg-main-harbor
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: platform-data
+spec:
+  cluster:
+    name: pg-main
+  name: harbor
+  owner: harbor
+  ensure: present
+  databaseReclaimPolicy: retain
+  encoding: UTF8

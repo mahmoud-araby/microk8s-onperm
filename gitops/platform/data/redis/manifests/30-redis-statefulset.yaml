@@ -1,0 +1,217 @@
+# Redis data nodes: 3 pods (1 master + 2 replicas, roles decided at start by redis-init.sh and
+# changed at runtime only by Sentinel). One pod per data host; AOF on longhorn-db (1 replica,
+# strict-local: Redis replication provides the redundancy).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-node
+  labels:
+    app.kubernetes.io/name: redis-node
+    app.kubernetes.io/instance: redis
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: platform-data
+    app.kubernetes.io/version: "7.4.11"
+spec:
+  replicas: 3
+  serviceName: redis-headless
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-node
+        app.kubernetes.io/instance: redis
+        app.kubernetes.io/component: server
+        app.kubernetes.io/part-of: platform-data
+        app.kubernetes.io/version: "7.4.11"
+      annotations:
+        sidecar.istio.io/inject: "false"
+        # Bump to roll the pods after a config or password change.
+        platform.example.com/config-revision: "1"
+    spec:
+      priorityClassName: data-critical
+      terminationGracePeriodSeconds: 60
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      nodeSelector:
+        workload-tier: data
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: redis-node
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis-node
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: config
+          image: redis:7.4.11-bookworm # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/config/redis-init.sh"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          securityContext: &containerSecurity
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: runtime
+              mountPath: /runtime
+      containers:
+        - name: redis
+          image: redis:7.4.11-bookworm # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          command: ["redis-server", "/runtime/redis.conf"]
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          env:
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          # Loading a 12 GB AOF can take minutes: startup probe allows up to 10 min.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "[ \"$(timeout 2 redis-cli -h 127.0.0.1 ping)\" = PONG ]"]
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "timeout 4 redis-cli -h 127.0.0.1 ping | grep -Eq 'PONG|LOADING|MASTERDOWN'"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["sh", "/config/redis-ready.sh"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # A planned stop of the master triggers a Sentinel failover first (no 5 s detection gap).
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - >-
+                    if timeout 2 redis-cli -h 127.0.0.1 info replication | grep -q '^role:master'; then
+                    timeout 5 redis-cli -h redis-sentinel.data-redis.svc.cluster.local -p 26379 SENTINEL failover mymaster || true;
+                    sleep 10; fi
+          resources:
+            requests:
+              cpu: "2"
+              memory: 16Gi
+            limits:
+              memory: 20Gi
+          securityContext: *containerSecurity
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: runtime
+              mountPath: /runtime
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.92.0 # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9121
+              protocol: TCP
+          env:
+            - name: REDIS_ADDR
+              value: redis://127.0.0.1:6379
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+            - name: REDIS_EXPORTER_INCL_SYSTEM_METRICS
+              value: "true"
+            - name: REDIS_EXPORTER_PING_ON_CONNECT
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext: *containerSecurity
+      volumes:
+        - name: config
+          configMap:
+            name: redis-config
+            defaultMode: 0555
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: redis-node
+          app.kubernetes.io/part-of: platform-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn-db
+        resources:
+          requests:
+            storage: 50Gi
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain

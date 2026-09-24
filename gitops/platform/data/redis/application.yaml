@@ -1,0 +1,49 @@
+# Redis 7.4 replication (1 master + 2 replicas) + Sentinel (3) + HAProxy master router.
+# Built from plain StatefulSets on the official `redis` image (no Bitnami, no operator).
+#   redis.data-redis.svc.cluster.local:6379           -> always the current master (via HAProxy role checks)
+#   redis-sentinel.data-redis.svc.cluster.local:26379 -> Sentinel, master set "mymaster"
+#   redis-replicas.data-redis.svc.cluster.local:6379  -> read-only replicas (optional read scaling)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: redis
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data-redis
+  sources:
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/data/redis/manifests
+      directory:
+        recurse: true
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: data
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

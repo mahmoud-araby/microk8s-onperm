@@ -1,0 +1,105 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mssql
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mssql
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mssql
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mssql
+  policyTypes: [Ingress]
+  ingress:
+    # AG replicas (mirroring endpoint 5022, seeding) + admin jobs in the namespace
+    - from:
+        - podSelector: {}
+    # .NET workloads
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.example.com/tenant
+                operator: Exists
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [shared-services, integration]
+      ports:
+        - protocol: TCP
+          port: 1433
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 4000
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mssql
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mssql
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mssql
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+spec:
+  groups:
+    - name: mssql.data-mssql
+      rules:
+        - alert: MSSQLDown
+          expr: mssql_up{namespace="data-mssql"} == 0
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "SQL Server {{ $labels.pod }} is down"
+        - alert: MSSQLNoPrimaryEndpoint
+          expr: absent(kube_endpoint_address{namespace="data-mssql", endpoint="mssql"})
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Service mssql has no endpoint - no pod labelled mssql.platform.example.com/role=primary"
+        - alert: MSSQLDeadlocks
+          expr: increase(mssql_deadlocks{namespace="data-mssql"}[5m]) > 5
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "SQL Server {{ $labels.pod }} reports deadlocks"

@@ -1,0 +1,14 @@
+# The cluster operator does not create a PDB. Quorum queues need a majority (2 of 3): never drain
+# more than one broker at a time (the operator's pre-stop hook also waits for quorum-critical queues).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rabbitmq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: platform-data
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq

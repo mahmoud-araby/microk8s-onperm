@@ -1,0 +1,59 @@
+# MI Prometheus API (/metric-service/metrics on 9201, enabled by -DenablePrometheusApi=true + the
+# MetricHandler synapse handler). Port 9201 bypasses the sidecar (excludeInboundPorts) so
+# Prometheus scrapes it in plain HTTP; NetworkPolicy limits it to the monitoring namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator
+  endpoints:
+    - port: http-metrics
+      path: /metric-service/metrics
+      interval: 30s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  groups:
+    - name: micro-integrator.integration
+      rules:
+        - alert: MicroIntegratorDown
+          expr: count(up{namespace="integration", service="micro-integrator"} == 1) < 2
+          for: 3m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Fewer than 2 Micro Integrator pods are up"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/gitops/platform/data/README.md#runbook-micro-integrator
+        - alert: MicroIntegratorApiErrorRateHigh
+          expr: |
+            sum by (service_name) (rate(wso2_integration_api_request_count_error_total{namespace="integration"}[5m]))
+              / sum by (service_name) (rate(wso2_integration_api_request_count_total{namespace="integration"}[5m])) > 0.05
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "MI API {{ $labels.service_name }} fails for >5% of requests (legacy ERP down / circuit open?)"
+        - alert: MicroIntegratorApiLatencyHigh
+          expr: |
+            histogram_quantile(0.95, sum by (le, service_name) (rate(wso2_integration_api_latency_seconds_bucket{namespace="integration"}[5m]))) > 5
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "MI API {{ $labels.service_name }} p95 latency > 5s"
+        - alert: MicroIntegratorInboundErrors
+          expr: sum by (service_name) (rate(wso2_integration_inbound_endpoint_request_count_error_total{namespace="integration"}[5m])) > 1
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Inbound endpoint {{ $labels.service_name }} is failing messages (check the DLQ)"

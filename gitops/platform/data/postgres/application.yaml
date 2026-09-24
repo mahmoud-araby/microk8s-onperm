@@ -1,0 +1,50 @@
+# PostgreSQL cluster pg-main (CloudNativePG) + PgBouncer poolers, databases, backups, monitoring.
+# Endpoints (docs/conventions.md):
+#   pg-main-pooler-rw.data-postgres.svc.cluster.local:5432  (PgBouncer, transaction pooling)  <- apps
+#   pg-main-rw / pg-main-ro .data-postgres.svc.cluster.local:5432  (direct primary / replicas)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data-postgres
+  sources:
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/data/postgres/manifests
+      directory:
+        recurse: true
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: data
+        # Data services stay out of the mesh; mesh clients reach them via auto-mTLS fallback (plain TCP,
+        # Postgres itself enforces TLS). NetworkPolicies restrict who may connect.
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true # CRs whose CRDs come from the operator app (wave -10)
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 10m

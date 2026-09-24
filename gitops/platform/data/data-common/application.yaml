@@ -1,0 +1,37 @@
+# Shared, cluster-scoped prerequisites of the data tier (PriorityClass `data-critical`).
+# Wave -10: must exist before any data pod (wave 0) is admitted.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: data-common
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  source:
+    repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+    targetRevision: main
+    path: gitops/platform/data/data-common/manifests
+    directory:
+      recurse: true
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

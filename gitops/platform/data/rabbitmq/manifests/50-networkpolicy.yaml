@@ -1,0 +1,97 @@
+# Ingress isolation for data-rabbitmq.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Inter-node traffic: epmd 4369, distribution 25672, CLI 35672-35682, AMQP/stream between nodes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-amqp-clients
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.example.com/tenant
+                operator: Exists
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [shared-services, integration, keycloak, harbor]
+      ports:
+        - protocol: TCP
+          port: 5672
+        - protocol: TCP
+          port: 5671
+---
+# Management API/UI: topology operator (HTTP API), internal gateway (rabbitmq.ops.example.local).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-management
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [rabbitmq-system, istio-internal]
+      ports:
+        - protocol: TCP
+          port: 15672
+        - protocol: TCP
+          port: 15671
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 15692

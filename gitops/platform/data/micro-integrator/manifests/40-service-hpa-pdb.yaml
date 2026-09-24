@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+    app: micro-integrator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: micro-integrator
+  ports:
+    - name: http # 8290 pass-through HTTP (APIs, proxies)
+      port: 8290
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+    - name: https # 8253 pass-through HTTPS (MI terminates TLS)
+      port: 8253
+      targetPort: https
+      protocol: TCP
+      appProtocol: https
+    - name: http-metrics # 9201 internal API: health + /metric-service/metrics (monitoring only)
+      port: 9201
+      targetPort: http-internal
+      protocol: TCP
+      appProtocol: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: micro-integrator
+  minReplicas: 3
+  maxReplicas: 10
+  # CPU only: the JVM heap is fixed (-Xms = -Xmx), memory utilisation is not a load signal.
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator

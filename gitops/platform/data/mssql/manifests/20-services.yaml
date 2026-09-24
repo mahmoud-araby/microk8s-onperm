@@ -1,0 +1,73 @@
+# mssql.data-mssql.svc.cluster.local:1433          -> AG primary (read-write)
+# mssql-readonly.data-mssql.svc.cluster.local:1433 -> readable secondaries (ApplicationIntent=ReadOnly)
+# mssql-N.mssql-headless.data-mssql.svc:1433/5022 -> individual instances / AG mirroring endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: mssql
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mssql
+    mssql.platform.example.com/role: primary
+  ports:
+    - name: tcp-tds
+      port: 1433
+      targetPort: tds
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mssql-readonly
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mssql
+    mssql.platform.example.com/role: secondary
+  ports:
+    - name: tcp-tds
+      port: 1433
+      targetPort: tds
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mssql-headless
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: mssql
+  ports:
+    - name: tcp-tds
+      port: 1433
+      targetPort: tds
+    - name: tcp-hadr
+      port: 5022
+      targetPort: hadr
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mssql-metrics
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: platform-data
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mssql
+  ports:
+    - name: metrics
+      port: 4000
+      targetPort: metrics

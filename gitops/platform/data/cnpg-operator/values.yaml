@@ -1,0 +1,55 @@
+# CloudNativePG operator (chart cloudnative-pg 0.29.1 / operator 1.30.1).
+# pin: verify latest before upgrade - read the CNPG release notes (in-place upgrade restarts the
+# instance manager in every Postgres pod unless ENABLE_INSTANCE_MANAGER_INPLACE_UPDATES=true).
+
+# Two replicas with leader election: a node drain on the platform pool never stops reconciliation.
+replicaCount: 2
+
+crds:
+  create: true
+
+config:
+  create: true
+  clusterWide: true
+  data:
+    # Upgrade the instance manager inside running pods instead of rolling every Postgres pod.
+    ENABLE_INSTANCE_MANAGER_INPLACE_UPDATES: "true"
+    # Secrets/ConfigMaps labelled/annotated like this are inherited into generated objects.
+    INHERITED_LABELS: "app.kubernetes.io/*, platform.example.com/*"
+    INHERITED_ANNOTATIONS: "platform.example.com/*"
+  maxConcurrentReconciles: 10
+
+webhook:
+  mutating:
+    failurePolicy: Fail
+  validating:
+    failurePolicy: Fail
+
+priorityClassName: "" # operators run on the platform pool with default priority
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+nodeSelector:
+  workload-tier: platform
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-pg
+
+monitoring:
+  # Prometheus picks up every PodMonitor (no release label needed).
+  podMonitorEnabled: true
+  grafanaDashboard:
+    # The CNPG dashboard is shipped by gitops/platform/observability (dashboards component).
+    create: false

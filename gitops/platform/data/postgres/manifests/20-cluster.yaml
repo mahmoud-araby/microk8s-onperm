@@ -1,0 +1,231 @@
+# PostgreSQL cluster pg-main: 1 primary + 2 hot standbys (quorum sync replication, ANY 1).
+#
+# Sizing assumptions (1M registered users, docs/capacity-planning.md):
+#   * peak ~15k API RPS, >=60% of reads served by Redis -> ~3-5k TPS reach Postgres through PgBouncer
+#   * working set ~50-100 GB, total data < 400 GB in year 1 (WAL ~5-10 GB/h at peak)
+#   * data nodes: 32 vCPU / 128 GiB / NVMe (Longhorn `longhorn-db`, 1 replica, strict-local);
+#     Postgres replicates itself, so each instance keeps one local copy on its own node.
+#   * each instance: 16 vCPU / 64 GiB, shared_buffers 25% of RAM, max_connections 500 (PgBouncer
+#     multiplexes ~10k client connections onto <= 3 x 140 server connections).
+#
+# Durability: minSyncReplicas=1 / maxSyncReplicas=1 -> `synchronous_standby_names = ANY 1 (...)`:
+# every commit is on at least 2 nodes (RPO 0 inside the site). If BOTH standbys are lost, writes
+# block until one returns (durability over availability). Failover (RTO ~10-30 s) is automatic.
+# (CNPG >= 1.24 alternative: .spec.postgresql.synchronous {method: any, number: 1,
+#  dataDurability: required} - mutually exclusive with min/maxSyncReplicas.)
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-main
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/instance: pg-main
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: platform-data
+    app.kubernetes.io/managed-by: cloudnative-pg
+spec:
+  description: Main multi-tenant OLTP cluster (platform, keycloak, harbor and tenant databases)
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11-standard-trixie # pin: verify latest before upgrade (minor updates are rolling; major = new cluster + import)
+  imagePullPolicy: IfNotPresent
+
+  # --- replication ---------------------------------------------------------------------------
+  minSyncReplicas: 1
+  maxSyncReplicas: 1
+  replicationSlots:
+    highAvailability:
+      enabled: true # physical slots on standbys -> no WAL gap after failover
+    synchronizeReplicas:
+      enabled: true # keep logical slots (Debezium CDC) in sync on standbys
+    updateInterval: 30
+  primaryUpdateStrategy: unsupervised
+  primaryUpdateMethod: switchover # rolling updates end with a controlled switchover, not a restart
+  failoverDelay: 0
+  switchoverDelay: 60 # seconds the old primary gets for a clean shutdown (smart -> fast)
+  enablePDB: true # operator-managed PDBs: primary protected, max 1 standby down at a time
+
+  # --- credentials (ExternalSecrets from Vault, see 00-externalsecrets.yaml) ------------------
+  enableSuperuserAccess: true # break-glass + tenant role-provisioning job (charts/tenant)
+  superuserSecret:
+    name: pg-main-superuser
+
+  bootstrap:
+    initdb:
+      database: platform
+      owner: platform
+      secret:
+        name: pg-main-app-platform
+      dataChecksums: true
+      encoding: UTF8
+      localeProvider: builtin
+      builtinLocale: C.UTF-8
+      walSegmentSize: 64 # MB; fewer, larger segments at high WAL rates
+      postInitTemplateSQL:
+        # Every database created later (tenants) inherits these extensions.
+        - CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+        - CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+  managed:
+    roles:
+      - name: platform
+        ensure: present
+        comment: Owner of the shared "platform" database
+        login: true
+        inherit: true
+        connectionLimit: 300
+        passwordSecret:
+          name: pg-main-app-platform
+      - name: keycloak
+        ensure: present
+        comment: Keycloak (namespace keycloak)
+        login: true
+        connectionLimit: 150
+        passwordSecret:
+          name: pg-main-role-keycloak
+      - name: harbor
+        ensure: present
+        comment: Harbor registry (namespace harbor)
+        login: true
+        connectionLimit: 150
+        passwordSecret:
+          name: pg-main-role-harbor
+      - name: platform_readonly
+        ensure: present
+        comment: Group role for read-only reporting access (grant to login roles)
+        login: false
+        inherit: true
+      # Optional CDC role for Debezium (kafka/examples/kafka-connect-debezium.yaml):
+      # - name: debezium
+      #   ensure: present
+      #   login: true
+      #   replication: true
+      #   inRoles: [platform_readonly]
+      #   passwordSecret: {name: pg-main-role-debezium}
+
+  # --- PostgreSQL configuration ----------------------------------------------------------------
+  postgresql:
+    parameters:
+      # connections / memory (64 GiB pod)
+      max_connections: "500"
+      superuser_reserved_connections: "5"
+      shared_buffers: 16GB
+      effective_cache_size: 44GB
+      work_mem: 32MB
+      maintenance_work_mem: 2GB
+      autovacuum_work_mem: 1GB
+      huge_pages: try
+      temp_buffers: 16MB
+      # WAL / checkpoints
+      wal_buffers: 64MB
+      wal_compression: lz4
+      min_wal_size: 4GB
+      max_wal_size: 32GB
+      max_slot_wal_keep_size: 64GB # a dead slot can never fill the WAL volume
+      wal_keep_size: 4GB
+      checkpoint_timeout: 15min
+      checkpoint_completion_target: "0.9"
+      # planner / IO (NVMe)
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      maintenance_io_concurrency: "200"
+      default_statistics_target: "200"
+      jit: "off" # OLTP: JIT compile time costs more than it saves
+      # parallelism (16 vCPU)
+      max_worker_processes: "32"
+      max_parallel_workers: "16"
+      max_parallel_workers_per_gather: "4"
+      max_parallel_maintenance_workers: "4"
+      # autovacuum for high-churn multi-tenant tables
+      autovacuum_max_workers: "6"
+      autovacuum_naptime: 15s
+      autovacuum_vacuum_cost_limit: "2000"
+      autovacuum_vacuum_scale_factor: "0.05"
+      autovacuum_analyze_scale_factor: "0.02"
+      autovacuum_vacuum_insert_scale_factor: "0.05"
+      # safety nets
+      idle_in_transaction_session_timeout: 60s
+      idle_session_timeout: "0"
+      tcp_keepalives_idle: "60"
+      tcp_keepalives_interval: "10"
+      tcp_keepalives_count: "6"
+      # observability
+      track_io_timing: "on"
+      track_wal_io_timing: "on"
+      log_min_duration_statement: 500ms
+      log_lock_waits: "on"
+      log_temp_files: 64MB
+      log_autovacuum_min_duration: 1s
+      log_checkpoints: "on"
+      pg_stat_statements.max: "10000"
+      pg_stat_statements.track: top
+      auto_explain.log_min_duration: 2s
+      auto_explain.log_analyze: "off"
+      timezone: UTC
+      password_encryption: scram-sha-256
+    # auto_explain / pg_stat_statements are added to shared_preload_libraries automatically by CNPG
+    # because their parameters are set above. Clients must use sslmode=require (poolers and the tenant
+    # role job do); CNPG's default pg_hba already enforces scram-sha-256.
+
+  # --- storage (separate WAL volume: sequential WAL IO never competes with data IO) ------------
+  storage:
+    storageClass: longhorn-db
+    size: 500Gi
+    resizeInUseVolumes: true
+  walStorage:
+    storageClass: longhorn-db
+    size: 150Gi
+    resizeInUseVolumes: true
+
+  # --- resources: memory request == limit (no OOM surprises), no CPU limit (no CFS throttling) ---
+  resources:
+    requests:
+      cpu: "8"
+      memory: 64Gi
+    limits:
+      memory: 64Gi
+
+  # --- scheduling: data pool only, one instance per host, spread across zones/racks ------------
+  priorityClassName: data-critical
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+    nodeSelector:
+      workload-tier: data
+    tolerations:
+      - key: workload-tier
+        operator: Equal
+        value: data
+        effect: NoSchedule
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          cnpg.io/cluster: pg-main
+          cnpg.io/podRole: instance
+
+  # --- backups: WAL archiving + base backups through the Barman Cloud plugin ------------------
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      enabled: true
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: pg-main-backup
+        serverName: pg-main
+
+  # --- monitoring: metrics exporter on :9187 (PodMonitor in 60-monitoring.yaml) ----------------
+  monitoring:
+    disableDefaultQueries: false
+    metricsQueriesTTL: 30s
+
+  inheritedMetadata:
+    labels:
+      app.kubernetes.io/name: pg-main
+      app.kubernetes.io/part-of: platform-data
+      platform.example.com/data-service: postgres
+    annotations:
+      sidecar.istio.io/inject: "false"
+
+  logLevel: info

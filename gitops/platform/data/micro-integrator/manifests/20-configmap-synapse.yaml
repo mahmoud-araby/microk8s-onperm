@@ -1,0 +1,294 @@
+# Sample integration (Synapse XML), mounted file-by-file into
+# <MI_HOME>/repository/deployment/server/synapse-configs/default/{api,endpoints,sequences,inbound-endpoints}.
+# Production flow: build a CApp (.car) from an MI project in CI and bake it into a Harbor image
+# (see ../image/Dockerfile); this ConfigMap keeps the reference integration reviewable in Git.
+#
+#   API  /legacy-erp   POST /orders (JSON -> SOAP CreateOrder), GET /orders/{orderId} (GetOrder)
+#   EP   LegacyErpEP   http://erp.legacy.example.local (Istio ServiceEntry) with timeout,
+#                      markForSuspension (retries before suspending) and suspendOnFailure (circuit breaker)
+#   IN   RabbitMQ  integration.inbound (vhost platform)  -> ErpCreateOrderSeq, nack+requeue on error
+#                  (quorum delivery-limit 20 -> dead-lettered to integration.inbound.dlq)
+#   IN   Kafka     platform.orders-events (group micro-integrator) -> ErpCreateOrderSeq
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: micro-integrator-synapse
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+data:
+  # ------------------------------------------------------------------------------------------------
+  LegacyErpEP.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <endpoint name="LegacyErpEP" xmlns="http://ws.apache.org/ns/synapse">
+      <address uri="http://erp.legacy.example.local/erp/services/OrderService" format="soap11">
+        <!-- hard deadline per call; the fault sequence maps it to HTTP 504 -->
+        <timeout>
+          <duration>10000</duration>
+          <responseAction>fault</responseAction>
+        </timeout>
+        <!-- transient errors (timeout, connection closed): tolerate 3 failures, 1 s apart,
+             before the endpoint is suspended -->
+        <markForSuspension>
+          <errorCodes>101504,101505</errorCodes>
+          <retriesBeforeSuspension>3</retriesBeforeSuspension>
+          <retryDelay>1000</retryDelay>
+        </markForSuspension>
+        <!-- circuit breaker: hard failures open the circuit for 2 s, doubling up to 60 s;
+             while open, calls fail fast with 303001 (-> HTTP 503 + Retry-After) -->
+        <suspendOnFailure>
+          <errorCodes>101500,101501,101503,101506,101507,101508</errorCodes>
+          <initialDuration>2000</initialDuration>
+          <progressionFactor>2.0</progressionFactor>
+          <maximumDuration>60000</maximumDuration>
+        </suspendOnFailure>
+      </address>
+    </endpoint>
+
+  # ------------------------------------------------------------------------------------------------
+  ErpCreateOrderSeq.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!-- Shared by the REST API and both inbound endpoints: JSON order -> SOAP CreateOrder -> JSON -->
+    <sequence name="ErpCreateOrderSeq" xmlns="http://ws.apache.org/ns/synapse">
+      <property name="tenantId" expression="json-eval($.tenantId)" scope="default" type="STRING"/>
+      <filter xpath="boolean($trp:X-Tenant-ID)">
+        <then>
+          <property name="tenantId" expression="$trp:X-Tenant-ID" scope="default" type="STRING"/>
+        </then>
+      </filter>
+      <payloadFactory media-type="xml">
+        <format>
+          <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                            xmlns:erp="http://erp.legacy.example.local/orders">
+            <soapenv:Header>
+              <erp:ApiKey>$1</erp:ApiKey>
+            </soapenv:Header>
+            <soapenv:Body>
+              <erp:CreateOrder>
+                <erp:OrderId>$2</erp:OrderId>
+                <erp:CustomerId>$3</erp:CustomerId>
+                <erp:Amount>$4</erp:Amount>
+                <erp:Currency>$5</erp:Currency>
+                <erp:TenantId>$6</erp:TenantId>
+              </erp:CreateOrder>
+            </soapenv:Body>
+          </soapenv:Envelope>
+        </format>
+        <args>
+          <arg evaluator="xml" expression="get-property('env', 'ERP_API_KEY')"/>
+          <arg evaluator="json" expression="$.orderId"/>
+          <arg evaluator="json" expression="$.customerId"/>
+          <arg evaluator="json" expression="$.amount"/>
+          <arg evaluator="json" expression="$.currency"/>
+          <arg evaluator="xml" expression="$ctx:tenantId"/>
+        </args>
+      </payloadFactory>
+      <property name="messageType" value="text/xml" scope="axis2"/>
+      <property name="ContentType" value="text/xml" scope="axis2"/>
+      <header name="Action" scope="default" value="urn:CreateOrder"/>
+      <call>
+        <endpoint key="LegacyErpEP"/>
+      </call>
+      <payloadFactory media-type="json">
+        <format>{"orderId":"$1","erpReference":"$2","status":"$3"}</format>
+        <args>
+          <arg evaluator="xml" expression="//erp:CreateOrderResponse/erp:OrderId" xmlns:erp="http://erp.legacy.example.local/orders"/>
+          <arg evaluator="xml" expression="//erp:CreateOrderResponse/erp:ErpReference" xmlns:erp="http://erp.legacy.example.local/orders"/>
+          <arg evaluator="xml" expression="//erp:CreateOrderResponse/erp:Status" xmlns:erp="http://erp.legacy.example.local/orders"/>
+        </args>
+      </payloadFactory>
+      <property name="messageType" value="application/json" scope="axis2"/>
+    </sequence>
+
+  # ------------------------------------------------------------------------------------------------
+  LegacyErpAPI.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <api name="LegacyErpAPI" context="/legacy-erp" xmlns="http://ws.apache.org/ns/synapse">
+      <resource methods="POST" uri-template="/orders">
+        <inSequence>
+          <log category="INFO" level="custom">
+            <property name="event" value="legacy-erp.create-order"/>
+            <property name="correlationId" expression="$trp:X-Correlation-ID"/>
+            <property name="tenantId" expression="$trp:X-Tenant-ID"/>
+          </log>
+          <sequence key="ErpCreateOrderSeq"/>
+          <property name="HTTP_SC" value="201" scope="axis2"/>
+          <respond/>
+        </inSequence>
+        <faultSequence>
+          <sequence key="LegacyErpFaultSeq"/>
+        </faultSequence>
+      </resource>
+      <resource methods="GET" uri-template="/orders/{orderId}">
+        <inSequence>
+          <payloadFactory media-type="xml">
+            <format>
+              <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                                xmlns:erp="http://erp.legacy.example.local/orders">
+                <soapenv:Header>
+                  <erp:ApiKey>$1</erp:ApiKey>
+                </soapenv:Header>
+                <soapenv:Body>
+                  <erp:GetOrder>
+                    <erp:OrderId>$2</erp:OrderId>
+                  </erp:GetOrder>
+                </soapenv:Body>
+              </soapenv:Envelope>
+            </format>
+            <args>
+              <arg evaluator="xml" expression="get-property('env', 'ERP_API_KEY')"/>
+              <arg evaluator="xml" expression="get-property('uri.var.orderId')"/>
+            </args>
+          </payloadFactory>
+          <property name="messageType" value="text/xml" scope="axis2"/>
+          <property name="ContentType" value="text/xml" scope="axis2"/>
+          <header name="Action" scope="default" value="urn:GetOrder"/>
+          <call>
+            <endpoint key="LegacyErpEP"/>
+          </call>
+          <property name="messageType" value="application/json" scope="axis2"/>
+          <respond/>
+        </inSequence>
+        <faultSequence>
+          <sequence key="LegacyErpFaultSeq"/>
+        </faultSequence>
+      </resource>
+    </api>
+
+  # ------------------------------------------------------------------------------------------------
+  LegacyErpFaultSeq.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!-- Maps mediation/transport errors to HTTP status codes with a JSON problem body. -->
+    <sequence name="LegacyErpFaultSeq" xmlns="http://ws.apache.org/ns/synapse">
+      <log category="ERROR" level="custom">
+        <property name="event" value="legacy-erp.fault"/>
+        <property name="errorCode" expression="$ctx:ERROR_CODE"/>
+        <property name="errorMessage" expression="$ctx:ERROR_MESSAGE"/>
+        <property name="correlationId" expression="$trp:X-Correlation-ID"/>
+      </log>
+      <switch source="$ctx:ERROR_CODE">
+        <!-- circuit open (endpoint suspended) -->
+        <case regex="303001|303002">
+          <property name="HTTP_SC" value="503" scope="axis2"/>
+          <header name="Retry-After" scope="transport" value="30"/>
+        </case>
+        <!-- timeout -->
+        <case regex="101504|101508">
+          <property name="HTTP_SC" value="504" scope="axis2"/>
+        </case>
+        <default>
+          <property name="HTTP_SC" value="502" scope="axis2"/>
+        </default>
+      </switch>
+      <payloadFactory media-type="json">
+        <format>{"error":{"code":"$1","message":"$2","source":"legacy-erp"}}</format>
+        <args>
+          <arg evaluator="xml" expression="$ctx:ERROR_CODE"/>
+          <arg evaluator="xml" expression="$ctx:ERROR_MESSAGE"/>
+        </args>
+      </payloadFactory>
+      <property name="messageType" value="application/json" scope="axis2"/>
+      <property name="NO_ENTITY_BODY" scope="axis2" action="remove"/>
+      <respond/>
+    </sequence>
+
+  # ------------------------------------------------------------------------------------------------
+  IntegrationInboundSeq.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <sequence name="IntegrationInboundSeq" onError="InboundFaultSeq" xmlns="http://ws.apache.org/ns/synapse">
+      <log category="INFO" level="custom">
+        <property name="event" value="integration.inbound.received"/>
+        <property name="messageId" expression="get-property('MessageID')"/>
+      </log>
+      <sequence key="ErpCreateOrderSeq"/>
+      <drop/>
+    </sequence>
+
+  KafkaOrdersSeq.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <sequence name="KafkaOrdersSeq" onError="InboundFaultSeq" xmlns="http://ws.apache.org/ns/synapse">
+      <log category="INFO" level="custom">
+        <property name="event" value="orders-events.received"/>
+        <property name="partition" expression="$ctx:partitionNo"/>
+        <property name="offset" expression="$ctx:offset"/>
+      </log>
+      <filter source="json-eval($.type)" regex="order\.created">
+        <then>
+          <sequence key="ErpCreateOrderSeq"/>
+        </then>
+      </filter>
+      <drop/>
+    </sequence>
+
+  # Rollback -> RabbitMQ: nack + requeue (delivery-limit -> DLQ); Kafka: offset not committed,
+  # record re-polled (failure.retry.count) before it is skipped and logged.
+  InboundFaultSeq.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <sequence name="InboundFaultSeq" xmlns="http://ws.apache.org/ns/synapse">
+      <log category="ERROR" level="custom">
+        <property name="event" value="inbound.fault"/>
+        <property name="errorCode" expression="$ctx:ERROR_CODE"/>
+        <property name="errorMessage" expression="$ctx:ERROR_MESSAGE"/>
+      </log>
+      <property name="SET_ROLLBACK_ONLY" value="true" scope="default"/>
+      <drop/>
+    </sequence>
+
+  # ------------------------------------------------------------------------------------------------
+  RabbitMQIntegrationInbound.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <inboundEndpoint name="RabbitMQIntegrationInbound" protocol="rabbitmq" suspend="false"
+                     sequence="IntegrationInboundSeq" onError="InboundFaultSeq"
+                     xmlns="http://ws.apache.org/ns/synapse">
+      <parameters>
+        <!-- every MI pod is a competing consumer; ordering per queue is not required -->
+        <parameter name="sequential">true</parameter>
+        <parameter name="coordination">false</parameter>
+        <parameter name="rabbitmq.connection.factory">AMQPConnectionFactory</parameter>
+        <parameter name="rabbitmq.server.host.name">rabbitmq.data-rabbitmq.svc.cluster.local</parameter>
+        <parameter name="rabbitmq.server.port">5672</parameter>
+        <parameter name="rabbitmq.server.virtual.host">platform</parameter>
+        <parameter name="rabbitmq.server.user.name">micro-integrator</parameter>
+        <parameter name="rabbitmq.server.password">$SYSTEM:RABBITMQ_PASSWORD</parameter>
+        <parameter name="rabbitmq.queue.name">integration.inbound</parameter>
+        <parameter name="rabbitmq.queue.autodeclare">false</parameter>
+        <parameter name="rabbitmq.exchange.autodeclare">false</parameter>
+        <parameter name="rabbitmq.queue.auto.ack">false</parameter>
+        <parameter name="rabbitmq.channel.consumer.qos">50</parameter>
+        <parameter name="rabbitmq.message.content.type">application/json</parameter>
+        <parameter name="rabbitmq.message.requeue.on.rollback">true</parameter>
+        <parameter name="rabbitmq.connection.retry.interval">5000</parameter>
+        <parameter name="rabbitmq.connection.retry.count">-1</parameter>
+      </parameters>
+    </inboundEndpoint>
+
+  # Requires the Kafka inbound connector JAR (not bundled with MI 4.4.0) - see ../image/Dockerfile.
+  # Uses the SASL_PLAINTEXT listener 9092 with SCRAM-SHA-512 (KafkaUser micro-integrator).
+  KafkaOrdersInbound.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <inboundEndpoint name="KafkaOrdersInbound" class="org.wso2.carbon.inbound.kafka.KafkaMessageConsumer"
+                     suspend="false" sequence="KafkaOrdersSeq" onError="InboundFaultSeq"
+                     xmlns="http://ws.apache.org/ns/synapse">
+      <parameters>
+        <parameter name="interval">100</parameter>
+        <parameter name="sequential">true</parameter>
+        <!-- partition assignment is done by the Kafka consumer group, not by MI coordination -->
+        <parameter name="coordination">false</parameter>
+        <parameter name="inbound.behavior">polling</parameter>
+        <parameter name="bootstrap.servers">kafka-kafka-bootstrap.data-kafka.svc.cluster.local:9092</parameter>
+        <parameter name="topic.name">platform.orders-events</parameter>
+        <parameter name="group.id">micro-integrator</parameter>
+        <parameter name="contentType">application/json</parameter>
+        <parameter name="key.deserializer">org.apache.kafka.common.serialization.StringDeserializer</parameter>
+        <parameter name="value.deserializer">org.apache.kafka.common.serialization.StringDeserializer</parameter>
+        <parameter name="poll.timeout">1000</parameter>
+        <parameter name="max.poll.records">100</parameter>
+        <parameter name="enable.auto.commit">false</parameter>
+        <parameter name="auto.offset.reset">earliest</parameter>
+        <parameter name="failure.retry.count">3</parameter>
+        <parameter name="failure.retry.interval">5000</parameter>
+        <parameter name="security.protocol">SASL_PLAINTEXT</parameter>
+        <parameter name="sasl.mechanism">SCRAM-SHA-512</parameter>
+        <parameter name="sasl.jaas.config">$SYSTEM:KAFKA_SASL_JAAS_CONFIG</parameter>
+      </parameters>
+    </inboundEndpoint>

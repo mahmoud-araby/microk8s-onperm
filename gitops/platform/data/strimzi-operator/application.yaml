@@ -1,0 +1,52 @@
+# Strimzi cluster operator (Kafka 4.x, KRaft only) - namespace data-kafka, watches data-kafka only
+# (Kafka, KafkaNodePool, KafkaTopic/KafkaUser incl. the tenant ones rendered by charts/tenant).
+# Strimzi >= 1.0 serves only the kafka.strimzi.io/v1 API.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: strimzi-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data-kafka
+  sources:
+    - repoURL: https://strimzi.io/charts/
+      chart: strimzi-kafka-operator
+      targetRevision: 1.2.0 # pin: verify latest before upgrade (supports Kafka 4.2.x / 4.3.x)
+      helm:
+        releaseName: strimzi
+        valueFiles:
+          - $values/gitops/platform/data/strimzi-operator/values.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: data
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true # Strimzi CRDs are too large for client-side apply
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

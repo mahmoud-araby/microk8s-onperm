@@ -1,0 +1,61 @@
+# Ingress isolation for the integration namespace (egress stays open: data services, ERP, OTel).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-micro-integrator-clients
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.example.com/tenant
+                operator: Exists
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [shared-services, istio-internal, kong]
+      ports:
+        - protocol: TCP
+          port: 8290
+        - protocol: TCP
+          port: 8253
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9201
+        - protocol: TCP
+          port: 15020 # istio-proxy merged metrics / health

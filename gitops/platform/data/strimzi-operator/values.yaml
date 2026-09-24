@@ -1,0 +1,45 @@
+# Strimzi cluster operator (chart strimzi-kafka-operator 1.2.0). pin: verify latest before upgrade
+# Upgrade path: operator first (this app), then bump spec.kafka.version in kafka/manifests.
+
+replicas: 2 # leader election: a standby takes over within seconds
+leaderElection:
+  enable: true
+
+# Watch only the operator namespace (data-kafka): all Kafka CRs, incl. tenant topics/users, live here.
+watchNamespaces: []
+watchAnyNamespace: false
+
+fullReconciliationIntervalMs: 120000
+operationTimeoutMs: 300000
+logLevel: INFO
+
+# Strimzi-generated NetworkPolicies restrict each listener to its networkPolicyPeers.
+generateNetworkPolicy: true
+createGlobalResources: true
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+nodeSelector:
+  workload-tier: platform
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              name: strimzi-cluster-operator
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+dashboards:
+  enabled: false # Strimzi dashboards are provisioned by gitops/platform/observability

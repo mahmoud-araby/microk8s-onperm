@@ -1,0 +1,92 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [redis-node, redis-sentinel, redis-haproxy]
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 20s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          targetLabel: redis_component
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: platform-data
+spec:
+  groups:
+    - name: redis.data-redis
+      rules:
+        - alert: RedisDown
+          expr: redis_up{namespace="data-redis", redis_component="redis-node"} == 0
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Redis node {{ $labels.pod }} is down"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/gitops/platform/data/README.md#runbook-redis-failover
+        - alert: RedisNoMaster
+          expr: count(redis_instance_info{namespace="data-redis", redis_component="redis-node", role="master"}) != 1
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Redis has {{ $value }} masters (expected exactly 1) - split brain or failover in progress"
+        - alert: RedisMissingReplicas
+          expr: max(redis_connected_slaves{namespace="data-redis", redis_component="redis-node"}) < 2
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Redis master has fewer than 2 connected replicas"
+        - alert: RedisReplicationBroken
+          expr: redis_master_link_up{namespace="data-redis", redis_component="redis-node"} == 0
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Replica {{ $labels.pod }} lost its link to the master"
+        - alert: RedisMemoryHigh
+          expr: redis_memory_used_bytes{namespace="data-redis"} / redis_memory_max_bytes{namespace="data-redis"} > 0.95 and redis_memory_max_bytes{namespace="data-redis"} > 0
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Redis {{ $labels.pod }} at >95% of maxmemory (evicting) - consider Redis Cluster (README)"
+        - alert: RedisHighEvictionRate
+          expr: rate(redis_evicted_keys_total{namespace="data-redis"}[5m]) > 2000
+          for: 15m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Redis evicts {{ $value | humanize }} keys/s - cache too small for the working set"
+        - alert: RedisRejectedConnections
+          expr: increase(redis_rejected_connections_total{namespace="data-redis"}[5m]) > 0
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Redis {{ $labels.pod }} rejected connections (maxclients reached)"
+        - alert: RedisAOFWriteFailing
+          expr: redis_aof_last_write_status{namespace="data-redis"} == 0 or redis_aof_last_bgrewrite_status{namespace="data-redis"} == 0
+          for: 5m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Redis {{ $labels.pod }} cannot write/rewrite its AOF (disk full?)"
+        - alert: RedisSentinelQuorumAtRisk
+          expr: max(redis_sentinel_master_ok_sentinels{namespace="data-redis", master_name="mymaster"}) < 3
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Only {{ $value }} of 3 Sentinels see master mymaster as OK"
+        - alert: RedisMasterRouterNoBackend
+          expr: max(haproxy_backend_active_servers{namespace="data-redis", proxy="redis_master"}) != 1
+          for: 30s
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "HAProxy sees {{ $value }} Redis masters (expected 1); Service redis is degraded"

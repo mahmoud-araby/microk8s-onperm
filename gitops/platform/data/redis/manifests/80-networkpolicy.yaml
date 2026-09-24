@@ -1,0 +1,78 @@
+# Ingress isolation for data-redis. Clients: tenant namespaces (label platform.example.com/tenant),
+# shared-services, integration, keycloak, harbor, kong (rate-limiting plugin, policy: redis).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-clients
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  # HAProxy (Service redis / redis-replicas), Sentinel, and the nodes themselves (Sentinel-aware
+  # clients connect to the announced redis-node-N hostnames directly).
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [redis-haproxy, redis-sentinel, redis-node]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.example.com/tenant
+                operator: Exists
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [shared-services, integration, keycloak, harbor, kong]
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 6380
+        - protocol: TCP
+          port: 26379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9121
+        - protocol: TCP
+          port: 8404

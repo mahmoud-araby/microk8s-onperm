@@ -1,0 +1,189 @@
+# Istio config for Micro Integrator: internal exposure, in-mesh resilience, hybrid legacy ERP.
+# --- exposure on the internal gateway (private VIP): https://integration.internal.example.local ---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: micro-integrator-internal
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  hosts:
+    - integration.internal.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: micro-integrator.integration.svc.cluster.local
+            port:
+              number: 8290
+      timeout: 60s
+      retries:
+        attempts: 2
+        perTryTimeout: 30s
+        retryOn: connect-failure,refused-stream,unavailable # never retries a request that reached MI
+---
+# --- in-mesh callers (tenant services -> micro-integrator:8290) ---------------------------------
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  hosts:
+    - micro-integrator.integration.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: micro-integrator.integration.svc.cluster.local
+            port:
+              number: 8290
+      timeout: 30s
+      retries:
+        attempts: 2
+        perTryTimeout: 15s
+        retryOn: connect-failure,refused-stream,unavailable
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  host: micro-integrator.integration.svc.cluster.local
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_REQUEST
+    connectionPool:
+      tcp:
+        maxConnections: 4000
+        connectTimeout: 2s
+      http:
+        http1MaxPendingRequests: 2000
+        http2MaxRequests: 4000
+        maxRetries: 10
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["tenant-*", "shared-services", "istio-internal", "kong", "integration"]
+      to:
+        - operation:
+            ports: ["8290", "8253"]
+---
+# --- hybrid legacy ERP (on-prem, outside the cluster) --------------------------------------------
+# Registered in the mesh so the sidecar applies timeouts, connection limits and outlier detection.
+# (To force the traffic through the istio-egress gateway, add a Gateway in istio-egress and a
+#  VirtualService with the mesh + egress gateway hops - see gitops/platform/core/istio.)
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: legacy-erp
+  labels:
+    app.kubernetes.io/name: legacy-erp
+    app.kubernetes.io/part-of: platform-data
+spec:
+  hosts:
+    - erp.legacy.example.local
+  exportTo:
+    - "."
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 80
+      name: http
+      protocol: HTTP
+    - number: 443
+      name: tls
+      protocol: TLS
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: legacy-erp
+  labels:
+    app.kubernetes.io/name: legacy-erp
+    app.kubernetes.io/part-of: platform-data
+spec:
+  host: erp.legacy.example.local
+  exportTo:
+    - "."
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 200 # protect the legacy system (bulkhead)
+        connectTimeout: 3s
+      http:
+        http1MaxPendingRequests: 500
+        maxRequestsPerConnection: 100
+        idleTimeout: 60s
+    outlierDetection:
+      consecutive5xxErrors: 5
+      consecutiveGatewayErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 100
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: legacy-erp
+  labels:
+    app.kubernetes.io/name: legacy-erp
+    app.kubernetes.io/part-of: platform-data
+spec:
+  hosts:
+    - erp.legacy.example.local
+  exportTo:
+    - "."
+  http:
+    - route:
+        - destination:
+            host: erp.legacy.example.local
+            port:
+              number: 80
+      timeout: 15s # > MI endpoint timeout (10 s): MI decides, the mesh is the backstop
+      retries:
+        attempts: 2
+        perTryTimeout: 5s
+        retryOn: connect-failure,refused-stream # only when the request never reached the ERP

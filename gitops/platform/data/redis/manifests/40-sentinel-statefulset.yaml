@@ -1,0 +1,170 @@
+# Redis Sentinel: 3 pods, quorum 2, master set "mymaster". Sentinel state lives in an emptyDir; on
+# restart a sentinel re-learns the topology from its peers (sentinel-init.sh).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sentinel
+  labels:
+    app.kubernetes.io/name: redis-sentinel
+    app.kubernetes.io/instance: redis
+    app.kubernetes.io/component: sentinel
+    app.kubernetes.io/part-of: platform-data
+    app.kubernetes.io/version: "7.4.11"
+spec:
+  replicas: 3
+  serviceName: redis-sentinel-headless
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-sentinel
+        app.kubernetes.io/instance: redis
+        app.kubernetes.io/component: sentinel
+        app.kubernetes.io/part-of: platform-data
+        app.kubernetes.io/version: "7.4.11"
+      annotations:
+        sidecar.istio.io/inject: "false"
+        platform.example.com/config-revision: "1"
+    spec:
+      priorityClassName: data-critical
+      terminationGracePeriodSeconds: 30
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      nodeSelector:
+        workload-tier: data
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: redis-sentinel
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis-sentinel
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: config
+          image: redis:7.4.11-bookworm # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/config/sentinel-init.sh"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          securityContext: &containerSecurity
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /data
+      containers:
+        - name: sentinel
+          image: redis:7.4.11-bookworm # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          command: ["redis-server", "/data/sentinel.conf", "--sentinel"]
+          ports:
+            - name: sentinel
+              containerPort: 26379
+              protocol: TCP
+          env:
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "[ \"$(timeout 2 redis-cli -h 127.0.0.1 -p 26379 ping)\" = PONG ]"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              # ready once this sentinel knows a master for mymaster
+              command: ["sh", "-c", "timeout 2 redis-cli -h 127.0.0.1 -p 26379 SENTINEL get-master-addr-by-name mymaster | head -n1 | grep -q ."]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext: *containerSecurity
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+        - name: sentinel-exporter
+          image: oliver006/redis_exporter:v1.92.0 # pin: verify latest before upgrade
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9121
+              protocol: TCP
+          env:
+            - name: REDIS_ADDR
+              value: redis://127.0.0.1:26379
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext: *containerSecurity
+      volumes:
+        - name: config
+          configMap:
+            name: redis-config
+            defaultMode: 0555
+        - name: data
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

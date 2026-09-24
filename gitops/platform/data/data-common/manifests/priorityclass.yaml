@@ -1,0 +1,18 @@
+# PriorityClass for every stateful data-tier pod (Postgres, PgBouncer, Redis, Sentinel, RabbitMQ,
+# Kafka, Micro Integrator). Above all application classes (apps-high / apps-default / batch-low) and
+# below platform-critical and the system-* classes. Tenants are denied this class by a scoped
+# ResourceQuota rendered by charts/tenant (quota.deniedPriorityClasses).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: data-critical
+  labels:
+    app.kubernetes.io/name: data-critical
+    app.kubernetes.io/part-of: platform-data
+    app.kubernetes.io/managed-by: argocd
+value: 900000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Stateful data services (databases, caches, brokers, integration). Preempts application pods;
+  never preempted by them.

@@ -1,0 +1,392 @@
+# Kafka cluster "kafka" - KRaft mode, Strimzi kafka.strimzi.io/v1 API (Strimzi >= 1.0).
+#
+# Sizing (1M users, docs/capacity-planning.md): ~20k msgs/s average / 50k msgs/s peak, 1 KB avg,
+# RF 3 -> ~150 MB/s cluster-wide replicated write at peak, lz4 compression ~2-3x.
+#   5 brokers  x 6-8 vCPU / 32 GiB (8 GiB heap, the rest is page cache) / 1.5 TiB NVMe (longhorn-db)
+#   3 controllers x 1-2 vCPU / 4 GiB / 50 GiB
+# Default retention 72 h (hot topics); long-retention/audit topics override per topic.
+# Durability: RF 3, min.insync.replicas 2, acks=all (producers) -> survives one broker loss with no
+# data loss and no write outage; rack awareness spreads replicas across zones/racks.
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: platform-data
+spec:
+  kafka:
+    version: 4.3.1 # pin: verify latest before upgrade (Strimzi 1.2.0 supports 4.2.x-4.3.x)
+    listeners:
+      # All client listeners authenticate with SCRAM-SHA-512 so that KafkaUser ACLs (platform users
+      # and the tenant users rendered by charts/tenant, prefix "<tenant>.") are enforced everywhere.
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+        networkPolicyPeers: &clientPeers
+          - namespaceSelector:
+              matchExpressions:
+                - key: platform.example.com/tenant
+                  operator: Exists
+          - namespaceSelector:
+              matchExpressions:
+                - key: kubernetes.io/metadata.name
+                  operator: In
+                  values: [shared-services, integration, data-kafka]
+          - podSelector: {} # bridge, connect, mirror maker in data-kafka
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: scram-sha-512
+        networkPolicyPeers: *clientPeers
+      # "Kafka-compatible endpoint" for hybrid / on-prem consumers outside the cluster: one
+      # LoadBalancer per broker + a bootstrap LB, all on the MetalLB internal-pool (private VIPs).
+      - name: external
+        port: 9094
+        type: loadbalancer
+        tls: true
+        authentication:
+          type: scram-sha-512
+        configuration:
+          externalTrafficPolicy: Local # keep client source IPs (ACL host checks, auditing)
+          loadBalancerSourceRanges: # PLACEHOLDER: on-prem / hybrid / partner-VPN CIDRs
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+          bootstrap:
+            alternativeNames:
+              - kafka.internal.example.local
+            annotations:
+              metallb.universe.tf/address-pool: internal-pool
+              metallb.io/address-pool: internal-pool
+          perBrokerAnnotationsTemplate:
+            metallb.universe.tf/address-pool: internal-pool
+            metallb.io/address-pool: internal-pool
+    authorization:
+      type: simple
+      superUsers:
+        - User:kafka-admin # break-glass SCRAM user (KafkaUser kafka-admin)
+    rack:
+      type: topology-label
+      topologyKey: topology.kubernetes.io/zone # data nodes MUST carry this label (Ansible sets it per rack)
+    config:
+      # durability
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      unclean.leader.election.enable: false
+      # topic governance: topics only via KafkaTopic CRs (platform or tenant chart)
+      auto.create.topics.enable: false
+      delete.topic.enable: true
+      num.partitions: 12
+      # retention / segments
+      log.retention.hours: 72
+      log.segment.bytes: 1073741824
+      log.retention.check.interval.ms: 300000
+      compression.type: producer
+      message.max.bytes: 2097152
+      replica.fetch.max.bytes: 2097152
+      # throughput
+      num.network.threads: 8
+      num.io.threads: 16
+      num.replica.fetchers: 4
+      num.recovery.threads.per.data.dir: 4
+      socket.send.buffer.bytes: 1048576
+      socket.receive.buffer.bytes: 1048576
+      socket.request.max.bytes: 104857600
+      queued.max.requests: 1000
+      # consumers read from the closest in-sync replica (same zone/rack)
+      replica.selector.class: org.apache.kafka.common.replica.RackAwareReplicaSelector
+      group.initial.rebalance.delay.ms: 3000
+      # per-connection protection (noisy tenants)
+      max.connections.per.ip: 2000
+    metricsConfig:
+      type: jmxPrometheusExporter
+      valueFrom:
+        configMapKeyRef:
+          name: kafka-metrics
+          key: kafka-metrics-config.yml
+    template:
+      podDisruptionBudget:
+        maxUnavailable: 1
+      pod:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+
+  entityOperator:
+    topicOperator:
+      reconciliationIntervalMs: 60000
+      resources:
+        requests: {cpu: 200m, memory: 512Mi}
+        limits: {memory: 1Gi}
+    userOperator:
+      reconciliationIntervalMs: 60000
+      resources:
+        requests: {cpu: 200m, memory: 512Mi}
+        limits: {memory: 1Gi}
+    template:
+      pod:
+        priorityClassName: data-critical
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        tolerations:
+          - key: workload-tier
+            operator: Equal
+            value: data
+            effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: workload-tier
+                      operator: In
+                      values: [data]
+
+  cruiseControl:
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {memory: 2Gi}
+    brokerCapacity:
+      cpu: "6"
+      inboundNetwork: 500000KiB/s
+      outboundNetwork: 500000KiB/s
+    config:
+      # keep rebalances gentle on production traffic
+      num.concurrent.partition.movements.per.broker: 5
+      default.replication.throttle: 52428800 # 50 MiB/s
+    # Automatic partition rebalance when brokers are added to / removed from the brokers pool.
+    autoRebalance:
+      - mode: add-brokers
+        template:
+          name: kafka-auto-rebalance
+      - mode: remove-brokers
+        template:
+          name: kafka-auto-rebalance
+    metricsConfig:
+      type: jmxPrometheusExporter
+      valueFrom:
+        configMapKeyRef:
+          name: kafka-metrics
+          key: cruise-control-metrics-config.yml
+    template:
+      pod:
+        priorityClassName: data-critical
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        tolerations:
+          - key: workload-tier
+            operator: Equal
+            value: data
+            effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: workload-tier
+                      operator: In
+                      values: [data]
+
+  # Consumer-group lag / topic offsets for alerts and KEDA (kafka_consumergroup_lag).
+  kafkaExporter:
+    topicRegex: ".*"
+    groupRegex: ".*"
+    groupExcludeRegex: "^(__|connect-).*"
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    template:
+      pod:
+        priorityClassName: data-critical
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        tolerations:
+          - key: workload-tier
+            operator: Equal
+            value: data
+            effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: workload-tier
+                      operator: In
+                      values: [data]
+
+  clusterCa:
+    validityDays: 1095
+    renewalDays: 60
+  clientsCa:
+    validityDays: 365
+    renewalDays: 30
+  # Rolling restarts for CA renewal / config changes only in the nightly window (UTC).
+  maintenanceTimeWindows:
+    - "* * 0-4 ? * *"
+---
+# KRaft controllers (quorum of 3, tolerates the loss of one).
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: controllers
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: platform-data
+spec:
+  replicas: 3
+  roles:
+    - controller
+  storage:
+    type: persistent-claim
+    class: longhorn-db
+    size: 50Gi
+    deleteClaim: false
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      memory: 4Gi
+  jvmOptions:
+    -Xms: 2g
+    -Xmx: 2g
+  template:
+    pod:
+      priorityClassName: data-critical
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-tier
+                    operator: In
+                    values: [data]
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: kafka
+                  strimzi.io/pool-name: controllers
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              strimzi.io/cluster: kafka
+              strimzi.io/pool-name: controllers
+---
+# Brokers: scale out by raising replicas (Cruise Control auto-rebalances onto new brokers).
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: brokers
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: platform-data
+spec:
+  replicas: 5
+  roles:
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        class: longhorn-db
+        size: 1536Gi
+        deleteClaim: false
+        kraftMetadata: shared
+  resources:
+    requests:
+      cpu: "6"
+      memory: 32Gi
+    limits:
+      memory: 32Gi
+  jvmOptions:
+    -Xms: 8g
+    -Xmx: 8g
+    -XX:
+      UseG1GC: "true"
+      MaxGCPauseMillis: "20"
+      InitiatingHeapOccupancyPercent: "35"
+      ExplicitGCInvokesConcurrent: "true"
+  template:
+    pod:
+      priorityClassName: data-critical
+      terminationGracePeriodSeconds: 120
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-tier
+                    operator: In
+                    values: [data]
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: kafka
+                  strimzi.io/pool-name: brokers
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              strimzi.io/cluster: kafka
+              strimzi.io/pool-name: brokers
+---
+# Template used by Cruise Control auto-rebalancing (cruiseControl.autoRebalance).
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaRebalance
+metadata:
+  name: kafka-auto-rebalance
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: platform-data
+  annotations:
+    strimzi.io/rebalance-template: "true"
+spec:
+  goals:
+    - RackAwareDistributionGoal # tolerates < 3 racks, unlike RackAwareGoal
+    - ReplicaCapacityGoal
+    - DiskCapacityGoal
+    - NetworkInboundCapacityGoal
+    - NetworkOutboundCapacityGoal
+    - ReplicaDistributionGoal
+    - LeaderReplicaDistributionGoal
+    - DiskUsageDistributionGoal
+  concurrentPartitionMovementsPerBroker: 5
+  replicationThrottle: 52428800

@@ -1,0 +1,48 @@
+# RabbitMQ cluster `rabbitmq` (3 nodes, quorum queues) + topology (vhost, policies, exchanges,
+# queues, bindings, users, permissions) via the messaging-topology-operator.
+#   rabbitmq.data-rabbitmq.svc.cluster.local:5672 (AMQP) / :15672 (management) / :15692 (metrics)
+#   https://rabbitmq.ops.example.local (management UI via istio-internal/internal-gateway)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rabbitmq
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data-rabbitmq
+  sources:
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/data/rabbitmq/manifests
+      directory:
+        recurse: true
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: data
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 10m

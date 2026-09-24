@@ -1,0 +1,93 @@
+# rabbitmq_prometheus: aggregated metrics on :15692/metrics, per-queue metrics on
+# /metrics/detailed (only the families used by the alerts below, to bound cardinality).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rabbitmq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq
+      app.kubernetes.io/component: rabbitmq
+  endpoints:
+    - port: prometheus
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 14s
+    - port: prometheus
+      path: /metrics/detailed
+      params:
+        family: [queue_coarse_metrics, queue_consumer_count]
+        vhost: [platform]
+      interval: 60s
+      scrapeTimeout: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: rabbitmq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/part-of: platform-data
+spec:
+  groups:
+    - name: rabbitmq.data-rabbitmq
+      rules:
+        - alert: RabbitMQNodeDown
+          expr: count(rabbitmq_identity_info{namespace="data-rabbitmq"}) < 3
+          for: 3m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Only {{ $value }} of 3 RabbitMQ nodes are up - quorum queues tolerate one more loss"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/gitops/platform/data/README.md#runbook-rabbitmq
+        - alert: RabbitMQMemoryAlarm
+          expr: max by (pod) (rabbitmq_alarms_memory_used_watermark{namespace="data-rabbitmq"}) == 1
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "RabbitMQ {{ $labels.pod }} memory alarm - publishers are blocked"
+        - alert: RabbitMQDiskAlarm
+          expr: max by (pod) (rabbitmq_alarms_free_disk_space_watermark{namespace="data-rabbitmq"}) == 1
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "RabbitMQ {{ $labels.pod }} disk alarm - publishers are blocked"
+        - alert: RabbitMQFileDescriptorsNearLimit
+          expr: max by (pod) (rabbitmq_process_open_fds{namespace="data-rabbitmq"} / rabbitmq_process_max_fds{namespace="data-rabbitmq"}) > 0.8
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "RabbitMQ {{ $labels.pod }} uses >80% of its file descriptors"
+        - alert: RabbitMQUnroutableMessages
+          expr: sum(rate(rabbitmq_channel_messages_unroutable_dropped_total{namespace="data-rabbitmq"}[5m]) + rate(rabbitmq_channel_messages_unroutable_returned_total{namespace="data-rabbitmq"}[5m])) > 1
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Messages are published to exchanges without matching bindings"
+        - alert: RabbitMQHighConnectionChurn
+          expr: sum(rate(rabbitmq_connections_opened_total{namespace="data-rabbitmq"}[5m])) > 100
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "More than 100 new connections/s - clients are not pooling connections"
+        - alert: RabbitMQQueueBacklog
+          expr: max by (vhost, queue) (rabbitmq_detailed_queue_messages_ready{namespace="data-rabbitmq", queue!~".*\\.dlq"}) > 100000
+          for: 15m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Queue {{ $labels.vhost }}/{{ $labels.queue }} has {{ $value }} ready messages - scale consumers (KEDA)"
+        - alert: RabbitMQQueueWithoutConsumers
+          expr: max by (vhost, queue) (rabbitmq_detailed_queue_consumers{namespace="data-rabbitmq", queue!~".*\\.dlq"}) == 0 and max by (vhost, queue) (rabbitmq_detailed_queue_messages_ready{namespace="data-rabbitmq", queue!~".*\\.dlq"}) > 0
+          for: 15m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Queue {{ $labels.vhost }}/{{ $labels.queue }} has messages but no consumers"
+        - alert: RabbitMQDeadLetters
+          expr: max by (vhost, queue) (rabbitmq_detailed_queue_messages{namespace="data-rabbitmq", queue=~".*\\.dlq"}) > 0
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Dead-letter queue {{ $labels.vhost }}/{{ $labels.queue }} holds {{ $value }} messages"

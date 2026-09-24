@@ -1,0 +1,26 @@
+# Barman Cloud CNPG-I plugin (chart plugin-barman-cloud 0.8.0 / plugin v0.15.0).
+# Replaces the deprecated in-tree `.spec.backup.barmanObjectStore` of the Cluster CR.
+# pin: verify latest before upgrade - the plugin minor must support the running CNPG operator minor.
+replicaCount: 1
+logLevel: info
+
+crds:
+  create: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+nodeSelector:
+  workload-tier: platform
+
+certificate:
+  # Self-signed issuer local to cnpg-system (mTLS between operator and plugin only).
+  createIssuer: true
+  createClientCertificate: true
+  createServerCertificate: true
+  duration: 2160h
+  renewBefore: 360h

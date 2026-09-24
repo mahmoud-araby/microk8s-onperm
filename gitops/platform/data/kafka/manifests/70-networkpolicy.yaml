@@ -1,0 +1,74 @@
+# Strimzi generates per-listener NetworkPolicies (generateNetworkPolicy=true) from each listener's
+# networkPolicyPeers (Kafka pods) plus the replication/control-plane rules it needs. The policies
+# below add the namespace baseline and the non-broker components.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+# HTTP bridge: same client namespaces as the Kafka listeners + istio-internal (optional exposure).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-bridge-clients
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaBridge
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: platform.example.com/tenant
+                operator: Exists
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [shared-services, integration, istio-internal]
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring
+  labels:
+    app.kubernetes.io/part-of: platform-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9404 # JMX exporter / kafka exporter
+        - protocol: TCP
+          port: 8080 # bridge /metrics
+        - protocol: TCP
+          port: 8081 # entity operator healthcheck /metrics

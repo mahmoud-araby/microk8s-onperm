@@ -1,0 +1,189 @@
+# PgBouncer poolers (CNPG Pooler CRs). The Service is named after the Pooler:
+#   pg-main-pooler-rw.data-postgres.svc.cluster.local:5432 -> primary  (default for all apps)
+#   pg-main-pooler-ro.data-postgres.svc.cluster.local:5432 -> standbys (read-only / reporting)
+#
+# Transaction pooling: a server connection is held only for the duration of a transaction, so
+# ~10k client connections (hundreds of pods x small client pools) share <= 3 x 140 server
+# connections. Apps must not rely on session state (SET, advisory locks, LISTEN/NOTIFY, WITH HOLD
+# cursors). Protocol-level prepared statements ARE supported (max_prepared_statements, PgBouncer
+# >= 1.21) - Npgsql, pgJDBC and psycopg work with their defaults.
+# Keycloak and Harbor use session semantics (Liquibase locks) -> they connect to pg-main-rw directly.
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: pg-main-pooler-rw
+  labels:
+    app.kubernetes.io/name: pg-main-pooler-rw
+    app.kubernetes.io/instance: pg-main
+    app.kubernetes.io/component: pooler
+    app.kubernetes.io/part-of: platform-data
+spec:
+  cluster:
+    name: pg-main
+  instances: 3
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "10000"
+      default_pool_size: "50"
+      min_pool_size: "10"
+      reserve_pool_size: "10"
+      reserve_pool_timeout: "3"
+      max_db_connections: "140" # x3 instances = 420 < max_connections 500
+      max_prepared_statements: "200"
+      server_idle_timeout: "300"
+      server_lifetime: "3600"
+      query_wait_timeout: "30" # clients get an error instead of queueing forever
+      client_idle_timeout: "0"
+      idle_transaction_timeout: "60"
+      server_check_delay: "10"
+      tcp_keepalive: "1"
+      log_connections: "0"
+      log_disconnections: "0"
+      stats_period: "60"
+  deploymentStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  serviceTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pg-main-pooler-rw
+        app.kubernetes.io/part-of: platform-data
+    spec:
+      type: ClusterIP
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pg-main-pooler-rw
+        app.kubernetes.io/component: pooler
+        app.kubernetes.io/part-of: platform-data
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      priorityClassName: data-critical
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        workload-tier: data
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  cnpg.io/poolerName: pg-main-pooler-rw
+      containers:
+        - name: pgbouncer
+          resources:
+            requests:
+              cpu: "1"
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: pg-main-pooler-ro
+  labels:
+    app.kubernetes.io/name: pg-main-pooler-ro
+    app.kubernetes.io/instance: pg-main
+    app.kubernetes.io/component: pooler
+    app.kubernetes.io/part-of: platform-data
+spec:
+  cluster:
+    name: pg-main
+  instances: 3
+  type: ro
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "5000"
+      default_pool_size: "40"
+      reserve_pool_size: "5"
+      max_db_connections: "100"
+      max_prepared_statements: "200"
+      server_idle_timeout: "300"
+      query_wait_timeout: "30"
+      idle_transaction_timeout: "60"
+      tcp_keepalive: "1"
+      stats_period: "60"
+  deploymentStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  serviceTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pg-main-pooler-ro
+        app.kubernetes.io/part-of: platform-data
+    spec:
+      type: ClusterIP
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pg-main-pooler-ro
+        app.kubernetes.io/component: pooler
+        app.kubernetes.io/part-of: platform-data
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      priorityClassName: data-critical
+      nodeSelector:
+        workload-tier: data
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    cnpg.io/poolerName: pg-main-pooler-ro
+      containers:
+        - name: pgbouncer
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pg-main-pooler-rw
+  labels:
+    app.kubernetes.io/name: pg-main-pooler-rw
+    app.kubernetes.io/part-of: platform-data
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      cnpg.io/poolerName: pg-main-pooler-rw
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pg-main-pooler-ro
+  labels:
+    app.kubernetes.io/name: pg-main-pooler-ro
+    app.kubernetes.io/part-of: platform-data
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      cnpg.io/poolerName: pg-main-pooler-ro

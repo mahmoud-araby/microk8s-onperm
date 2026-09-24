@@ -1,0 +1,73 @@
+# One-time Always On availability group bootstrap (mounted at /opt/platform/ag in every pod).
+#   P=$(kubectl -n data-mssql get secret mssql-secrets -o jsonpath='{.data.MSSQL_SA_PASSWORD}' | base64 -d)
+#   run() { kubectl -n data-mssql exec "$1" -c mssql -- /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$P" -b \
+#           -v AG_MASTER_KEY_PASSWORD="..." AG_CERT_PASSWORD="..." -i "/opt/platform/ag/$2"; }
+#   run mssql-0 01-primary-certificate.sql
+#   copy /var/opt/mssql/data/ag_cert.{cer,pvk} from mssql-0 to mssql-1/2 (kubectl cp via the local machine)
+#   run mssql-1 02-secondary-certificate.sql ; run mssql-2 02-secondary-certificate.sql
+#   run mssql-0 03-endpoint.sql ; run mssql-1 03-endpoint.sql ; run mssql-2 03-endpoint.sql
+#   run mssql-0 04-primary-create-ag.sql
+#   run mssql-1 05-secondary-join.sql ; run mssql-2 05-secondary-join.sql
+#   kubectl -n data-mssql label pod mssql-0 mssql.platform.example.com/role=primary --overwrite
+#   kubectl -n data-mssql label pod mssql-1 mssql-2 mssql.platform.example.com/role=secondary --overwrite
+# Databases created on the primary (CREATE DATABASE + ALTER AVAILABILITY GROUP ag1 ADD DATABASE x)
+# are seeded automatically to the secondaries (SEEDING_MODE = AUTOMATIC).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mssql-ag-bootstrap
+  labels:
+    app.kubernetes.io/name: mssql
+    app.kubernetes.io/part-of: platform-data
+data:
+  01-primary-certificate.sql: |
+    USE master;
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$(AG_MASTER_KEY_PASSWORD)';
+    CREATE CERTIFICATE ag_cert WITH SUBJECT = 'Always On AG endpoint certificate', EXPIRY_DATE = '20361231';
+    BACKUP CERTIFICATE ag_cert TO FILE = '/var/opt/mssql/data/ag_cert.cer'
+      WITH PRIVATE KEY (FILE = '/var/opt/mssql/data/ag_cert.pvk', ENCRYPTION BY PASSWORD = '$(AG_CERT_PASSWORD)');
+    GO
+  02-secondary-certificate.sql: |
+    USE master;
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$(AG_MASTER_KEY_PASSWORD)';
+    CREATE CERTIFICATE ag_cert FROM FILE = '/var/opt/mssql/data/ag_cert.cer'
+      WITH PRIVATE KEY (FILE = '/var/opt/mssql/data/ag_cert.pvk', DECRYPTION BY PASSWORD = '$(AG_CERT_PASSWORD)');
+    GO
+  03-endpoint.sql: |
+    USE master;
+    CREATE ENDPOINT [Hadr_endpoint]
+      AS TCP (LISTENER_PORT = 5022)
+      FOR DATABASE_MIRRORING (ROLE = ALL, AUTHENTICATION = CERTIFICATE ag_cert, ENCRYPTION = REQUIRED ALGORITHM AES);
+    ALTER ENDPOINT [Hadr_endpoint] STATE = STARTED;
+    ALTER EVENT SESSION AlwaysOn_health ON SERVER WITH (STARTUP_STATE = ON);
+    GO
+  04-primary-create-ag.sql: |
+    USE master;
+    CREATE AVAILABILITY GROUP [ag1]
+      WITH (CLUSTER_TYPE = NONE, DB_FAILOVER = ON)
+      FOR REPLICA ON
+        N'mssql-0' WITH (ENDPOINT_URL = N'tcp://mssql-0.mssql-headless.data-mssql.svc.cluster.local:5022',
+                         AVAILABILITY_MODE = SYNCHRONOUS_COMMIT, FAILOVER_MODE = MANUAL, SEEDING_MODE = AUTOMATIC,
+                         SECONDARY_ROLE (ALLOW_CONNECTIONS = ALL)),
+        N'mssql-1' WITH (ENDPOINT_URL = N'tcp://mssql-1.mssql-headless.data-mssql.svc.cluster.local:5022',
+                         AVAILABILITY_MODE = SYNCHRONOUS_COMMIT, FAILOVER_MODE = MANUAL, SEEDING_MODE = AUTOMATIC,
+                         SECONDARY_ROLE (ALLOW_CONNECTIONS = ALL)),
+        N'mssql-2' WITH (ENDPOINT_URL = N'tcp://mssql-2.mssql-headless.data-mssql.svc.cluster.local:5022',
+                         AVAILABILITY_MODE = ASYNCHRONOUS_COMMIT, FAILOVER_MODE = MANUAL, SEEDING_MODE = AUTOMATIC,
+                         SECONDARY_ROLE (ALLOW_CONNECTIONS = ALL));
+    ALTER AVAILABILITY GROUP [ag1] GRANT CREATE ANY DATABASE;
+    GO
+  05-secondary-join.sql: |
+    USE master;
+    ALTER AVAILABILITY GROUP [ag1] JOIN WITH (CLUSTER_TYPE = NONE);
+    ALTER AVAILABILITY GROUP [ag1] GRANT CREATE ANY DATABASE;
+    GO
+  # Planned failover to a synchronized secondary (CLUSTER_TYPE = NONE has no automatic failover):
+  #   run <new-primary> 06-failover-to-this-replica.sql, then on the OLD primary:
+  #   ALTER AVAILABILITY GROUP [ag1] SET (ROLE = SECONDARY); and flip the pod labels.
+  06-failover-to-this-replica.sql: |
+    USE master;
+    -- verify first: SELECT ag.name, drs.synchronization_state_desc FROM sys.dm_hadr_database_replica_states drs
+    --               JOIN sys.availability_groups ag ON ag.group_id = drs.group_id;
+    ALTER AVAILABILITY GROUP [ag1] FORCE_FAILOVER_ALLOW_DATA_LOSS;
+    GO

@@ -1,0 +1,22 @@
+# Management UI at https://rabbitmq.ops.example.local via the Istio internal gateway (private VIP,
+# TLS terminated at the gateway with a certificate from ClusterIssuer internal-ca). Never public.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: rabbitmq-management
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: management
+    app.kubernetes.io/part-of: platform-data
+spec:
+  hosts:
+    - rabbitmq.ops.example.local
+  gateways:
+    - istio-internal/internal-gateway
+  http:
+    - route:
+        - destination:
+            host: rabbitmq.data-rabbitmq.svc.cluster.local
+            port:
+              number: 15672
+      timeout: 60s

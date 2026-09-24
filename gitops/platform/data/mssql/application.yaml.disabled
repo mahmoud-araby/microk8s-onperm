@@ -1,0 +1,54 @@
+# OPTIONAL COMPONENT - DISABLED BY DEFAULT.
+# The bootstrap app-of-apps only picks up gitops/platform/data/*/application.yaml; this file is named
+# application.yaml.disabled so Argo CD ignores it. To enable SQL Server for .NET workloads that
+# cannot use PostgreSQL (legacy EF6 / stored-procedure-heavy apps, vendor software):
+#   1. Make sure you hold SQL Server licences for every core of the data nodes that can run it
+#      (Standard/Enterprise per-core, or Developer for non-production) and set MSSQL_PID accordingly.
+#   2. Seed Vault secret/platform/mssql (sa-password, ag-cert-password, ag-master-key-password).
+#   3. git mv application.yaml.disabled application.yaml && commit.
+#   4. Configure the availability group once (manifests/50-ag-bootstrap-configmap.yaml).
+# Namespace data-mssql is an addition to docs/conventions.md (only used when this is enabled).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mssql
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data-mssql
+  sources:
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      path: gitops/platform/data/mssql/manifests
+      directory:
+        recurse: true
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: data
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 10m

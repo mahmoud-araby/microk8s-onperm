@@ -1,0 +1,93 @@
+# Strimzi HTTP bridge "kafka-bridge" -> Service kafka-bridge-bridge-service:8080 (created by Strimzi).
+# REST/HTTP "Kafka endpoint" for clients that cannot speak the Kafka protocol (legacy .NET Framework,
+# scripts, partners through the internal gateway). The bridge itself has no auth: every HTTP client
+# acts as KafkaUser "kafka-bridge" (ACLs in 50-users.yaml) and access is limited by NetworkPolicy.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaBridge
+metadata:
+  name: kafka-bridge
+  labels:
+    app.kubernetes.io/name: kafka-bridge
+    app.kubernetes.io/component: http-bridge
+    app.kubernetes.io/part-of: platform-data
+spec:
+  replicas: 3
+  bootstrapServers: kafka-kafka-bootstrap.data-kafka.svc:9093
+  tls:
+    trustedCertificates:
+      - secretName: kafka-cluster-ca-cert
+        pattern: "*.crt"
+  authentication:
+    type: scram-sha-512
+    username: kafka-bridge
+    passwordSecret:
+      secretName: kafka-bridge-kafka-password
+      password: password
+  http:
+    port: 8080
+  producer:
+    config:
+      acks: all
+      enable.idempotence: true
+      compression.type: lz4
+      linger.ms: 5
+      delivery.timeout.ms: 120000
+  consumer:
+    enabled: true
+    timeoutSeconds: 300 # idle HTTP consumers are deleted after 5 min
+    config:
+      auto.offset.reset: earliest
+      enable.auto.commit: false
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+  jvmOptions:
+    -Xms: 512m
+    -Xmx: 1g
+  metricsConfig:
+    type: jmxPrometheusExporter
+    valueFrom:
+      configMapKeyRef:
+        name: kafka-metrics
+        key: bridge-metrics-config.yml
+  tracing:
+    type: opentelemetry
+  template:
+    bridgeContainer:
+      env:
+        - name: OTEL_SERVICE_NAME
+          value: kafka-bridge
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel-collector.observability.svc.cluster.local:4317
+    pod:
+      priorityClassName: data-critical
+      metadata:
+        annotations:
+          sidecar.istio.io/inject: "false"
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-tier
+                    operator: In
+                    values: [data]
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    strimzi.io/cluster: kafka-bridge
+                    strimzi.io/kind: KafkaBridge
+    podDisruptionBudget:
+      maxUnavailable: 1

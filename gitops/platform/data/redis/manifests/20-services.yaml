@@ -1,0 +1,95 @@
+# Service `redis` (well-known endpoint) -> HAProxy -> the node that currently reports role:master.
+# Mechanism: HAProxy health-checks every Redis node each second (AUTH + INFO replication, expects
+# role:master); exactly one backend server is UP. After a Sentinel failover the new master turns UP
+# within ~2 s and sessions on the old one are shut down so clients reconnect.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: master-router
+    app.kubernetes.io/part-of: platform-data
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis-haproxy
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis-master
+      protocol: TCP
+---
+# Read-only replicas (optional read scaling for read-heavy, staleness-tolerant lookups).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-replicas
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: replica-router
+    app.kubernetes.io/part-of: platform-data
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis-haproxy
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis-replica
+      protocol: TCP
+---
+# Sentinel (well-known endpoint): Sentinel-aware clients (StackExchange.Redis serviceName=mymaster,
+# Lettuce/Jedis/redis-py Sentinel) discover the master themselves. Password = the Redis password.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  labels:
+    app.kubernetes.io/name: redis-sentinel
+    app.kubernetes.io/part-of: platform-data
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis-sentinel
+  ports:
+    - name: tcp-sentinel
+      port: 26379
+      targetPort: sentinel
+      protocol: TCP
+---
+# Stable per-pod DNS for the Redis StatefulSet (redis-node-N.redis-headless...). Not-ready pods are
+# published so replicas can resolve the master while bootstrapping.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  labels:
+    app.kubernetes.io/name: redis-node
+    app.kubernetes.io/part-of: platform-data
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: redis-node
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel-headless
+  labels:
+    app.kubernetes.io/name: redis-sentinel
+    app.kubernetes.io/part-of: platform-data
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: redis-sentinel
+  ports:
+    - name: tcp-sentinel
+      port: 26379
+      targetPort: sentinel

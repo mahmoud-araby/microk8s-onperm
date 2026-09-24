@@ -1,0 +1,119 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kafka-resources
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: platform-data
+spec:
+  # brokers, controllers, cruise control, kafka exporter (all expose tcp-prometheus :9404)
+  selector:
+    matchExpressions:
+      - key: strimzi.io/kind
+        operator: In
+        values: [Kafka, KafkaConnect, KafkaMirrorMaker2]
+  podMetricsEndpoints:
+    - port: tcp-prometheus
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 25s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_strimzi_io_cluster]
+          targetLabel: strimzi_io_cluster
+        - sourceLabels: [__meta_kubernetes_pod_label_strimzi_io_pool_name]
+          targetLabel: pool
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node_name
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kafka-entity-operator
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      strimzi.io/name: kafka-entity-operator
+  podMetricsEndpoints:
+    - port: healthcheck
+      path: /metrics
+      interval: 60s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kafka-bridge
+  labels:
+    app.kubernetes.io/name: kafka-bridge
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      strimzi.io/kind: KafkaBridge
+  podMetricsEndpoints:
+    - port: rest-api
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: platform-data
+spec:
+  groups:
+    - name: kafka.data-kafka
+      rules:
+        - alert: KafkaBrokerDown
+          expr: count(kafka_server_replicamanager_leadercount{namespace="data-kafka", pool="brokers"}) < 5
+          for: 3m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Only {{ $value }} of 5 Kafka brokers report metrics"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/gitops/platform/data/README.md#runbook-kafka
+        - alert: KafkaUnderReplicatedPartitions
+          expr: sum(kafka_server_replicamanager_underreplicatedpartitions{namespace="data-kafka"}) > 0
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "{{ $value }} under-replicated partitions"
+        - alert: KafkaUnderMinIsrPartitions
+          expr: sum(kafka_server_replicamanager_underminisrpartitioncount{namespace="data-kafka"}) > 0
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "{{ $value }} partitions below min.insync.replicas - acks=all producers are failing"
+        - alert: KafkaOfflinePartitions
+          expr: max(kafka_controller_kafkacontroller_offlinepartitionscount{namespace="data-kafka"}) > 0
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "{{ $value }} offline partitions (no leader)"
+        - alert: KafkaNoActiveController
+          expr: sum(kafka_controller_kafkacontroller_activecontrollercount{namespace="data-kafka"}) != 1
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "KRaft cluster has {{ $value }} active controllers (expected 1)"
+        - alert: KafkaDiskFillingUp
+          expr: (kubelet_volume_stats_available_bytes{namespace="data-kafka", persistentvolumeclaim=~"data-.*kafka-.*"} / kubelet_volume_stats_capacity_bytes{namespace="data-kafka", persistentvolumeclaim=~"data-.*kafka-.*"}) < 0.2
+          for: 10m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Kafka volume {{ $labels.persistentvolumeclaim }} has <20% free - lower retention or add brokers"
+        - alert: KafkaConsumerGroupLagHigh
+          expr: sum by (consumergroup, topic) (kafka_consumergroup_lag{namespace="data-kafka"}) > 100000
+          for: 15m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Consumer group {{ $labels.consumergroup }} lags {{ $value }} messages on {{ $labels.topic }}"
+        - alert: KafkaBridgeDown
+          expr: absent(up{namespace="data-kafka", pod=~"kafka-bridge-bridge-.*"} == 1)
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "No Kafka HTTP bridge pod is up"

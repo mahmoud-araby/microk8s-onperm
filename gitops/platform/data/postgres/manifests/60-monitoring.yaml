@@ -1,0 +1,144 @@
+# Metrics: CNPG instance exporter (:9187 "metrics") and PgBouncer exporter (:9127 "metrics").
+# PodMonitors are created explicitly (Cluster/Pooler .spec.monitoring.enablePodMonitor is deprecated).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pg-main
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: pg-main
+      cnpg.io/podRole: instance
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 25s
+      relabelings:
+        # "cluster" and "role" labels used by the alert rules below.
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+          targetLabel: cluster
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_instanceRole]
+          targetLabel: role
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pg-main-poolers
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/part-of: platform-data
+spec:
+  selector:
+    matchExpressions:
+      - key: cnpg.io/poolerName
+        operator: In
+        values: [pg-main-pooler-rw, pg-main-pooler-ro]
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_poolerName]
+          targetLabel: pooler
+        - sourceLabels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+          targetLabel: cluster
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pg-main
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/part-of: platform-data
+spec:
+  groups:
+    - name: postgres.pg-main
+      rules:
+        - alert: PostgresInstanceDown
+          expr: max by (pod) (cnpg_collector_up{namespace="data-postgres", cluster="pg-main"}) == 0 or absent(cnpg_collector_up{namespace="data-postgres", cluster="pg-main"})
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "pg-main instance {{ $labels.pod }} is down"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/gitops/platform/data/README.md#runbook-postgres-failover
+        - alert: PostgresNotEnoughStandbys
+          expr: max(cnpg_pg_replication_streaming_replicas{namespace="data-postgres", cluster="pg-main"}) < 2
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "pg-main has fewer than 2 streaming standbys"
+            description: "With minSyncReplicas=1 writes block if the last standby is lost."
+        - alert: PostgresNoSyncStandby
+          expr: max(cnpg_pg_replication_streaming_replicas{namespace="data-postgres", cluster="pg-main"}) < 1
+          for: 1m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "pg-main has no standby - commits are blocked (minSyncReplicas=1)"
+        - alert: PostgresReplicationLagHigh
+          expr: max by (pod) (cnpg_pg_replication_lag{namespace="data-postgres", cluster="pg-main"}) > 30
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "Standby {{ $labels.pod }} is {{ $value | humanizeDuration }} behind the primary"
+        - alert: PostgresConnectionsNearLimit
+          expr: |
+            sum by (pod) (cnpg_backends_total{namespace="data-postgres", cluster="pg-main"})
+              / on (pod) max by (pod) (cnpg_pg_settings_setting{namespace="data-postgres", cluster="pg-main", name="max_connections"}) > 0.85
+          for: 5m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "{{ $labels.pod }} uses >85% of max_connections - check for apps bypassing PgBouncer"
+        - alert: PostgresWALArchivingFailing
+          expr: |
+            increase(cnpg_pg_stat_archiver_failed_count{namespace="data-postgres", cluster="pg-main"}[10m]) > 0
+            or max(cnpg_pg_stat_archiver_seconds_since_last_archival{namespace="data-postgres", cluster="pg-main", role="primary"}) > 900
+          for: 5m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "WAL archiving of pg-main is failing - PITR window is shrinking and WAL accumulates"
+            runbook_url: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/gitops/platform/data/README.md#runbook-postgres-backup
+        - alert: PostgresBackupTooOld
+          expr: |
+            time() - max(
+              barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="data-postgres"}
+              or cnpg_collector_last_available_backup_timestamp{namespace="data-postgres", cluster="pg-main"}
+            ) > 30 * 3600
+          for: 15m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "No successful base backup of pg-main in the last 30h"
+        - alert: PostgresXIDWraparoundRisk
+          expr: max by (datname) (cnpg_pg_database_xid_age{namespace="data-postgres", cluster="pg-main"}) > 1000000000
+          for: 30m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Database {{ $labels.datname }} XID age > 1e9 - autovacuum is not keeping up"
+        - alert: PostgresVolumeFillingUp
+          expr: |
+            (kubelet_volume_stats_available_bytes{namespace="data-postgres"} / kubelet_volume_stats_capacity_bytes{namespace="data-postgres"}) < 0.15
+          for: 10m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "PVC {{ $labels.persistentvolumeclaim }} has <15% free space (resizeInUseVolumes is enabled - grow it in Git)"
+    - name: postgres.pgbouncer
+      rules:
+        - alert: PgBouncerClientsWaiting
+          expr: sum by (pooler, database) (cnpg_pgbouncer_pools_cl_waiting{namespace="data-postgres"}) > 50
+          for: 2m
+          labels: {severity: warning, team: platform-data}
+          annotations:
+            summary: "{{ $value }} clients waiting for a server connection on {{ $labels.pooler }}/{{ $labels.database }}"
+        - alert: PgBouncerMaxWaitHigh
+          expr: max by (pooler, database) (cnpg_pgbouncer_pools_maxwait{namespace="data-postgres"}) > 5
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Oldest waiting client on {{ $labels.pooler }}/{{ $labels.database }} waits > 5s (pool exhausted)"
+        - alert: PgBouncerDown
+          expr: sum by (pooler) (up{namespace="data-postgres", pooler=~"pg-main-pooler-rw"}) < 2
+          for: 2m
+          labels: {severity: critical, team: platform-data}
+          annotations:
+            summary: "Fewer than 2 PgBouncer rw pods are up"

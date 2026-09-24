@@ -1,0 +1,105 @@
+# OPTIONAL - cross-site replication of RabbitMQ messages to the DR site. Not synced by Argo CD
+# (examples/ is outside the Application path). RabbitMQ has no synchronous cross-cluster
+# replication; pick per use case:
+#
+#  A) Exchange FEDERATION (applied at the DR SITE, pulls from site A): every message published to
+#     orders.events at site A is also delivered to the DR cluster's orders.events, where DR consumers
+#     (normally stopped / scaled to 0) have fully-populated queues on failover. Loosely coupled,
+#     tolerates WAN outages (buffers upstream in an internal federation queue).
+#  B) SHOVEL (applied at SITE A, pushes to DR): moves/copies a specific queue to the DR cluster -
+#     e.g. drain the audit DLQ to DR for long-term storage, or evacuate a queue during a site move.
+#
+# Connectivity: site A exposes AMQPS 5671 on the internal-pool VIP only to the DR CIDR; credentials
+# of a dedicated "federation" user live in Vault secret/platform/rabbitmq-dr (key uri).
+# Definitions (vhosts, users, policies) are GitOps-managed at both sites; message *contents* are
+# what federation/shovel replicate. Quorum queues + publisher confirms give RPO 0 inside a site.
+# ------------------------------------------------------------------------------------------------
+# (A) at the DR site: upstream = site A
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: rabbitmq-upstream-site-a
+  namespace: data-rabbitmq
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+  target:
+    name: rabbitmq-upstream-site-a
+  data:
+    # amqps://federation:<password>@rabbitmq.site-a.example.local:5671/platform  (PLACEHOLDER)
+    - secretKey: uri
+      remoteRef: {key: platform/rabbitmq-dr, property: upstream-uri}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Federation
+metadata:
+  name: site-a
+  namespace: data-rabbitmq
+spec:
+  name: site-a
+  vhost: platform
+  uriSecret:
+    name: rabbitmq-upstream-site-a
+  ackMode: on-confirm # no loss across the WAN
+  prefetch-count: 1000
+  reconnectDelay: 5
+  maxHops: 1
+  queueType: quorum # internal federation queues are quorum queues
+  expires: 86400000 # upstream buffer queue kept 24h while DR is unreachable
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Policy
+metadata:
+  name: federate-platform-events
+  namespace: data-rabbitmq
+spec:
+  name: federate-platform-events
+  vhost: platform
+  pattern: "^(orders\\.events|integration)$"
+  applyTo: exchanges
+  priority: 10
+  definition:
+    federation-upstream: site-a
+  rabbitmqClusterReference:
+    name: rabbitmq
+---
+# (B) at site A: shovel the payments DLQ to the DR site's audit exchange
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: rabbitmq-shovel-dr
+  namespace: data-rabbitmq
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+  target:
+    name: rabbitmq-shovel-dr
+  data:
+    # srcUri: amqp://shovel:<pw>@rabbitmq.data-rabbitmq.svc:5672/platform
+    # destUri: amqps://shovel:<pw>@rabbitmq.site-b.example.local:5671/platform  (PLACEHOLDER)
+    - secretKey: srcUri
+      remoteRef: {key: platform/rabbitmq-dr, property: shovel-src-uri}
+    - secretKey: destUri
+      remoteRef: {key: platform/rabbitmq-dr, property: shovel-dest-uri}
+---
+apiVersion: rabbitmq.com/v1beta1
+kind: Shovel
+metadata:
+  name: payments-dlq-to-dr
+  namespace: data-rabbitmq
+spec:
+  name: payments-dlq-to-dr
+  vhost: platform
+  uriSecret:
+    name: rabbitmq-shovel-dr
+  srcQueue: payments.order-created.dlq
+  destExchange: platform.dlx
+  destExchangeKey: payments.order-created
+  ackMode: on-confirm
+  prefetchCount: 500
+  reconnectDelay: 5
+  addForwardHeaders: true
+  rabbitmqClusterReference:
+    name: rabbitmq

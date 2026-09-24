@@ -1,0 +1,69 @@
+# CloudNativePG operator + Barman Cloud CNPG-I plugin (WAL archiving / base backups to S3-compatible
+# object storage). Both run in cnpg-system on the platform pool. The plugin needs cert-manager
+# (wave -15) for its mTLS certificates and MUST live in the same namespace as the operator.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cnpg-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: platform-data
+    platform.example.com/category: data
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: data
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  sources:
+    - repoURL: https://cloudnative-pg.github.io/charts
+      chart: cloudnative-pg
+      targetRevision: 0.29.1 # pin: verify latest before upgrade (operator 1.30.1)
+      helm:
+        releaseName: cnpg
+        valueFiles:
+          - $values/gitops/platform/data/cnpg-operator/values.yaml
+    - repoURL: https://cloudnative-pg.github.io/charts
+      chart: plugin-barman-cloud
+      targetRevision: 0.8.0 # pin: verify latest before upgrade (plugin v0.15.0)
+      helm:
+        releaseName: barman-cloud
+        valueFiles:
+          - $values/gitops/platform/data/cnpg-operator/values-barman-cloud.yaml
+    - repoURL: https://github.com/mahmoud-araby/microk8s-onperm.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        platform.example.com/category: data
+        istio-injection: disabled
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true # CNPG CRDs exceed the client-side last-applied annotation limit
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # Webhook CA bundles are injected at runtime by the operator.
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

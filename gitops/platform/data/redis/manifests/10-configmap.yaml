@@ -1,0 +1,255 @@
+# Static configuration + bootstrap scripts. Secrets are appended at pod start from env
+# (REDISCLI_AUTH), never stored in the ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: platform-data
+data:
+  # --------------------------------------------------------------------------------------------
+  # redis.conf - cache-first profile with AOF persistence.
+  # Sizing: 3 pods x 16 GiB request / 20 GiB limit, maxmemory 12 GB (headroom for fork COW during
+  # AOF rewrite / full resync, replication backlog and client buffers).
+  # 1M users: ~100k concurrent sessions x ~20 KB of session/cache data + hot entity cache ~6-8 GB,
+  # ~50-80k ops/s at peak (single master handles >150k ops/s with io-threads).
+  # --------------------------------------------------------------------------------------------
+  redis.conf: |
+    bind * -::*
+    protected-mode no
+    port 6379
+    tcp-backlog 4096
+    tcp-keepalive 60
+    timeout 0
+    maxclients 20000
+    databases 64
+    dir /data
+
+    # persistence: AOF (fsync every second) with RDB preamble for fast restarts
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appenddirname "appendonlydir"
+    appendfsync everysec
+    aof-use-rdb-preamble yes
+    no-appendfsync-on-rewrite yes
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 1gb
+    aof-timestamp-enabled no
+    save 3600 1 300 100000
+
+    # memory / eviction (cache semantics: any key may be evicted, LRU approximation)
+    maxmemory 12gb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 10
+    lazyfree-lazy-eviction yes
+    lazyfree-lazy-expire yes
+    lazyfree-lazy-server-del yes
+    lazyfree-lazy-user-del yes
+    lazyfree-lazy-user-flush yes
+    replica-lazy-flush yes
+    activedefrag yes
+
+    # threading (network IO threads; command execution stays single-threaded)
+    io-threads 4
+    io-threads-do-reads yes
+
+    # replication
+    replica-read-only yes
+    replica-serve-stale-data yes
+    repl-diskless-sync yes
+    repl-diskless-sync-delay 3
+    repl-diskless-load on-empty-db
+    repl-backlog-size 512mb
+    repl-backlog-ttl 3600
+    repl-timeout 60
+    # A master cut off from all replicas stops accepting writes after 10 s -> limits split-brain loss.
+    min-replicas-to-write 1
+    min-replicas-max-lag 10
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 2gb 1gb 60
+    client-output-buffer-limit pubsub 64mb 16mb 60
+
+    # diagnostics
+    slowlog-log-slower-than 10000
+    slowlog-max-len 1024
+    latency-monitor-threshold 100
+    loglevel notice
+    logfile ""
+
+  # --------------------------------------------------------------------------------------------
+  # Redis node bootstrap: discover the current master from Sentinel; if no Sentinel answers
+  # (first bootstrap / full-cluster restart) look for a running master; else redis-node-0.
+  # --------------------------------------------------------------------------------------------
+  redis-init.sh: |
+    #!/bin/sh
+    set -eu
+    NS="${POD_NAMESPACE}"
+    SELF="$(hostname).redis-headless.${NS}.svc.cluster.local"
+    cp /config/redis.conf /runtime/redis.conf
+    {
+      echo "requirepass \"${REDISCLI_AUTH}\""
+      echo "masterauth \"${REDISCLI_AUTH}\""
+      echo "replica-announce-ip ${SELF}"
+      echo "replica-announce-port 6379"
+    } >> /runtime/redis.conf
+
+    MASTER=""
+    for attempt in 1 2 3; do
+      MASTER="$(timeout 3 redis-cli -h "redis-sentinel.${NS}.svc.cluster.local" -p 26379 \
+        SENTINEL get-master-addr-by-name mymaster 2>/dev/null | head -n1 || true)"
+      [ -n "${MASTER}" ] && break
+      sleep 2
+    done
+    if [ -z "${MASTER}" ]; then
+      for i in 0 1 2; do
+        NODE="redis-node-${i}.redis-headless.${NS}.svc.cluster.local"
+        [ "${NODE}" = "${SELF}" ] && continue
+        if timeout 3 redis-cli -h "${NODE}" -p 6379 info replication 2>/dev/null | grep -q '^role:master'; then
+          MASTER="${NODE}"
+          break
+        fi
+      done
+    fi
+    [ -z "${MASTER}" ] && MASTER="redis-node-0.redis-headless.${NS}.svc.cluster.local"
+
+    if [ "${MASTER}" = "${SELF}" ]; then
+      echo "redis-init: starting ${SELF} as MASTER"
+    else
+      echo "replicaof ${MASTER} 6379" >> /runtime/redis.conf
+      echo "redis-init: starting ${SELF} as REPLICA of ${MASTER}"
+    fi
+
+  # Readiness: PONG, and replicas must have a healthy link to the master.
+  redis-ready.sh: |
+    #!/bin/sh
+    set -eu
+    [ "$(timeout 2 redis-cli -h 127.0.0.1 -p 6379 ping)" = "PONG" ] || exit 1
+    INFO="$(timeout 2 redis-cli -h 127.0.0.1 -p 6379 info replication | tr -d '\r')"
+    if echo "${INFO}" | grep -q '^role:slave'; then
+      echo "${INFO}" | grep -q '^master_link_status:up' || exit 1
+    fi
+    exit 0
+
+  # --------------------------------------------------------------------------------------------
+  # Sentinel bootstrap: learn the master from peer sentinels, else from the redis nodes.
+  # Quorum 2 of 3; failover after 5 s of unreachability.
+  # --------------------------------------------------------------------------------------------
+  sentinel-init.sh: |
+    #!/bin/sh
+    set -eu
+    NS="${POD_NAMESPACE}"
+    SELF="$(hostname).redis-sentinel-headless.${NS}.svc.cluster.local"
+    MASTER=""
+    for i in 0 1 2; do
+      PEER="redis-sentinel-${i}.redis-sentinel-headless.${NS}.svc.cluster.local"
+      [ "${PEER}" = "${SELF}" ] && continue
+      M="$(timeout 3 redis-cli -h "${PEER}" -p 26379 SENTINEL get-master-addr-by-name mymaster 2>/dev/null | head -n1 || true)"
+      if [ -n "${M}" ]; then MASTER="${M}"; break; fi
+    done
+    if [ -z "${MASTER}" ]; then
+      for i in 0 1 2; do
+        NODE="redis-node-${i}.redis-headless.${NS}.svc.cluster.local"
+        if timeout 3 redis-cli -h "${NODE}" -p 6379 info replication 2>/dev/null | grep -q '^role:master'; then
+          MASTER="${NODE}"
+          break
+        fi
+      done
+    fi
+    [ -z "${MASTER}" ] && MASTER="redis-node-0.redis-headless.${NS}.svc.cluster.local"
+    echo "sentinel-init: monitoring mymaster at ${MASTER}"
+    cat > /data/sentinel.conf <<EOF
+    port 26379
+    dir /data
+    protected-mode no
+    requirepass "${REDISCLI_AUTH}"
+    sentinel resolve-hostnames yes
+    sentinel announce-hostnames yes
+    sentinel announce-ip ${SELF}
+    sentinel announce-port 26379
+    sentinel sentinel-pass "${REDISCLI_AUTH}"
+    sentinel monitor mymaster ${MASTER} 6379 2
+    sentinel auth-pass mymaster "${REDISCLI_AUTH}"
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 60000
+    sentinel parallel-syncs mymaster 1
+    EOF
+
+  # --------------------------------------------------------------------------------------------
+  # HAProxy: Service `redis` -> the one node answering role:master (checked every second);
+  # Service `redis-replicas` -> healthy replicas. Sessions to a node that loses the master role are
+  # killed so clients reconnect to the new master right after a Sentinel failover.
+  # --------------------------------------------------------------------------------------------
+  haproxy.cfg: |
+    global
+      log stdout format raw local0 notice
+      maxconn 60000
+      nbthread 4
+      hard-stop-after 30s
+
+    defaults
+      mode tcp
+      log global
+      option dontlognull
+      timeout connect 3s
+      timeout client 1h
+      timeout server 1h
+      timeout check 2s
+      default-server check inter 1s fall 2 rise 2 resolvers k8s init-addr none on-marked-down shutdown-sessions
+
+    resolvers k8s
+      parse-resolv-conf
+      hold valid 5s
+      hold nx 5s
+      hold obsolete 5s
+      accepted_payload_size 8192
+
+    frontend redis_master
+      bind :6379
+      maxconn 50000
+      default_backend redis_master
+
+    frontend redis_replicas
+      bind :6380
+      maxconn 10000
+      default_backend redis_replicas
+
+    backend redis_master
+      option tcp-check
+      tcp-check connect
+      tcp-check send "AUTH ${REDISCLI_AUTH}"\r\n
+      tcp-check expect string +OK
+      tcp-check send PING\r\n
+      tcp-check expect string +PONG
+      tcp-check send info\ replication\r\n
+      tcp-check expect string role:master
+      tcp-check send QUIT\r\n
+      tcp-check expect string +OK
+      server redis-node-0 redis-node-0.redis-headless.data-redis.svc.cluster.local:6379
+      server redis-node-1 redis-node-1.redis-headless.data-redis.svc.cluster.local:6379
+      server redis-node-2 redis-node-2.redis-headless.data-redis.svc.cluster.local:6379
+
+    backend redis_replicas
+      balance leastconn
+      option tcp-check
+      tcp-check connect
+      tcp-check send "AUTH ${REDISCLI_AUTH}"\r\n
+      tcp-check expect string +OK
+      tcp-check send info\ replication\r\n
+      # master_link_status only exists on replicas -> matches healthy, synced replicas only
+      tcp-check expect string master_link_status:up
+      tcp-check send QUIT\r\n
+      tcp-check expect string +OK
+      server redis-node-0 redis-node-0.redis-headless.data-redis.svc.cluster.local:6379
+      server redis-node-1 redis-node-1.redis-headless.data-redis.svc.cluster.local:6379
+      server redis-node-2 redis-node-2.redis-headless.data-redis.svc.cluster.local:6379
+
+    frontend stats
+      mode http
+      bind :8404
+      option dontlog-normal
+      http-request use-service prometheus-exporter if { path /metrics }
+      monitor-uri /healthz
+      stats enable
+      stats uri /stats
+      stats refresh 10s

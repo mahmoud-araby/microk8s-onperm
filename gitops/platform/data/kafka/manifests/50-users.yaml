@@ -1,0 +1,185 @@
+# Platform KafkaUsers (SCRAM-SHA-512, simple authorization / ACLs). Passwords come from Vault
+# through 00-externalsecrets.yaml. Tenant users are rendered by charts/tenant with prefix ACLs.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: kafka-admin
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: platform-data
+spec:
+  # Listed in Kafka .spec.kafka.authorization.superUsers - break-glass only, no ACLs needed.
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: kafka-admin-kafka-password
+          key: password
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: kafka-bridge
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: platform-data
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: kafka-bridge-kafka-password
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: platform., patternType: prefix}
+        operations: [Read, Write, Describe, DescribeConfigs]
+        host: "*"
+      - resource: {type: group, name: bridge., patternType: prefix}
+        operations: [Read, Describe]
+        host: "*"
+      - resource: {type: cluster}
+        operations: [IdempotentWrite]
+        host: "*"
+  quotas:
+    producerByteRate: 20971520 # 20 MiB/s
+    consumerByteRate: 41943040 # 40 MiB/s
+---
+# Pooled services in shared-services (tenant-agnostic topics "platform.*").
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: platform-services
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: platform-data
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: platform-services-kafka-password
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: platform., patternType: prefix}
+        operations: [Read, Write, Describe, DescribeConfigs]
+        host: "*"
+      - resource: {type: group, name: platform., patternType: prefix}
+        operations: [Read, Describe]
+        host: "*"
+      - resource: {type: transactionalId, name: platform., patternType: prefix}
+        operations: [Write, Describe]
+        host: "*"
+      - resource: {type: cluster}
+        operations: [IdempotentWrite]
+        host: "*"
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: micro-integrator
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: platform-data
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: micro-integrator-kafka-password
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: platform.orders-events, patternType: literal}
+        operations: [Read, Describe]
+        host: "*"
+      - resource: {type: topic, name: platform.audit, patternType: literal}
+        operations: [Write, Describe]
+        host: "*"
+      - resource: {type: group, name: micro-integrator, patternType: prefix}
+        operations: [Read, Describe]
+        host: "*"
+      - resource: {type: cluster}
+        operations: [IdempotentWrite]
+        host: "*"
+---
+# Read-only consumer for hybrid / on-prem systems on the external (LoadBalancer) listener.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: hybrid-consumer
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: platform-data
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: hybrid-consumer-kafka-password
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: platform.orders-events, patternType: literal}
+        operations: [Read, Describe]
+        host: "*"
+      - resource: {type: group, name: hybrid., patternType: prefix}
+        operations: [Read, Describe]
+        host: "*"
+  quotas:
+    consumerByteRate: 20971520
+---
+# Used by MirrorMaker 2 running at the DR site (examples/kafka-mirrormaker2-dr.yaml) to read this
+# cluster (source) and to write offset-sync records next to the source data.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: mirrormaker2
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: platform-data
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: mirrormaker2-kafka-password
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource: {type: topic, name: "*", patternType: literal}
+        operations: [Read, Describe, DescribeConfigs]
+        host: "*"
+      - resource: {type: topic, name: mm2-offset-syncs, patternType: prefix}
+        operations: [Create, Read, Write, Describe, DescribeConfigs]
+        host: "*"
+      - resource: {type: group, name: "*", patternType: literal}
+        operations: [Describe]
+        host: "*"
+      - resource: {type: cluster}
+        operations: [Describe]
+        host: "*"

@@ -1,0 +1,208 @@
+# OPTIONAL - applied at the DR SITE (second MicroK8s cluster), NOT synced by this repo's Argo CD app
+# (examples/ is outside the Application path). Copy to the DR site's GitOps repo/overlay.
+#
+# CloudNativePG "distributed topology": pg-dr is a replica cluster of pg-main that
+#   1. bootstraps from pg-main's base backup in the (replicated) object store,
+#   2. then follows pg-main by WAL streaming over the site interconnect, falling back to the
+#      WAL archive whenever streaming is interrupted (RPO = seconds, async across sites),
+#   3. has its own 3 instances (a designated primary + 2 cascading standbys) so it is HA on promotion.
+#
+# Prerequisites at site A (pg-main):
+#   * Expose the primary to site B only, e.g. add to pg-main:
+#       spec.managed.services.additional:
+#         - selectorType: rw
+#           serviceTemplate:
+#             metadata:
+#               name: pg-main-rw-dr
+#               annotations: {metallb.universe.tf/address-pool: internal-pool, metallb.io/address-pool: internal-pool}
+#             spec: {type: LoadBalancer, loadBalancerSourceRanges: ["10.20.0.0/16"]}   # DR site CIDR
+#     and allow that CIDR (ipBlock) on port 5432 in 70-networkpolicy.yaml.
+#   * Copy pg-main's CA (secret pg-main-ca, key ca.crt) and the streaming_replica client cert
+#     (secret pg-main-replication, keys tls.crt/tls.key) to site B through Vault
+#     (secret/platform/postgres-dr) -> ExternalSecrets below.
+#   * Replicate the MinIO bucket s3://pg-backups/site-a/ to site B (MinIO site/bucket replication).
+#
+# Controlled switchover (planned DC move, RPO 0):
+#   1. pg-main: set spec.replica.primary: pg-dr  -> pg-main is demoted, writes a demotion token
+#      (kubectl get cluster pg-main -o jsonpath='{.status.demotionToken}').
+#   2. pg-dr:   set spec.replica.primary: pg-dr and spec.replica.promotionToken: <token> -> promoted.
+# Disaster (site A lost, RPO = last streamed/archived WAL):
+#   pg-dr: set spec.replica.primary: pg-dr (no token) -> promoted; rebuild site A later as replica of pg-dr.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-dr
+  namespace: data-postgres
+  labels:
+    app.kubernetes.io/name: pg-dr
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: platform-data
+spec:
+  description: DR replica of pg-main (site B)
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11-standard-trixie # must match pg-main's major version
+  primaryUpdateStrategy: unsupervised
+
+  bootstrap:
+    recovery:
+      source: pg-main
+
+  replica:
+    self: pg-dr
+    primary: pg-main # the designated primary of the distributed topology
+    source: pg-main
+
+  externalClusters:
+    - name: pg-main
+      connectionParameters:
+        host: pg-main-rw.site-a.example.local # PLACEHOLDER: LB IP / DNS of pg-main-rw-dr at site A
+        port: "5432"
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      sslCert:
+        name: pg-main-replication
+        key: tls.crt
+      sslKey:
+        name: pg-main-replication
+        key: tls.key
+      sslRootCert:
+        name: pg-main-ca
+        key: ca.crt
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: pg-main-backup-replica
+          serverName: pg-main
+    - name: pg-dr
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: pg-dr-backup
+          serverName: pg-dr
+
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: pg-dr-backup
+        serverName: pg-dr
+
+  postgresql:
+    parameters: # keep identical to pg-main (max_connections etc. must be >= the primary's)
+      max_connections: "500"
+      shared_buffers: 16GB
+      effective_cache_size: 44GB
+      max_worker_processes: "32"
+      max_wal_size: 32GB
+      max_slot_wal_keep_size: 64GB
+
+  storage:
+    storageClass: longhorn-db
+    size: 500Gi
+  walStorage:
+    storageClass: longhorn-db
+    size: 150Gi
+
+  resources:
+    requests: {cpu: "8", memory: 64Gi}
+    limits: {memory: 64Gi}
+
+  priorityClassName: data-critical
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+    nodeSelector:
+      workload-tier: data
+    tolerations:
+      - key: workload-tier
+        operator: Equal
+        value: data
+        effect: NoSchedule
+---
+# Read-only view of site A's replicated archive (source of the initial restore + WAL fallback).
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pg-main-backup-replica
+  namespace: data-postgres
+spec:
+  configuration:
+    destinationPath: s3://pg-backups/site-a/
+    endpointURL: https://minio.site-b.example.local:9000 # PLACEHOLDER
+    endpointCA: {name: pg-dr-backup-s3, key: ca.crt}
+    s3Credentials:
+      accessKeyId: {name: pg-dr-backup-s3, key: ACCESS_KEY_ID}
+      secretAccessKey: {name: pg-dr-backup-s3, key: ACCESS_SECRET_KEY}
+    wal:
+      compression: zstd
+      maxParallel: 8
+---
+# pg-dr's own archive (used once it is promoted, and for its own PITR).
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pg-dr-backup
+  namespace: data-postgres
+spec:
+  retentionPolicy: 30d
+  configuration:
+    destinationPath: s3://pg-backups/site-b/
+    endpointURL: https://minio.site-b.example.local:9000 # PLACEHOLDER
+    endpointCA: {name: pg-dr-backup-s3, key: ca.crt}
+    s3Credentials:
+      accessKeyId: {name: pg-dr-backup-s3, key: ACCESS_KEY_ID}
+      secretAccessKey: {name: pg-dr-backup-s3, key: ACCESS_SECRET_KEY}
+    wal:
+      compression: zstd
+      maxParallel: 8
+    data:
+      compression: snappy
+      jobs: 4
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: pg-main-replication
+  namespace: data-postgres
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+  target:
+    name: pg-main-replication
+    template:
+      type: kubernetes.io/tls
+  data:
+    - secretKey: tls.crt
+      remoteRef: {key: platform/postgres-dr, property: replication-tls.crt}
+    - secretKey: tls.key
+      remoteRef: {key: platform/postgres-dr, property: replication-tls.key}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: pg-main-ca
+  namespace: data-postgres
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+  target:
+    name: pg-main-ca
+  data:
+    - secretKey: ca.crt
+      remoteRef: {key: platform/postgres-dr, property: pg-main-ca.crt}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: pg-dr-backup-s3
+  namespace: data-postgres
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: vault-backend}
+  target:
+    name: pg-dr-backup-s3
+  dataFrom:
+    - extract:
+        key: platform/postgres-backup-dr # keys ACCESS_KEY_ID, ACCESS_SECRET_KEY, ca.crt

@@ -1,0 +1,44 @@
+# Platform topics (managed by the Topic Operator; auto.create.topics.enable=false).
+# Tenant topics are "<tenant>.<name>" and rendered by charts/tenant (data.kafka.topics).
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: platform-orders-events
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: topic
+    app.kubernetes.io/part-of: platform-data
+spec:
+  topicName: platform.orders-events
+  # 24 partitions: ~50k msgs/s peak / ~5k msgs/s per consumer instance -> up to 24 parallel consumers
+  partitions: 24
+  replicas: 3
+  config:
+    min.insync.replicas: "2"
+    retention.ms: "259200000" # 3 days
+    segment.bytes: "536870912"
+    cleanup.policy: delete
+    compression.type: lz4
+    max.message.bytes: "1048576"
+    message.timestamp.type: CreateTime
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: platform-audit
+  labels:
+    strimzi.io/cluster: kafka
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: topic
+    app.kubernetes.io/part-of: platform-data
+spec:
+  topicName: platform.audit
+  partitions: 12
+  replicas: 3
+  config:
+    min.insync.replicas: "2"
+    retention.ms: "2592000000" # 30 days (long-term copy goes to Elasticsearch / object storage)
+    cleanup.policy: delete
+    compression.type: zstd
+    max.message.bytes: "1048576"

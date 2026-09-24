@@ -1,0 +1,97 @@
+# OPTIONAL - applied at the DR SITE (target cluster "kafka" of site B), not synced here.
+# MirrorMaker 2 runs next to its TARGET (the DR cluster) and pulls from site A over the external
+# listener (LoadBalancer on internal-pool, SASL_SSL + SCRAM user "mirrormaker2" defined in
+# ../manifests/50-users.yaml). Replicated topics keep their names (IdentityReplicationPolicy) so
+# consumers can fail over to site B without code changes; consumer-group offsets are translated
+# and synced (checkpoint connector) so they resume near where they stopped.
+# RPO: replication lag (typically < 5 s); RTO: DNS/bootstrap switch of the clients.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaMirrorMaker2
+metadata:
+  name: mm2-site-a-to-dr
+  namespace: data-kafka
+  labels:
+    app.kubernetes.io/name: kafka-mirrormaker2
+    app.kubernetes.io/part-of: platform-data
+spec:
+  version: 4.3.1
+  replicas: 3
+  target:
+    alias: site-b
+    bootstrapServers: kafka-kafka-bootstrap.data-kafka.svc:9093 # the DR cluster itself
+    groupId: mm2-site-b
+    configStorageTopic: mm2-site-b-configs
+    statusStorageTopic: mm2-site-b-status
+    offsetStorageTopic: mm2-site-b-offsets
+    tls:
+      trustedCertificates:
+        - secretName: kafka-cluster-ca-cert
+          pattern: "*.crt"
+    authentication:
+      type: scram-sha-512
+      username: mirrormaker2-target # KafkaUser at site B with write access to the mirrored topics
+      passwordSecret:
+        secretName: mirrormaker2-target-kafka-password
+        password: password
+    config:
+      config.storage.replication.factor: 3
+      offset.storage.replication.factor: 3
+      status.storage.replication.factor: 3
+  mirrors:
+    - source:
+        alias: site-a
+        bootstrapServers: kafka.internal.example.local:9094 # PLACEHOLDER: site A external bootstrap LB
+        tls:
+          trustedCertificates:
+            - secretName: site-a-cluster-ca-cert # copy of site A's kafka-cluster-ca-cert (via Vault)
+              pattern: "*.crt"
+        authentication:
+          type: scram-sha-512
+          username: mirrormaker2
+          passwordSecret:
+            secretName: mirrormaker2-kafka-password
+            password: password
+      topicsPattern: "platform\\..*|[a-z0-9-]+\\..*" # platform + tenant topics
+      topicsExcludePattern: ".*[\\-\\.]internal|__.*|mm2-.*|connect-.*"
+      groupsPattern: ".*"
+      sourceConnector:
+        tasksMax: 12
+        config:
+          replication.factor: 3
+          offset-syncs.topic.replication.factor: 3
+          refresh.topics.interval.seconds: 60
+          sync.topic.acls.enabled: "false" # ACLs are GitOps-managed at both sites
+          sync.topic.configs.enabled: "true"
+          replication.policy.class: org.apache.kafka.connect.mirror.IdentityReplicationPolicy
+          producer.override.compression.type: lz4
+          producer.override.acks: all
+        autoRestart:
+          enabled: true
+      checkpointConnector:
+        tasksMax: 2
+        config:
+          checkpoints.topic.replication.factor: 3
+          sync.group.offsets.enabled: "true"
+          sync.group.offsets.interval.seconds: 30
+          emit.checkpoints.interval.seconds: 30
+          refresh.groups.interval.seconds: 60
+          replication.policy.class: org.apache.kafka.connect.mirror.IdentityReplicationPolicy
+        autoRestart:
+          enabled: true
+  resources:
+    requests: {cpu: "1", memory: 2Gi}
+    limits: {memory: 4Gi}
+  metricsConfig:
+    type: jmxPrometheusExporter
+    valueFrom:
+      configMapKeyRef:
+        name: kafka-metrics
+        key: kafka-metrics-config.yml
+  template:
+    pod:
+      priorityClassName: data-critical
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule

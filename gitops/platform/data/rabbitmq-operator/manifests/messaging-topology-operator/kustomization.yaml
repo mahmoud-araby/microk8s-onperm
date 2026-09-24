@@ -1,0 +1,32 @@
+# RabbitMQ Messaging Topology Operator 1.20.3 (cert-manager flavour; cert-manager is wave -15).
+# pin: verify latest before upgrade
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rabbitmq-system
+resources:
+  - https://github.com/rabbitmq/messaging-topology-operator/releases/download/v1.20.3/messaging-topology-operator-with-certmanager.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: platform-data
+    includeSelectors: false
+patches:
+  # The namespace is created by Argo CD (CreateNamespace + managedNamespaceMetadata).
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: rabbitmq-system
+  - target:
+      kind: Deployment
+      name: messaging-topology-operator
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: messaging-topology-operator
+      spec:
+        template:
+          spec:
+            nodeSelector:
+              workload-tier: platform

@@ -1,0 +1,204 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/part-of: platform-data
+automountServiceAccountToken: false
+---
+# Stateless MI nodes (no clustering/coordination DB needed: RabbitMQ competing consumers + Kafka
+# consumer group distribute the inbound work). Sizing: ~1.5k mediations/s per pod for simple
+# REST->SOAP flows; 3 pods baseline, HPA to 10.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: micro-integrator
+  labels:
+    app.kubernetes.io/name: micro-integrator
+    app.kubernetes.io/instance: micro-integrator
+    app.kubernetes.io/component: integration
+    app.kubernetes.io/part-of: platform-data
+    app.kubernetes.io/version: "4.4.0"
+    version: v4
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: micro-integrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: micro-integrator
+        app.kubernetes.io/instance: micro-integrator
+        app.kubernetes.io/component: integration
+        app.kubernetes.io/part-of: platform-data
+        app.kubernetes.io/version: "4.4.0"
+        app: micro-integrator # Istio telemetry / Kiali
+        version: v4
+      annotations:
+        # Istio sidecar (namespace integration has istio-injection=enabled)
+        sidecar.istio.io/inject: "true"
+        proxy.istio.io/config: '{ "holdApplicationUntilProxyStarts": true }'
+        # Let Prometheus scrape :9201 in plain HTTP next to the sidecar
+        traffic.sidecar.istio.io/excludeInboundPorts: "9201"
+        # Bump to roll the pods after a ConfigMap change (artifacts are not hot-deployed).
+        platform.example.com/config-revision: "1"
+    spec:
+      serviceAccountName: micro-integrator
+      priorityClassName: data-critical
+      terminationGracePeriodSeconds: 60
+      enableServiceLinks: false
+      nodeSelector:
+        workload-tier: data
+      tolerations:
+        - key: workload-tier
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: micro-integrator
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: micro-integrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10802 # wso2carbon in the official image
+        runAsGroup: 10802
+        fsGroup: 10802
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: micro-integrator
+          image: wso2/wso2mi:4.4.0 # pin: verify latest before upgrade (or the Harbor build of ../image/Dockerfile)
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8290
+              protocol: TCP
+            - name: https
+              containerPort: 8253
+              protocol: TCP
+            - name: http-internal
+              containerPort: 9201
+              protocol: TCP
+            - name: https-mgmt
+              containerPort: 9164
+              protocol: TCP
+          env:
+            - name: JVM_MEM_OPTS
+              value: "-Xms1536m -Xmx1536m"
+            - name: JAVA_OPTS
+              value: >-
+                -DenablePrometheusApi=true
+                -XX:+UseG1GC -XX:MaxGCPauseMillis=100
+                -Dlog4j2.formatMsgNoLookups=true
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: micro-integrator-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: micro-integrator-secrets
+                  key: KAFKA_PASSWORD
+            - name: KAFKA_SASL_JAAS_CONFIG
+              value: org.apache.kafka.common.security.scram.ScramLoginModule required username="micro-integrator" password="$(KAFKA_PASSWORD)";
+            - name: ERP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: micro-integrator-secrets
+                  key: ERP_API_KEY
+            - name: OTEL_SERVICE_NAME
+              value: micro-integrator
+          # MI health check API on the internal HTTP port 9201 (offset 10):
+          #   /liveness -> server started;  /healthz -> ready (all artifacts/CApps deployed)
+          startupProbe:
+            httpGet:
+              path: /liveness
+              port: http-internal
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: http-internal
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http-internal
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2560Mi
+            limits:
+              memory: 2560Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # MI writes tmp/, logs and the deployment cache under MI_HOME
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/conf/deployment.toml
+              subPath: deployment.toml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/api/LegacyErpAPI.xml
+              subPath: LegacyErpAPI.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/endpoints/LegacyErpEP.xml
+              subPath: LegacyErpEP.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/sequences/ErpCreateOrderSeq.xml
+              subPath: ErpCreateOrderSeq.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/sequences/LegacyErpFaultSeq.xml
+              subPath: LegacyErpFaultSeq.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/sequences/IntegrationInboundSeq.xml
+              subPath: IntegrationInboundSeq.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/sequences/KafkaOrdersSeq.xml
+              subPath: KafkaOrdersSeq.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/sequences/InboundFaultSeq.xml
+              subPath: InboundFaultSeq.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/inbound-endpoints/RabbitMQIntegrationInbound.xml
+              subPath: RabbitMQIntegrationInbound.xml
+            - name: synapse
+              mountPath: /home/wso2carbon/wso2mi-4.4.0/repository/deployment/server/synapse-configs/default/inbound-endpoints/KafkaOrdersInbound.xml
+              subPath: KafkaOrdersInbound.xml
+      volumes:
+        - name: config
+          configMap:
+            name: micro-integrator-config
+        - name: synapse
+          configMap:
+            name: micro-integrator-synapse

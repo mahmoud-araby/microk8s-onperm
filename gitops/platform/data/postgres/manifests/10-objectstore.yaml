@@ -1,0 +1,48 @@
+# Barman Cloud object store (plugin-barman-cloud) - base backups + continuous WAL archive = PITR.
+# PLACEHOLDER endpoint: the on-prem S3-compatible MinIO of the backup site. Use a bucket with
+# versioning + object lock (WORM) and replicate it to the DR site (MinIO site replication /
+# bucket replication) so pg-dr can bootstrap from it.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pg-main-backup
+  labels:
+    app.kubernetes.io/name: pg-main
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: platform-data
+spec:
+  # Recovery window: any point in time within the last 30 days (base backups + WAL older than the
+  # oldest base backup needed for the window are purged by the plugin).
+  retentionPolicy: 30d
+  configuration:
+    destinationPath: s3://pg-backups/site-a/
+    endpointURL: https://minio.backup.example.local:9000 # PLACEHOLDER
+    endpointCA:
+      name: pg-main-backup-s3
+      key: ca.crt
+    s3Credentials:
+      accessKeyId:
+        name: pg-main-backup-s3
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: pg-main-backup-s3
+        key: ACCESS_SECRET_KEY
+    wal:
+      compression: zstd
+      # Peak write load produces several 16 MiB WAL segments per second; archive in parallel.
+      maxParallel: 8
+    data:
+      compression: snappy
+      jobs: 4
+      immediateCheckpoint: false
+    tags:
+      cluster: pg-main
+      site: site-a
+  instanceSidecarConfiguration:
+    retentionPolicyIntervalSeconds: 1800
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
