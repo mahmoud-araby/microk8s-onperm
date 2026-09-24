@@ -235,8 +235,8 @@ data:
       maxLength: 1000000
     # -- (extra) Extra Policy definition keys merged into the default policy (e.g. max-length).
     policyDefinition: {}
-    # -- (extra) Vhost limits (noisy neighbour). Requires a messaging-topology-operator version that
-    #    supports Vhost.spec.vhostLimits; leave empty to skip.
+    # -- (extra) Vhost limits (noisy neighbour), rendered to Vhost.spec.limits. Supported keys:
+    #    connections, queues (messaging-topology-operator >= 1.13). Leave empty to skip.
     vhostLimits: {}
     #  connections: 2000
     #  queues: 500

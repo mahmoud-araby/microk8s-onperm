@@ -462,8 +462,23 @@ seccompProfile:
 {{- $prefix := $d.kafka.topicPrefix | default (ternary (printf "%s." $v.tenant) "" (ne ($v.tenant | default "") "")) }}
 - name: KAFKA_BOOTSTRAP_SERVERS
   value: {{ ternary $e.kafka.bootstrapTls $e.kafka.bootstrap (eq $d.kafka.tls true) | quote }}
+{{- if ne $d.kafka.sasl false }}
+{{- /* Strimzi listeners enforce SCRAM-SHA-512 + simple ACLs (KafkaUser "<tenant>-<service>" from charts/tenant). */}}
+- name: KAFKA_SECURITY_PROTOCOL
+  value: {{ ternary "SASL_SSL" "SASL_PLAINTEXT" (eq $d.kafka.tls true) | quote }}
+- name: KAFKA_SASL_MECHANISM
+  value: {{ $d.kafka.mechanism | default "SCRAM-SHA-512" | quote }}
+- name: KAFKA_USERNAME
+  value: {{ $d.kafka.user | default (ternary (printf "%s-%s" $v.tenant $name) $name (ne ($v.tenant | default "") "")) | quote }}
+- name: KAFKA_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $d.kafka.passwordSecret | default $secret }}
+      key: {{ $d.kafka.passwordKey | default "KAFKA_PASSWORD" }}
+{{- else }}
 - name: KAFKA_SECURITY_PROTOCOL
   value: {{ ternary "SSL" "PLAINTEXT" (eq $d.kafka.tls true) | quote }}
+{{- end }}
 - name: KAFKA_TOPIC_PREFIX
   value: {{ $prefix | quote }}
 - name: KAFKA_CONSUMER_GROUP

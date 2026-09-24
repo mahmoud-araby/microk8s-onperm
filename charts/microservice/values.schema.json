@@ -88,7 +88,7 @@
         "postgres": {"allOf": [{"$ref": "#/definitions/dependency"}], "properties": {"database": {"type": "string"}, "user": {"type": "string"}, "pooler": {"type": "boolean"}}},
         "redis": {"allOf": [{"$ref": "#/definitions/dependency"}], "properties": {"db": {"type": "integer", "minimum": 0, "maximum": 15}, "keyPrefix": {"type": "string"}}},
         "rabbitmq": {"allOf": [{"$ref": "#/definitions/dependency"}], "properties": {"vhost": {"type": "string"}, "user": {"type": "string"}}},
-        "kafka": {"allOf": [{"$ref": "#/definitions/dependency"}], "properties": {"tls": {"type": "boolean"}, "topicPrefix": {"type": "string"}}}
+        "kafka": {"allOf": [{"$ref": "#/definitions/dependency"}], "properties": {"tls": {"type": "boolean"}, "topicPrefix": {"type": "string"}, "sasl": {"type": "boolean"}, "mechanism": {"type": "string", "enum": ["SCRAM-SHA-512", "SCRAM-SHA-256", "PLAIN"]}, "user": {"type": "string"}}}
       }
     },
     "startup": {

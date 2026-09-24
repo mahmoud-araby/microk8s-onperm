@@ -135,6 +135,14 @@ dependencies:
     tls: false
     # -- (extra) KAFKA_TOPIC_PREFIX. Default: "<tenant>." for dedicated tenants, "" for shared.
     topicPrefix: ""
+    # -- (extra) SASL/SCRAM auth (the platform's Kafka listeners require it). Injects KAFKA_SASL_MECHANISM,
+    #    KAFKA_USERNAME and KAFKA_PASSWORD; security protocol becomes SASL_PLAINTEXT / SASL_SSL.
+    sasl: true
+    mechanism: SCRAM-SHA-512
+    # -- (extra) KAFKA_USERNAME. Default: "<tenant>-<service>" (dedicated) or "<service>" (shared) = KafkaUser from charts/tenant.
+    user: ""
+    passwordKey: KAFKA_PASSWORD
+    passwordSecret: ""
 
 startup:
   # -- Add one init container per enabled dependency that blocks until its TCP endpoint accepts connections.

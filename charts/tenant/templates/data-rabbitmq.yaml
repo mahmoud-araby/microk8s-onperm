@@ -16,7 +16,7 @@ spec:
   defaultQueueType: {{ $r.defaultQueueType }}
   tags: [{{ printf "tenant-%s" $name | quote }}]
   {{- with $r.vhostLimits }}
-  vhostLimits:
+  limits:
     {{- range $k, $v := . }}
     {{ $k }}: {{ $v | int64 }}
     {{- end }}

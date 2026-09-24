@@ -147,7 +147,7 @@ spec:
                 "postgres" (dict "database" $sql "user" $sql)
                 "redis" (dict "keyPrefix" (printf "%s:%s:" $tenant $svc))
                 "rabbitmq" (dict "vhost" $tenant "user" (printf "%s-%s" $tenant $svc))
-                "kafka" (dict "topicPrefix" (printf "%s." $tenant))) }}
+                "kafka" (dict "topicPrefix" (printf "%s." $tenant) "user" (printf "%s-%s" $tenant $svc))) }}
     {{- end }}
     {{- $imageTag := dig "imageTag" "" . | toString }}
     {{- if $imageTag }}
