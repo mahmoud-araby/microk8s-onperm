@@ -228,7 +228,7 @@ serviceMonitor:
   enabled: true
   interval: 30s
   path: /metrics
-  istioMtls: false
+  istioMtls: true   # mesh-wide STRICT mTLS; Prometheus mounts Istio certs at /etc/prom-certs
   labels: {}
   # -- (extra)
   exporter:

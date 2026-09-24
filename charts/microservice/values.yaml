@@ -432,8 +432,8 @@ serviceMonitor:
   interval: 15s
   path: /metrics
   # -- (extra) Scrape through Istio mTLS (Prometheus mounts Istio certs at /etc/prom-certs).
-  #    Required when the namespace enforces STRICT mTLS and Prometheus is outside the mesh.
-  istioMtls: false
+  #    Default true: the platform enforces mesh-wide STRICT mTLS (gitops/platform/core/istio).
+  istioMtls: true
   # -- (extra)
   scrapeTimeout: 10s
   labels: {}
