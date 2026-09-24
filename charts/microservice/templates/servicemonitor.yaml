@@ -1,0 +1,66 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- $sm := .Values.serviceMonitor }}
+# Headless metrics Service selecting ALL pods (stable + canary). Argo Rollouts never touches it, so every pod
+# is scraped exactly once (the stable/canary Services overlap outside of a canary).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "microservice.fullname" . }}-metrics
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+    platform.example.com/metrics: "true"
+  annotations:
+    networking.istio.io/exportTo: "."
+spec:
+  clusterIP: None
+  selector:
+    {{- include "microservice.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.containerPort }}
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "microservice.fullname" . }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "microservice.selectorLabels" . | nindent 6 }}
+      platform.example.com/metrics: "true"
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  podTargetLabels:
+    - version
+    - role
+    - platform.example.com/tenant
+  endpoints:
+    - port: http
+      path: {{ $sm.path }}
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout | default "10s" }}
+      {{- if $sm.istioMtls }}
+      # Prometheus presents Istio workload certs (mounted at /etc/prom-certs) to pass STRICT mTLS.
+      scheme: https
+      tlsConfig:
+        caFile: /etc/prom-certs/root-cert.pem
+        certFile: /etc/prom-certs/cert-chain.pem
+        keyFile: /etc/prom-certs/key.pem
+        insecureSkipVerify: true
+      {{- else }}
+      scheme: http
+      {{- end }}
+      relabelings:
+        - targetLabel: tenant
+          replacement: {{ include "microservice.tenant" . | quote }}
+        - targetLabel: service_version
+          replacement: {{ .Values.service.version | quote }}
+{{- end }}

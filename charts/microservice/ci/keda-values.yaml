@@ -1,0 +1,41 @@
+# Queue worker scaled by KEDA on RabbitMQ queue depth + Kafka consumer lag (HPA disabled automatically).
+service:
+  name: notifications
+  version: v1
+language: dotnet
+tenant: globex
+image:
+  repository: platform/notifications
+  tag: "1.0.0"
+dependencies:
+  rabbitmq: {enabled: true, vhost: globex}
+  kafka: {enabled: true}
+kong:
+  enabled: false
+autoscaling:
+  hpa: {enabled: true}
+  keda:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 40
+    cpu: 0
+    triggerAuthentication:
+      enabled: true
+      secretTargetRef:
+        - {parameter: host, key: RABBITMQ_URI}
+    triggers:
+      - type: rabbitmq
+        metadata:
+          protocol: amqp
+          queueName: '{{ .Values.tenant }}.notifications'
+          mode: QueueLength
+          value: "100"
+        authenticationRef:
+          name: '{{ include "microservice.fullname" . }}-keda'
+      - type: kafka
+        metadata:
+          bootstrapServers: kafka-kafka-bootstrap.data-kafka.svc.cluster.local:9092
+          consumerGroup: '{{ .Values.tenant }}.{{ include "microservice.fullname" . }}'
+          topic: '{{ .Values.tenant }}.orders-events'
+          lagThreshold: "500"
+          offsetResetPolicy: latest

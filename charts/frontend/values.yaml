@@ -1,0 +1,300 @@
+# -----------------------------------------------------------------------------
+# charts/frontend - SPA / static hosting on nginx-unprivileged.
+#
+# Binding interface: docs/chart-interfaces.md (interface keys are never renamed;
+# keys marked "extra" are chart additions).
+# fullname = <name> (shared) or <name>-<tenant> (tenant specific), e.g. web / web-acme.
+# -----------------------------------------------------------------------------
+
+# -- Frontend name (app.kubernetes.io/name).
+name: web
+
+# -- Tenant id. "" = shared frontend (app.example.com); set for a tenant build (<tenant>.app.example.com).
+tenant: ""
+
+# -- (extra) Environment name (exposed as runtime config "environment").
+environment: production
+
+# -- (extra) Major UI version -> "version" label (Istio/Kiali telemetry).
+version: v1
+
+image:
+  registry: harbor.ops.example.local
+  repository: platform/web
+  tag: "1.0.0"
+  # -- (extra)
+  digest: ""
+  # -- (extra)
+  pullPolicy: IfNotPresent
+
+# -- (extra)
+imagePullSecrets:
+  - name: harbor-pull
+
+# -- Replicas when no autoscaler is enabled.
+replicaCount: 3
+
+# -- Rendered to /usr/share/nginx/html/config.js as `window.__CONFIG__ = {...}` so a single image serves
+#    every tenant/environment. String values go through `tpl`. Served with Cache-Control no-store.
+#    tenantId defaults to .Values.tenant.
+runtimeConfig:
+  apiBaseUrl: https://api.example.com
+  authUrl: 'https://keycloak.example.com/realms/{{ .Values.tenant | default "platform" }}'
+  tenantId: ""
+
+# -- Public hostnames served through Kong (shared: app.example.com; tenant: <tenant>.app.example.com).
+hosts:
+  - app.example.com
+
+kong:
+  enabled: true
+  rateLimit:
+    minute: 6000
+    # -- (extra)
+    enabled: true
+    policy: redis
+    limitBy: ip
+    redis:
+      host: redis.data-redis.svc.cluster.local
+      port: 6379
+      database: 0
+      timeout: 2000
+      passwordSecret: {name: "", key: ""}
+  # -- (extra) Extra KongPlugin/KongClusterPlugin names.
+  plugins: []
+  # -- (extra)
+  ingressClassName: kong
+  correlationId: {enabled: true, headerName: X-Correlation-ID}
+  prometheus: {enabled: true}
+  annotations: {}
+
+tls:
+  enabled: true
+  # -- cert-manager ClusterIssuer (letsencrypt-prod for public hosts, internal-ca for internal ones).
+  issuer: letsencrypt-prod
+  # -- (extra) Default <fullname>-tls.
+  secretName: ""
+  # -- (extra) false = use an existing (e.g. wildcard) secret without cert-manager.
+  certManager: true
+
+cache:
+  # -- max-age for index.html and SPA routes (0 -> "no-cache": always revalidate).
+  htmlMaxAge: 0
+  # -- max-age for fingerprinted build assets (served with "immutable").
+  assetsMaxAge: 31536000
+  # -- (extra) max-age for other static files (favicon, robots.txt, manifest, images without hash).
+  staticMaxAge: 3600
+  # -- (extra) nginx regex (case-insensitive) identifying fingerprinted assets.
+  immutablePathRegex: '^/(assets|static)/|[.-][0-9a-f]{8,}\.(js|mjs|css|map|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|webp|avif|ico|wasm)$'
+
+securityHeaders:
+  # -- Content-Security-Policy (templated with tpl, so it can reference runtimeConfig URLs).
+  csp: >-
+    default-src 'self';
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: https:;
+    font-src 'self' data:;
+    connect-src 'self' {{ .Values.runtimeConfig.apiBaseUrl }} https://keycloak.example.com https://*.api.example.com;
+    frame-src 'self' https://keycloak.example.com;
+    frame-ancestors 'none';
+    base-uri 'self';
+    form-action 'self' https://keycloak.example.com;
+    object-src 'none';
+    upgrade-insecure-requests
+  # -- (extra)
+  hsts: "max-age=63072000; includeSubDomains; preload"
+  frameOptions: DENY
+  referrerPolicy: strict-origin-when-cross-origin
+  permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+  crossOriginOpenerPolicy: same-origin
+
+# -- (extra) nginx tuning.
+nginx:
+  port: 8080
+  # -- Scale with resources.requests.cpu (1-2 workers per requested core).
+  workerProcesses: 2
+  workerConnections: 4096
+  # -- Load the brotli filter module (only if the image ships ngx_http_brotli_*_module.so).
+  brotli: false
+  gzipStatic: true
+  # -- Raw nginx directives appended inside the main server block.
+  extraServerConfig: ""
+  # -- Internal stub_status listener (loopback only) scraped by the exporter sidecar.
+  statusPort: 8081
+
+rollout:
+  # -- Argo Rollouts canary for the frontend too (false -> Deployment RollingUpdate).
+  enabled: true
+  # -- (extra)
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: {duration: 2m}
+      - setWeight: 50
+      - pause: {duration: 5m}
+      - setWeight: 100
+    analysis:
+      enabled: true
+      successRate: 0.99
+      p95LatencyMs: 300
+      interval: 1m
+      failureLimit: 2
+      startingStep: 1
+      passOnNoTraffic: true
+      prometheusAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+      window: 2m
+    maxSurge: "25%"
+    maxUnavailable: 0
+    abortScaleDownDelaySeconds: 30
+  # -- (extra) During a canary, index.html of one version may request fingerprinted assets that only the
+  #    other version has. When true, nginx fetches a missing asset from the canary pods and then from the
+  #    stable pods (loop-guarded).
+  assetFallback: true
+  revisionHistoryLimit: 5
+
+# -- (extra) Istio settings (same shape as charts/microservice).
+istio:
+  enabled: true
+  timeout: 15s
+  retries:
+    attempts: 2
+    perTryTimeout: 5s
+    retryOn: "5xx,reset,connect-failure,refused-stream"
+  circuitBreaker:
+    consecutive5xxErrors: 5
+    consecutiveGatewayErrors: 5
+    interval: 10s
+    baseEjectionTime: 30s
+    maxEjectionPercent: 50
+  connectionPool:
+    tcp: {maxConnections: 4000, connectTimeout: 2s}
+    http: {http1MaxPendingRequests: 4000, http2MaxRequests: 8000, maxRequestsPerConnection: 0, maxRetries: 10}
+  loadBalancer: LEAST_REQUEST
+  internalGateway:
+    enabled: false
+    host: ""
+    gateway: istio-internal/internal-gateway
+  authorizationPolicy:
+    enabled: true
+    allowedNamespaces: [kong, istio-internal]
+    metricsNamespaces: [monitoring]
+  trustDomain: cluster.local
+  proxy:
+    cpu: 50m
+    memory: 64Mi
+    memoryLimit: 256Mi
+
+autoscaling:
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    cpu: 70
+    memory: 0
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        selectPolicy: Max
+        policies:
+          - {type: Percent, value: 100, periodSeconds: 15}
+          - {type: Pods, value: 4, periodSeconds: 15}
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        selectPolicy: Min
+        policies:
+          - {type: Percent, value: 10, periodSeconds: 60}
+  keda:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 50
+    triggers: []
+    pollingInterval: 15
+    cooldownPeriod: 300
+    cpu: 70
+
+pdb:
+  enabled: true
+  minAvailable: "50%"
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  zoneWhenUnsatisfiable: ScheduleAnyway
+  hostnameWhenUnsatisfiable: ScheduleAnyway
+
+# -- nginx-prometheus-exporter sidecar + ServiceMonitor.
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  path: /metrics
+  istioMtls: false
+  labels: {}
+  # -- (extra)
+  exporter:
+    image:
+      registry: harbor.ops.example.local
+      repository: dockerhub/nginx/nginx-prometheus-exporter
+      tag: "1.3.0"
+    port: 9113
+    resources:
+      requests: {cpu: 10m, memory: 16Mi}
+      limits: {memory: 32Mi}
+
+# -- (extra) Alerts (5xx ratio and p95 via Istio metrics, restarts).
+prometheusRule:
+  enabled: true
+  errorRateThreshold: 0.02
+  p95LatencyMs: 500
+  restartThreshold: 3
+  labels: {}
+
+networkPolicy:
+  enabled: true
+  ingressNamespaces: [kong, istio-internal, istio-system, monitoring]
+  egressNamespaces: [istio-system]
+  extraEgress: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# -- (extra)
+probes:
+  startup: {path: /healthz, failureThreshold: 12, periodSeconds: 5}
+  liveness: {path: /healthz, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+  readiness: {path: /healthz, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+
+# -- (extra)
+lifecycle:
+  preStopSleepSeconds: 5
+  terminationGracePeriodSeconds: 30
+  preStopMode: sleep
+
+# -- (extra) UID the nginx container runs as (non-root; nginx-unprivileged works with arbitrary UIDs).
+runAsUser: 10001
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector:
+  workload-tier: apps
+
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+# -- (extra)
+extraVolumes: []
+extraVolumeMounts: []
+
+tests:
+  enabled: true

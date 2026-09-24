@@ -1,0 +1,43 @@
+{{- if and .Values.rollout.enabled .Values.rollout.canary.analysis.enabled .Values.istio.enabled }}
+{{- $a := .Values.rollout.canary.analysis }}
+{{- $canary := include "microservice.canaryName" . }}
+{{- $sel := printf "reporter=\"destination\",destination_service_name=%q,destination_service_namespace=%q" $canary .Release.Namespace }}
+{{- $guard := ternary "len(result) == 0 || isNaN(result[0]) || " "" (ne $a.passOnNoTraffic false) }}
+{{- $w := $a.window | default "2m" }}
+# Background analysis for the canary: Istio metrics reported by the canary pods' sidecars
+# (destination_service_name = <fullname>-canary thanks to host-level traffic splitting).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "microservice.fullname" . }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  metrics:
+    - name: success-rate
+      interval: {{ $a.interval }}
+      failureLimit: {{ $a.failureLimit }}
+      consecutiveErrorLimit: 4
+      successCondition: {{ printf "%sresult[0] >= %v" $guard $a.successRate | quote }}
+      provider:
+        prometheus:
+          address: {{ $a.prometheusAddress | default "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090" }}
+          timeout: 20
+          query: |
+            sum(rate(istio_requests_total{ {{- $sel }},response_code!~"5.."}[{{ $w }}]))
+            /
+            sum(rate(istio_requests_total{ {{- $sel }}}[{{ $w }}]))
+    - name: p95-latency
+      interval: {{ $a.interval }}
+      failureLimit: {{ $a.failureLimit }}
+      consecutiveErrorLimit: 4
+      successCondition: {{ printf "%sresult[0] <= %v" $guard $a.p95LatencyMs | quote }}
+      provider:
+        prometheus:
+          address: {{ $a.prometheusAddress | default "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090" }}
+          timeout: 20
+          query: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(istio_request_duration_milliseconds_bucket{ {{- $sel }}}[{{ $w }}]))
+            )
+{{- end }}

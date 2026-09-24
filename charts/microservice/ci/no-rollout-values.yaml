@@ -1,0 +1,32 @@
+# Plain Deployment (RollingUpdate), no Istio, no Kong, fixed replicas, no autoscaling, Python, apm off.
+service:
+  name: reports
+  version: v1
+language: python
+image:
+  repository: platform/reports
+  tag: "0.9.0"
+replicaCount: 2
+rollout:
+  enabled: false
+istio:
+  enabled: false
+kong:
+  enabled: false
+autoscaling:
+  hpa: {enabled: false}
+  keda: {enabled: false}
+externalSecret:
+  enabled: false
+apm:
+  enabled: false
+topologySpread:
+  enabled: false
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: workload-tier, operator: In, values: [apps]}
+lifecycle:
+  preStopMode: exec

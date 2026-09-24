@@ -1,0 +1,55 @@
+{{- $keda := .Values.autoscaling.keda }}
+{{- if $keda.enabled }}
+{{- $fullname := include "microservice.fullname" . }}
+{{- if and (not $keda.triggers) (not $keda.cpu) }}
+{{- fail "autoscaling.keda.enabled requires autoscaling.keda.triggers (or autoscaling.keda.cpu)" }}
+{{- end }}
+{{- if $keda.triggerAuthentication.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ $fullname }}-keda
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    {{- range $keda.triggerAuthentication.secretTargetRef }}
+    - parameter: {{ .parameter }}
+      name: {{ .name | default (include "microservice.secretName" $) }}
+      key: {{ .key }}
+    {{- end }}
+---
+{{- end }}
+# KEDA owns the HPA (keda-hpa-<name>); the chart's HPA is not rendered when KEDA is enabled.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: {{ include "microservice.workloadApiVersion" . }}
+    kind: {{ include "microservice.workloadKind" . }}
+    name: {{ $fullname }}
+  minReplicaCount: {{ $keda.minReplicas }}
+  maxReplicaCount: {{ $keda.maxReplicas }}
+  pollingInterval: {{ $keda.pollingInterval | default 15 }}
+  cooldownPeriod: {{ $keda.cooldownPeriod | default 300 }}
+  {{- with .Values.autoscaling.hpa.behavior }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        {{- toYaml . | nindent 8 }}
+  {{- end }}
+  triggers:
+    {{- if $keda.cpu }}
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ $keda.cpu | quote }}
+    {{- end }}
+    {{- with $keda.triggers }}
+    {{- tpl (toYaml .) $ | nindent 4 }}
+    {{- end }}
+{{- end }}

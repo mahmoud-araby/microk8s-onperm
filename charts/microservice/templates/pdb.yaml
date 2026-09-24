@@ -1,0 +1,20 @@
+{{- $min := int .Values.replicaCount }}
+{{- if .Values.autoscaling.keda.enabled }}{{ $min = int .Values.autoscaling.keda.minReplicas }}{{ else if .Values.autoscaling.hpa.enabled }}{{ $min = int .Values.autoscaling.hpa.minReplicas }}{{ end }}
+{{- if and .Values.pdb.enabled (gt $min 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "microservice.fullname" . }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "microservice.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,34 @@
+{{- if .Values.istio.enabled }}
+{{- $hosts := list (include "microservice.fullname" .) }}
+{{- if .Values.rollout.enabled }}{{- $hosts = append $hosts (include "microservice.canaryName" .) }}{{- end }}
+{{- range $host := $hosts }}
+---
+# Connection pool (bulkhead) + outlier detection (circuit breaker) + mTLS for {{ $host }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ $host }}
+  labels:
+    {{- include "microservice.labels" $ | nindent 4 }}
+spec:
+  host: {{ printf "%s.%s.svc.cluster.local" $host $.Release.Namespace }}
+  trafficPolicy:
+    loadBalancer:
+      simple: {{ $.Values.istio.loadBalancer | default "LEAST_REQUEST" }}
+    {{- with $.Values.istio.connectionPool }}
+    connectionPool:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $.Values.istio.circuitBreaker }}
+    outlierDetection:
+      consecutive5xxErrors: {{ .consecutive5xxErrors }}
+      consecutiveGatewayErrors: {{ .consecutiveGatewayErrors }}
+      interval: {{ .interval }}
+      baseEjectionTime: {{ .baseEjectionTime }}
+      maxEjectionPercent: {{ .maxEjectionPercent }}
+      minHealthPercent: {{ .minHealthPercent | default 0 }}
+    {{- end }}
+    tls:
+      mode: ISTIO_MUTUAL
+{{- end }}
+{{- end }}

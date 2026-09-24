@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "microservice.fullname" . }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.kong.enabled }}
+    # Kong proxies to the Service (ClusterIP) instead of pod IPs, so the Istio sidecar in the Kong pod
+    # applies this service's VirtualService (canary weights, retries, timeouts) and DestinationRule.
+    ingress.kubernetes.io/service-upstream: "true"
+    konghq.com/protocol: http
+    # Host header sent upstream must match the VirtualService hosts, otherwise the Kong sidecar
+    # cannot select the route (used together with konghq.com/preserve-host: "false" on the Ingress).
+    konghq.com/host-header: {{ printf "%s.%s.svc.cluster.local" (include "microservice.fullname" .) .Release.Namespace }}
+    {{- end }}
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "microservice.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      appProtocol: http

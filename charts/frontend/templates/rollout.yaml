@@ -1,0 +1,49 @@
+{{- if .Values.rollout.enabled }}
+{{- $f := include "frontend.fullname" . }}
+{{- $c := .Values.rollout.canary }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+spec:
+  {{- if not (include "frontend.autoscaled" .) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.rollout.revisionHistoryLimit | default 5 }}
+  selector:
+    matchLabels:
+      {{- include "frontend.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "frontend.podTemplate" . | nindent 4 }}
+  strategy:
+    canary:
+      stableService: {{ $f }}
+      canaryService: {{ include "frontend.canaryName" . }}
+      maxSurge: {{ $c.maxSurge | default "25%" | quote }}
+      maxUnavailable: {{ $c.maxUnavailable | default 0 }}
+      abortScaleDownDelaySeconds: {{ $c.abortScaleDownDelaySeconds | default 30 }}
+      stableMetadata:
+        labels:
+          role: stable
+      canaryMetadata:
+        labels:
+          role: canary
+      {{- if .Values.istio.enabled }}
+      trafficRouting:
+        istio:
+          virtualService:
+            name: {{ $f }}
+            routes:
+              - primary
+      {{- if $c.analysis.enabled }}
+      analysis:
+        templates:
+          - templateName: {{ $f }}
+        startingStep: {{ $c.analysis.startingStep | default 1 }}
+      {{- end }}
+      {{- end }}
+      steps:
+        {{- toYaml $c.steps | nindent 8 }}
+{{- end }}

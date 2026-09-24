@@ -1,0 +1,108 @@
+{{- if .Values.istio.enabled }}
+{{- $f := include "frontend.fullname" . }}
+{{- $ns := .Release.Namespace }}
+{{- $i := .Values.istio }}
+# Route weights of "primary" are managed by Argo Rollouts during a canary (Argo CD ignoreDifferences, see README).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ $f }}
+    - {{ printf "%s.%s.svc.cluster.local" $f $ns }}
+    {{- if $i.internalGateway.enabled }}
+    - {{ required "istio.internalGateway.host is required when the internal gateway is enabled" $i.internalGateway.host }}
+    {{- end }}
+  {{- if $i.internalGateway.enabled }}
+  gateways:
+    - mesh
+    - {{ $i.internalGateway.gateway | default "istio-internal/internal-gateway" }}
+  {{- end }}
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: {{ $f }}
+            port:
+              number: 80
+          weight: 100
+        {{- if .Values.rollout.enabled }}
+        - destination:
+            host: {{ include "frontend.canaryName" . }}
+            port:
+              number: 80
+          weight: 0
+        {{- end }}
+      timeout: {{ $i.timeout }}
+      {{- with $i.retries }}
+      retries:
+        attempts: {{ .attempts }}
+        perTryTimeout: {{ .perTryTimeout }}
+        retryOn: {{ .retryOn | quote }}
+      {{- end }}
+{{- $hosts := list $f }}
+{{- if .Values.rollout.enabled }}{{ $hosts = append $hosts (include "frontend.canaryName" .) }}{{ end }}
+{{- if include "frontend.assetFallback" . }}{{ $hosts = append $hosts (include "frontend.stableDirectName" .) }}{{ end }}
+{{- range $h := $hosts }}
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ $h }}
+  labels:
+    {{- include "frontend.labels" $ | nindent 4 }}
+spec:
+  host: {{ printf "%s.%s.svc.cluster.local" $h $ns }}
+  trafficPolicy:
+    loadBalancer:
+      simple: {{ $i.loadBalancer | default "LEAST_REQUEST" }}
+    {{- with $i.connectionPool }}
+    connectionPool:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $i.circuitBreaker }}
+    outlierDetection:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    tls:
+      mode: ISTIO_MUTUAL
+{{- end }}
+{{- if $i.authorizationPolicy.enabled }}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "frontend.selectorLabels" . | nindent 6 }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: [{{ $ns | quote }}]
+    {{- with $i.authorizationPolicy.allowedNamespaces }}
+    - from:
+        - source:
+            principals:
+              {{- range . }}
+              - {{ printf "%s/ns/%s/sa/*" ($i.trustDomain | default "cluster.local") . | quote }}
+              {{- end }}
+    {{- end }}
+    {{- with $i.authorizationPolicy.metricsNamespaces }}
+    - from:
+        - source:
+            namespaces: {{ toJson . }}
+      to:
+        - operation:
+            ports: [{{ $.Values.serviceMonitor.exporter.port | quote }}]
+            methods: ["GET"]
+    {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,104 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $f := include "microservice.fullname" . }}
+{{- $ns := .Release.Namespace }}
+{{- $r := .Values.prometheusRule }}
+{{- $sel := printf "reporter=\"destination\",destination_service_namespace=%q,destination_service_name=~%q" $ns (printf "%s|%s-canary" $f $f) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+    {{- with $r.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $f }}.{{ $ns }}.rules
+      rules:
+        {{- if .Values.istio.enabled }}
+        - alert: {{ printf "%sHighErrorRate" (camelcase (replace "-" "_" $f)) }}
+          expr: |
+            (
+              sum(rate(istio_requests_total{ {{- $sel }},response_code=~"5.."}[5m]))
+              /
+              sum(rate(istio_requests_total{ {{- $sel }}}[5m]))
+            ) > {{ $r.errorRateThreshold }}
+          for: 5m
+          labels:
+            severity: critical
+            namespace: {{ $ns }}
+            service: {{ $f }}
+            tenant: {{ include "microservice.tenant" . }}
+          annotations:
+            summary: {{ printf "%s in %s: 5xx ratio above %v" $f $ns $r.errorRateThreshold | quote }}
+            description: {{ `5xx ratio is {{ $value | humanizePercentage }} over the last 5m.` | quote }}
+            {{- with $r.runbookBaseUrl }}
+            runbook_url: {{ printf "%s/high-error-rate.md" (trimSuffix "/" .) }}
+            {{- end }}
+        - alert: {{ printf "%sHighLatencyP95" (camelcase (replace "-" "_" $f)) }}
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(istio_request_duration_milliseconds_bucket{ {{- $sel }}}[5m]))
+            ) > {{ $r.p95LatencyMs }}
+          for: 10m
+          labels:
+            severity: warning
+            namespace: {{ $ns }}
+            service: {{ $f }}
+            tenant: {{ include "microservice.tenant" . }}
+          annotations:
+            summary: {{ printf "%s in %s: p95 latency above %vms" $f $ns $r.p95LatencyMs | quote }}
+            description: {{ `p95 latency is {{ $value | humanize }}ms.` | quote }}
+        {{- end }}
+        - alert: {{ printf "%sPodRestarts" (camelcase (replace "-" "_" $f)) }}
+          expr: |
+            sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace="{{ $ns }}",pod=~"{{ $f }}-[a-z0-9]+-[a-z0-9]+"}[15m])) > {{ $r.restartThreshold }}
+          for: 5m
+          labels:
+            severity: warning
+            namespace: {{ $ns }}
+            service: {{ $f }}
+          annotations:
+            summary: {{ printf "%s pods restarting" $f | quote }}
+            description: {{ `Pod {{ $labels.pod }} restarted {{ $value }} times in 15m.` | quote }}
+        {{- if .Values.istio.enabled }}
+        - alert: {{ printf "%sCircuitBreakerOpen" (camelcase (replace "-" "_" $f)) }}
+          # needs envoy outlier stats (proxyStatsMatcher .*outlier_detection.* on the calling workloads)
+          expr: |
+            sum(envoy_cluster_outlier_detection_ejections_active{cluster_name=~"outbound\\|{{ .Values.service.port }}\\|\\|({{ $f }}|{{ $f }}-canary)\\.{{ $ns }}\\.svc\\.cluster\\.local"}) > 0
+          for: 2m
+          labels:
+            severity: warning
+            namespace: {{ $ns }}
+            service: {{ $f }}
+          annotations:
+            summary: {{ printf "Istio outlier detection is ejecting %s endpoints" $f | quote }}
+            description: {{ `{{ $value }} endpoints currently ejected by callers' circuit breakers.` | quote }}
+        {{- end }}
+        {{- $maxReplicas := ternary .Values.autoscaling.keda.maxReplicas .Values.autoscaling.hpa.maxReplicas (eq .Values.autoscaling.keda.enabled true) }}
+        {{- if or .Values.autoscaling.hpa.enabled .Values.autoscaling.keda.enabled }}
+        - alert: {{ printf "%sAutoscalerAtMax" (camelcase (replace "-" "_" $f)) }}
+          expr: |
+            max(kube_horizontalpodautoscaler_status_current_replicas{namespace="{{ $ns }}",horizontalpodautoscaler=~"(keda-hpa-)?{{ $f }}"}) >= {{ $maxReplicas }}
+          for: 15m
+          labels:
+            severity: warning
+            namespace: {{ $ns }}
+            service: {{ $f }}
+          annotations:
+            summary: {{ printf "%s is pinned at max replicas (%v)" $f $maxReplicas | quote }}
+        {{- end }}
+        {{- if .Values.rollout.enabled }}
+        - alert: {{ printf "%sRolloutDegraded" (camelcase (replace "-" "_" $f)) }}
+          expr: |
+            max(rollout_info{namespace="{{ $ns }}",name="{{ $f }}",phase=~"Degraded|Error"}) == 1
+          for: 1m
+          labels:
+            severity: critical
+            namespace: {{ $ns }}
+            service: {{ $f }}
+          annotations:
+            summary: {{ printf "Argo Rollout %s is degraded (canary aborted?)" $f | quote }}
+        {{- end }}
+{{- end }}

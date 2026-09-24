@@ -1,0 +1,48 @@
+{{- if .Values.istio.enabled }}
+{{- $fullname := include "microservice.fullname" . }}
+{{- $ig := .Values.istio.internalGateway }}
+# NOTE: while a canary is running Argo Rollouts rewrites the weights of route "primary".
+# Configure Argo CD ignoreDifferences for .spec.http[].route[].weight (see chart README).
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ $fullname }}
+    - {{ printf "%s.%s.svc.cluster.local" $fullname .Release.Namespace }}
+    {{- if $ig.enabled }}
+    - {{ $ig.host | default (printf "%s.%s.internal.example.local" $fullname (include "microservice.tenant" .)) }}
+    {{- end }}
+  {{- if $ig.enabled }}
+  gateways:
+    - mesh
+    - {{ $ig.gateway | default "istio-internal/internal-gateway" }}
+  {{- end }}
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: {{ $fullname }}
+            port:
+              number: {{ .Values.service.port }}
+          weight: 100
+        {{- if .Values.rollout.enabled }}
+        - destination:
+            host: {{ include "microservice.canaryName" . }}
+            port:
+              number: {{ .Values.service.port }}
+          weight: 0
+        {{- end }}
+      {{- with .Values.istio.timeout }}
+      timeout: {{ . }}
+      {{- end }}
+      {{- with .Values.istio.retries }}
+      retries:
+        attempts: {{ .attempts }}
+        perTryTimeout: {{ .perTryTimeout }}
+        retryOn: {{ .retryOn | quote }}
+      {{- end }}
+{{- end }}

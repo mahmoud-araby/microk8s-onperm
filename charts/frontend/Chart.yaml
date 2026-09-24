@@ -1,0 +1,18 @@
+apiVersion: v2
+name: frontend
+description: >-
+  SPA / static frontend hosting on nginx-unprivileged: runtime config.js per tenant (no rebuild), SPA
+  fallback, cache-control and security headers, Argo Rollouts canary with Istio routing, Kong exposure with
+  TLS and rate limiting, nginx Prometheus exporter, HPA/KEDA, PDB and NetworkPolicy.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.28.0-0"
+keywords: [frontend, spa, nginx, kong, istio, argo-rollouts]
+home: https://github.com/mahmoud-araby/microk8s-onperm
+sources:
+  - https://github.com/mahmoud-araby/microk8s-onperm/tree/main/charts/frontend
+maintainers:
+  - name: platform-team
+annotations:
+  platform.example.com/interface: docs/chart-interfaces.md#chartsfrontend

@@ -1,0 +1,113 @@
+{{- if .Values.kong.enabled }}
+{{- $f := include "frontend.fullname" . }}
+{{- $k := .Values.kong }}
+{{- $plugins := list }}
+{{- if $k.correlationId.enabled }}{{ $plugins = append $plugins (printf "%s-correlation-id" $f) }}{{ end }}
+{{- if $k.rateLimit.enabled }}{{ $plugins = append $plugins (printf "%s-rate-limit" $f) }}{{ end }}
+{{- if $k.prometheus.enabled }}{{ $plugins = append $plugins (printf "%s-prometheus" $f) }}{{ end }}
+{{- $plugins = concat $plugins ($k.plugins | default list) }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+  annotations:
+    konghq.com/protocols: https
+    konghq.com/https-redirect-status-code: "308"
+    konghq.com/strip-path: "false"
+    konghq.com/preserve-host: "false"
+    {{- if $plugins }}
+    konghq.com/plugins: {{ join "," $plugins | quote }}
+    {{- end }}
+    {{- if and .Values.tls.enabled .Values.tls.certManager }}
+    cert-manager.io/cluster-issuer: {{ .Values.tls.issuer | default "letsencrypt-prod" }}
+    {{- end }}
+    {{- with $k.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $k.ingressClassName | default "kong" }}
+  {{- if .Values.tls.enabled }}
+  tls:
+    - hosts:
+        {{- range .Values.hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .Values.tls.secretName | default (printf "%s-tls" $f) }}
+  {{- end }}
+  rules:
+    {{- range required "hosts must contain at least one hostname" .Values.hosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $f }}
+                port:
+                  name: http
+    {{- end }}
+{{- if $k.correlationId.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $f }}-correlation-id
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+plugin: correlation-id
+config:
+  header_name: {{ $k.correlationId.headerName | default "X-Correlation-ID" }}
+  generator: uuid#counter
+  echo_downstream: true
+{{- end }}
+{{- if $k.rateLimit.enabled }}
+{{- $rl := $k.rateLimit }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $f }}-rate-limit
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+plugin: rate-limiting
+config:
+  minute: {{ int $rl.minute }}
+  policy: {{ $rl.policy | default "redis" }}
+  limit_by: {{ $rl.limitBy | default "ip" }}
+  fault_tolerant: true
+  hide_client_headers: false
+  {{- if eq ($rl.policy | default "redis") "redis" }}
+  redis:
+    host: {{ $rl.redis.host }}
+    port: {{ int $rl.redis.port }}
+    database: {{ int $rl.redis.database }}
+    timeout: {{ int $rl.redis.timeout }}
+  {{- end }}
+{{- if and (eq ($rl.policy | default "redis") "redis") $rl.redis.passwordSecret.name }}
+configPatches:
+  - path: /redis/password
+    valueFrom:
+      secretKeyRef:
+        name: {{ $rl.redis.passwordSecret.name }}
+        key: {{ $rl.redis.passwordSecret.key | default "password" }}
+{{- end }}
+{{- end }}
+{{- if $k.prometheus.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $f }}-prometheus
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+plugin: prometheus
+config:
+  status_code_metrics: true
+  latency_metrics: true
+  bandwidth_metrics: true
+  upstream_health_metrics: true
+{{- end }}
+{{- end }}

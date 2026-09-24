@@ -1,0 +1,50 @@
+{{- if .Values.rollout.enabled }}
+{{- $fullname := include "microservice.fullname" . }}
+{{- $canary := .Values.rollout.canary }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  {{- if not (include "microservice.autoscaled" .) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.rollout.revisionHistoryLimit | default 5 }}
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      {{- include "microservice.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "microservice.podTemplate" . | nindent 4 }}
+  strategy:
+    canary:
+      stableService: {{ $fullname }}
+      canaryService: {{ include "microservice.canaryName" . }}
+      maxSurge: {{ $canary.maxSurge | default "25%" | quote }}
+      maxUnavailable: {{ $canary.maxUnavailable | default 0 }}
+      abortScaleDownDelaySeconds: {{ $canary.abortScaleDownDelaySeconds | default 30 }}
+      stableMetadata:
+        labels:
+          role: stable
+      canaryMetadata:
+        labels:
+          role: canary
+      {{- if .Values.istio.enabled }}
+      trafficRouting:
+        istio:
+          virtualService:
+            name: {{ $fullname }}
+            routes:
+              - primary
+      {{- end }}
+      {{- if and $canary.analysis.enabled .Values.istio.enabled }}
+      analysis:
+        templates:
+          - templateName: {{ $fullname }}
+        startingStep: {{ $canary.analysis.startingStep | default 1 }}
+      {{- end }}
+      steps:
+        {{- toYaml $canary.steps | nindent 8 }}
+{{- end }}

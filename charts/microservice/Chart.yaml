@@ -1,0 +1,19 @@
+apiVersion: v2
+name: microservice
+description: >-
+  Generic enterprise Helm chart for .NET / Java / Python microservices on the MicroK8s platform:
+  Argo Rollouts canary with Istio weighted routing and Prometheus analysis, Kong external exposure,
+  Istio resilience (timeouts, retries, circuit breaking), HPA/KEDA autoscaling, External Secrets,
+  OpenTelemetry APM and dependency startup containers.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.28.0-0"
+keywords: [microservice, dotnet, java, python, istio, kong, argo-rollouts, keda, opentelemetry]
+home: https://github.com/mahmoud-araby/microk8s-onperm
+sources:
+  - https://github.com/mahmoud-araby/microk8s-onperm/tree/main/charts/microservice
+maintainers:
+  - name: platform-team
+annotations:
+  platform.example.com/interface: docs/chart-interfaces.md#chartsmicroservice

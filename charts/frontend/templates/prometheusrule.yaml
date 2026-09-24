@@ -1,0 +1,57 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $f := include "frontend.fullname" . }}
+{{- $ns := .Release.Namespace }}
+{{- $r := .Values.prometheusRule }}
+{{- $alert := camelcase (replace "-" "_" $f) }}
+{{- $sel := printf "reporter=\"destination\",destination_service_namespace=%q,destination_service_name=~%q" $ns (printf "%s|%s-canary" $f $f) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+    {{- with $r.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $f }}.{{ $ns }}.frontend.rules
+      rules:
+        {{- if .Values.istio.enabled }}
+        - alert: {{ $alert }}FrontendHighErrorRate
+          expr: |
+            (
+              sum(rate(istio_requests_total{ {{- $sel }},response_code=~"5.."}[5m]))
+              /
+              sum(rate(istio_requests_total{ {{- $sel }}}[5m]))
+            ) > {{ $r.errorRateThreshold }}
+          for: 5m
+          labels: {severity: critical, namespace: {{ $ns }}, service: {{ $f }}, tenant: {{ include "frontend.tenant" . }}}
+          annotations:
+            summary: {{ printf "%s: 5xx ratio above %v" $f $r.errorRateThreshold | quote }}
+            description: {{ `5xx ratio is {{ $value | humanizePercentage }}.` | quote }}
+        - alert: {{ $alert }}FrontendHighLatencyP95
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(istio_request_duration_milliseconds_bucket{ {{- $sel }}}[5m]))) > {{ $r.p95LatencyMs }}
+          for: 10m
+          labels: {severity: warning, namespace: {{ $ns }}, service: {{ $f }}, tenant: {{ include "frontend.tenant" . }}}
+          annotations:
+            summary: {{ printf "%s: p95 latency above %vms" $f $r.p95LatencyMs | quote }}
+        {{- end }}
+        - alert: {{ $alert }}FrontendPodRestarts
+          expr: |
+            sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace="{{ $ns }}",pod=~"{{ $f }}-[a-z0-9]+-[a-z0-9]+"}[15m])) > {{ $r.restartThreshold }}
+          for: 5m
+          labels: {severity: warning, namespace: {{ $ns }}, service: {{ $f }}}
+          annotations:
+            summary: {{ printf "%s pods restarting" $f | quote }}
+        {{- if .Values.serviceMonitor.enabled }}
+        - alert: {{ $alert }}FrontendNginxDown
+          expr: |
+            count(nginx_up{namespace="{{ $ns }}",service="{{ $f }}-metrics"} == 0) > 0
+          for: 5m
+          labels: {severity: warning, namespace: {{ $ns }}, service: {{ $f }}}
+          annotations:
+            summary: {{ printf "nginx-prometheus-exporter cannot reach nginx stub_status in %s pods" $f | quote }}
+        {{- end }}
+{{- end }}

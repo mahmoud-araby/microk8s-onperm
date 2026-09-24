@@ -1,0 +1,40 @@
+{{- if and .Values.istio.enabled .Values.istio.authorizationPolicy.enabled }}
+{{- $ap := .Values.istio.authorizationPolicy }}
+{{- $td := .Values.istio.trustDomain | default "cluster.local" }}
+# ALLOW policy: once present, every request not matching a rule below is denied (RBAC: access denied, 403).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "microservice.fullname" . }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "microservice.selectorLabels" . | nindent 6 }}
+  action: ALLOW
+  rules:
+    # workloads in the same namespace (tenant / shared-services)
+    - from:
+        - source:
+            namespaces: [{{ .Release.Namespace | quote }}]
+    {{- with $ap.allowedNamespaces }}
+    # gateways and integration layer (mTLS identities)
+    - from:
+        - source:
+            principals:
+              {{- range . }}
+              - {{ printf "%s/ns/%s/sa/*" $td . | quote }}
+              {{- end }}
+    {{- end }}
+    {{- with $ap.metricsNamespaces }}
+    # Prometheus scraping (metrics path only)
+    - from:
+        - source:
+            namespaces: {{ toJson . }}
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: [{{ $.Values.serviceMonitor.path | quote }}]
+    {{- end }}
+{{- end }}

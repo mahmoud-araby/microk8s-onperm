@@ -1,0 +1,38 @@
+# .NET 8 API, shared (pooled) tier, Postgres + Redis + RabbitMQ, canary rollout.
+service:
+  name: orders
+  version: v1
+language: dotnet
+tenant: ""
+environment: staging
+image:
+  repository: platform/orders
+  tag: "1.4.2"
+config:
+  Logging__LogLevel__Default: Information
+  FeatureManagement__NewCheckout: "true"
+  Tenant__Mode: '{{ ternary "dedicated" "shared" (ne .Values.tenant "") }}'
+env:
+  - name: ASPNETCORE_ENVIRONMENT
+    value: Staging
+dependencies:
+  postgres: {enabled: true, database: orders, user: orders_app, pooler: true}
+  redis: {enabled: true, db: 1}
+  rabbitmq: {enabled: true, vhost: shared}
+startup:
+  migrations:
+    enabled: true
+    command: ["dotnet", "Orders.Migrations.dll"]
+resources:
+  requests: {cpu: 500m, memory: 512Mi}
+  limits: {memory: 1Gi}
+istio:
+  internalGateway:
+    enabled: true
+    host: orders-v1.internal.example.local
+kong:
+  plugins: [cors-default]
+  versionHeaderRoute:
+    enabled: true
+autoscaling:
+  hpa: {enabled: true, minReplicas: 6, maxReplicas: 60, cpu: 65, memory: 80}

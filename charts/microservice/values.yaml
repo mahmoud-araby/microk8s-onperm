@@ -1,0 +1,514 @@
+# -----------------------------------------------------------------------------
+# charts/microservice - generic chart for .NET / Java / Python services.
+#
+# Binding interface: docs/chart-interfaces.md (keys below that are part of the
+# interface are never renamed; keys marked "extra" are chart additions).
+# Resource base name ("fullname") = <service.name>-<service.version>, e.g. orders-v1.
+# -----------------------------------------------------------------------------
+
+service:
+  # -- Logical service name (app.kubernetes.io/name). Required.
+  name: orders
+  # -- Major API version. Every version is its own release (orders-v1, orders-v2) and runs side by side. Required.
+  version: v1
+  # -- Kubernetes Service port (named "http").
+  port: 80
+  # -- Container port the application listens on (conventions: 8080; also serves /metrics).
+  containerPort: 8080
+  # -- (extra) app.kubernetes.io/component label.
+  component: api
+  # -- (extra) app.kubernetes.io/part-of label.
+  partOf: platform
+  # -- (extra) Extra annotations on the Services.
+  annotations: {}
+
+# -- Runtime language: dotnet | java | python. Drives runtime tuning env, APM agent injection and probe defaults.
+language: dotnet
+
+# -- Tenant id. "" = shared/pooled service (deployed to shared-services, tenant taken from the JWT claim by Kong).
+tenant: ""
+
+# -- Environment name (ENVIRONMENT env var, deployment.environment OTel attribute).
+environment: production
+
+image:
+  registry: harbor.ops.example.local
+  repository: platform/orders
+  # -- Image tag (also used as app.kubernetes.io/version and OTel service.version).
+  tag: "1.0.0"
+  # -- (extra) Optional immutable digest (sha256:...). When set it is appended to the reference.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: harbor-pull
+
+# -- Replicas when neither HPA nor KEDA is enabled (otherwise the autoscaler owns spec.replicas).
+replicaCount: 3
+
+# -- Non-secret configuration; rendered to ConfigMap "<fullname>-config" and loaded via envFrom.
+#    Values are passed through `tpl`, so "{{ .Values.tenant }}" works.
+config: {}
+#  FEATURE_X_ENABLED: "true"
+#  Logging__LogLevel__Default: Information
+
+# -- Extra env var entries (standard Kubernetes EnvVar objects). A name that collides with a
+#    chart-provided variable overrides it.
+env: []
+#  - name: ASPNETCORE_ENVIRONMENT
+#    value: Production
+
+# -- (extra) Extra envFrom sources appended after the chart's config/secret refs.
+envFrom: []
+
+externalSecret:
+  enabled: true
+  refreshInterval: 1h
+  # -- Vault KV v2 path under mount "secret" (ClusterSecretStore vault-backend).
+  #    Default: tenants/<tenant or "shared">/<service.name>. All keys land in Secret "<fullname>-secrets" (envFrom).
+  vaultPath: ""
+  # -- (extra) ESO API version. external-secrets.io/v1 is GA since ESO 0.17 (the platform runs >= 0.17);
+  #    set external-secrets.io/v1beta1 for older operators.
+  apiVersion: external-secrets.io/v1
+  # -- (extra) Secret store reference.
+  storeRef:
+    kind: ClusterSecretStore
+    name: vault-backend
+  # -- (extra) Additional explicit key mappings ({secretKey, remoteRef: {key, property}}).
+  data: []
+
+# -- (extra) In-cluster endpoints of the shared data services (docs/conventions.md "Well-known endpoints").
+endpoints:
+  postgres:
+    pooler: pg-main-pooler-rw.data-postgres.svc.cluster.local
+    rw: pg-main-rw.data-postgres.svc.cluster.local
+    ro: pg-main-ro.data-postgres.svc.cluster.local
+    port: 5432
+  redis:
+    host: redis.data-redis.svc.cluster.local
+    port: 6379
+    sentinel: redis-sentinel.data-redis.svc.cluster.local:26379
+    sentinelMaster: mymaster
+  rabbitmq:
+    host: rabbitmq.data-rabbitmq.svc.cluster.local
+    port: 5672
+  kafka:
+    bootstrap: kafka-kafka-bootstrap.data-kafka.svc.cluster.local:9092
+    bootstrapTls: kafka-kafka-bootstrap.data-kafka.svc.cluster.local:9093
+
+# -- Each enabled dependency injects the standard env vars (DB_*, REDIS_*, RABBITMQ_*, KAFKA_*) and a
+#    "wait-for-<dep>" startup container. Passwords come from the ExternalSecret-managed Secret.
+dependencies:
+  postgres:
+    enabled: false
+    # -- DB_NAME. Default: <service.name> (shared) or <tenant>_<service.name> (dedicated tenant).
+    database: ""
+    # -- DB_USER. Default: same as the database name.
+    user: ""
+    # -- true -> PgBouncer pooler (transaction pooling), false -> direct rw service.
+    pooler: true
+    # -- (extra) Secret key holding the password (in "<fullname>-secrets" unless passwordSecret is set).
+    passwordKey: DB_PASSWORD
+    # -- (extra) Override the Secret name holding the password.
+    passwordSecret: ""
+  redis:
+    enabled: false
+    db: 0
+    # -- REDIS_KEY_PREFIX. Default: "<tenant or shared>:<service.name>:".
+    keyPrefix: ""
+    # -- (extra)
+    passwordKey: REDIS_PASSWORD
+    # -- (extra)
+    passwordSecret: ""
+  rabbitmq:
+    enabled: false
+    vhost: "/"
+    # -- (extra) RABBITMQ_USER. Default: <tenant>-<service.name> or <service.name>.
+    user: ""
+    # -- (extra)
+    passwordKey: RABBITMQ_PASSWORD
+    # -- (extra)
+    passwordSecret: ""
+  kafka:
+    enabled: false
+    # -- (extra) Use the TLS listener (:9093).
+    tls: false
+    # -- (extra) KAFKA_TOPIC_PREFIX. Default: "<tenant>." for dedicated tenants, "" for shared.
+    topicPrefix: ""
+
+startup:
+  # -- Add one init container per enabled dependency that blocks until its TCP endpoint accepts connections.
+  waitForDependencies: true
+  # -- Run migrations with the application image before the app starts. `command` is required when enabled.
+  migrations:
+    enabled: false
+    command: []
+    # -- (extra)
+    args: []
+  # -- (extra) Give up waiting after this many seconds (the pod then restarts the init sequence).
+  timeoutSeconds: 300
+  # -- (extra) Image used for the wait-for containers (Harbor proxy cache of Docker Hub by default).
+  image:
+    registry: harbor.ops.example.local
+    repository: dockerhub/library/busybox
+    tag: "1.36.1"
+  # -- (extra) The platform runs Istio with native sidecars (istio-proxy is an init container that starts
+  #    first), so startup containers already have mesh connectivity. If native sidecars are disabled, set
+  #    false: startup containers then run as UID 1337, which istio-init excludes from traffic capture.
+  istioNativeSidecars: true
+  # -- (extra) Resources of the startup containers.
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {memory: 32Mi}
+
+# -- Extra init containers (appended after the chart-managed ones). Templated with `tpl`.
+initContainers: []
+
+# -- Extra sidecar containers appended to the pod's containers. Templated with `tpl`.
+sidecars: []
+
+extraVolumes: []
+extraVolumeMounts: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+# -- HTTP probes on the named port "http". Unset fields fall back to language defaults (see _helpers.tpl).
+probes:
+  startup:
+    path: /health/startup
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    path: /health/live
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /health/ready
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# -- (extra) Graceful shutdown (conventions: drain within 25s).
+lifecycle:
+  preStopSleepSeconds: 5
+  terminationGracePeriodSeconds: 30
+  # -- "sleep" = native lifecycle sleep action (k8s >= 1.30, no shell needed); "exec" = sh -c sleep.
+  preStopMode: sleep
+
+# -- (extra) Runtime tuning per language (used only for the active language).
+tuning:
+  java:
+    maxRAMPercentage: 75
+    # -- Appended to JAVA_TOOL_OPTIONS.
+    extraOptions: ""
+  dotnet:
+    gcServer: true
+    # -- Emitted as hex in DOTNET_GCHeapHardLimitPercent (the runtime parses it as hex).
+    gcHeapHardLimitPercent: 75
+    # -- DATAS: dynamically sizes server GC heaps (important without CPU limits).
+    gcDynamicAdaptation: true
+  python:
+    # -- WEB_CONCURRENCY override; 0 = computed as 2 * cpu-request-cores + 1 (min 1, max maxWorkers).
+    webConcurrency: 0
+    maxWorkers: 9
+
+# -- Argo Rollouts canary (if false -> plain Deployment with RollingUpdate maxSurge 25% / maxUnavailable 0).
+rollout:
+  enabled: true
+  canary:
+    steps:
+      - setWeight: 5
+      - pause: {duration: 2m}
+      - setWeight: 25
+      - pause: {duration: 5m}
+      - setWeight: 50
+      - pause: {duration: 5m}
+      - setWeight: 100
+    analysis:
+      enabled: true
+      # -- Minimum non-5xx ratio of canary traffic.
+      successRate: 0.99
+      # -- Maximum canary p95 latency.
+      p95LatencyMs: 500
+      interval: 1m
+      failureLimit: 2
+      # -- (extra) Step index at which background analysis starts (after the first setWeight).
+      startingStep: 1
+      # -- (extra) Treat "no canary traffic" (empty/NaN query result) as success.
+      passOnNoTraffic: true
+      # -- (extra) Prometheus address used by the AnalysisTemplate.
+      prometheusAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+      # -- (extra) PromQL range window.
+      window: 2m
+    # -- (extra)
+    maxSurge: "25%"
+    maxUnavailable: 0
+    # -- (extra) Keep the aborted canary ReplicaSet for this many seconds.
+    abortScaleDownDelaySeconds: 30
+  # -- (extra) Rollout revisionHistoryLimit.
+  revisionHistoryLimit: 5
+
+istio:
+  enabled: true
+  # -- Per-request timeout on the VirtualService route (overall, including retries).
+  timeout: 10s
+  retries:
+    attempts: 3
+    perTryTimeout: 3s
+    retryOn: "5xx,reset,connect-failure,refused-stream,retriable-4xx,gateway-error"
+  # -- Outlier detection (circuit breaker): eject hosts after consecutive errors.
+  circuitBreaker:
+    consecutive5xxErrors: 5
+    consecutiveGatewayErrors: 5
+    interval: 10s
+    baseEjectionTime: 30s
+    maxEjectionPercent: 50
+  # -- Connection pool limits (bulkhead): excess requests are rejected fast with 503 (UO flag).
+  connectionPool:
+    tcp:
+      maxConnections: 2000
+      connectTimeout: 2s
+    http:
+      http1MaxPendingRequests: 2000
+      http2MaxRequests: 4000
+      maxRequestsPerConnection: 0
+      maxRetries: 10
+  # -- ROUND_ROBIN | LEAST_REQUEST | RANDOM | PASSTHROUGH
+  loadBalancer: LEAST_REQUEST
+  # -- Expose via istio-internal/internal-gateway (private VIP), e.g. host orders-v1.internal.example.local.
+  internalGateway:
+    enabled: false
+    host: ""
+    # -- (extra)
+    gateway: istio-internal/internal-gateway
+  authorizationPolicy:
+    enabled: true
+    # -- Namespaces whose workloads (any service account) may call this service. Same namespace is always allowed.
+    allowedNamespaces: [kong, istio-internal, integration]
+    # -- (extra) Namespaces allowed to scrape metrics (GET on serviceMonitor.path).
+    metricsNamespaces: [monitoring]
+  # -- (extra) SPIFFE trust domain used in AuthorizationPolicy principals.
+  trustDomain: cluster.local
+  # -- (extra) Sidecar proxy settings (pod annotations).
+  proxy:
+    holdApplicationUntilProxyStarts: true
+    terminationDrainDuration: 25s
+    cpu: 100m
+    memory: 128Mi
+    cpuLimit: ""
+    memoryLimit: 256Mi
+    # -- Envoy stats exported in addition to Istio's defaults (outlier detection is needed by the circuit-breaker alert).
+    statsInclusionRegexps:
+      - ".*outlier_detection.*"
+      - ".*upstream_rq_retry.*"
+      - ".*upstream_rq_pending_overflow.*"
+      - ".*upstream_cx_overflow.*"
+
+kong:
+  enabled: true
+  # -- Public host. Shared: api.example.com; dedicated tenant: <tenant>.api.example.com.
+  host: api.example.com
+  # -- Route path prefix. Default: /<service.name>/<service.version>.
+  path: ""
+  stripPath: true
+  rateLimit:
+    enabled: true
+    minute: 1200
+    # -- local | cluster | redis
+    policy: redis
+    # -- (extra) consumer | ip | header | credential | service | path. "" = consumer when auth=jwt else ip.
+    limitBy: ""
+    # -- (extra) Header used when limitBy=header.
+    headerName: X-Tenant-ID
+    # -- (extra) Redis used for counters (conventions: Redis master in data-redis).
+    redis:
+      host: redis.data-redis.svc.cluster.local
+      port: 6379
+      database: 0
+      timeout: 2000
+      # -- Secret (in the release namespace) holding the Redis password; injected via KongPlugin configPatches.
+      passwordSecret: {name: "", key: ""}
+  # -- Extra KongPlugin/KongClusterPlugin names appended to konghq.com/plugins.
+  plugins: []
+  # -- jwt | none
+  auth: jwt
+  # -- (extra) Config of the chart-managed KongPlugins (override to match the Kong version).
+  jwt:
+    claimsToVerify: [exp]
+    keyClaimName: iss
+    runOnPreflight: false
+  correlationId:
+    enabled: true
+    headerName: X-Correlation-ID
+  prometheus:
+    enabled: true
+  opentelemetry:
+    enabled: true
+    # -- Kong >= 3.8 uses traces_endpoint (older: endpoint).
+    config:
+      traces_endpoint: http://otel-collector.observability.svc.cluster.local:4318/v1/traces
+      header_type: w3c
+      resource_attributes:
+        service.name: kong
+  responseTransformer:
+    enabled: true
+    removeHeaders: [Server, X-Powered-By, X-AspNet-Version, X-AspNetMvc-Version]
+  # -- (extra) Also route "/<service.name>" + header "X-API-Version: <version>" to this release.
+  versionHeaderRoute:
+    enabled: false
+    header: X-API-Version
+  # -- (extra) TLS for the Kong Ingress via cert-manager.
+  tls:
+    enabled: true
+    clusterIssuer: letsencrypt-prod
+    # -- Default: <fullname>-tls. Point to a shared wildcard secret and set certManager=false to avoid
+    #    one ACME order per release for the same host.
+    secretName: ""
+    certManager: true
+  # -- (extra)
+  annotations: {}
+  # -- (extra) Kong Ingress class.
+  ingressClassName: kong
+
+autoscaling:
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 50
+    # -- Target average CPU utilisation (% of request).
+    cpu: 70
+    # -- Target average memory utilisation (% of request). 0 disables the memory metric.
+    memory: 80
+    # -- (extra) HPA behavior: fast scale-up, slow scale-down.
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        selectPolicy: Max
+        policies:
+          - {type: Percent, value: 100, periodSeconds: 15}
+          - {type: Pods, value: 4, periodSeconds: 15}
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        selectPolicy: Min
+        policies:
+          - {type: Percent, value: 10, periodSeconds: 60}
+  # -- KEDA ScaledObject; if enabled it replaces the HPA (targets the Rollout/Deployment).
+  keda:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 100
+    # -- KEDA triggers (templated with tpl). See README for RabbitMQ / Kafka / Prometheus examples.
+    triggers: []
+    # -- (extra)
+    pollingInterval: 15
+    cooldownPeriod: 300
+    # -- (extra) Also scale on CPU (a KEDA "cpu" trigger) in addition to the event triggers.
+    cpu: 70
+    # -- (extra) Create TriggerAuthentication "<fullname>-keda" from "<fullname>-secrets".
+    #    Entries: {parameter: host, key: RABBITMQ_URI}
+    triggerAuthentication:
+      enabled: false
+      secretTargetRef: []
+
+pdb:
+  enabled: true
+  minAvailable: "50%"
+
+topologySpread:
+  enabled: true
+  # -- (extra)
+  maxSkew: 1
+  zoneWhenUnsatisfiable: ScheduleAnyway
+  hostnameWhenUnsatisfiable: ScheduleAnyway
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  path: /metrics
+  # -- (extra) Scrape through Istio mTLS (Prometheus mounts Istio certs at /etc/prom-certs).
+  #    Required when the namespace enforces STRICT mTLS and Prometheus is outside the mesh.
+  istioMtls: false
+  # -- (extra)
+  scrapeTimeout: 10s
+  labels: {}
+
+prometheusRule:
+  enabled: true
+  # -- (extra) Thresholds.
+  errorRateThreshold: 0.05
+  p95LatencyMs: 1000
+  restartThreshold: 3
+  labels: {}
+  # -- (extra) Base URL of the runbooks (adds runbook_url annotations when set).
+  runbookBaseUrl: ""
+
+networkPolicy:
+  enabled: true
+  # -- (extra) Namespaces allowed to reach the pods (same namespace always allowed).
+  ingressNamespaces: [kong, istio-internal, istio-system, monitoring]
+  # -- (extra) Namespaces the pods may reach (same namespace and kube-dns always allowed).
+  egressNamespaces: [data-postgres, data-redis, data-rabbitmq, data-kafka, observability, istio-system, istio-egress, integration]
+  # -- (extra) Raw extra egress rules (e.g. ipBlock for hybrid on-prem systems).
+  extraEgress: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # -- (extra) Override the name (default: <fullname>).
+  name: ""
+
+apm:
+  # -- OTEL_* env; java -> javaagent copied by an init container; dotnet -> CLR profiler auto-instrumentation.
+  enabled: true
+  # -- (extra) OTLP endpoint of the OpenTelemetry Collector.
+  endpoint: http://otel-collector.observability.svc.cluster.local:4318
+  protocol: http/protobuf
+  # -- (extra) Parent-based trace-id ratio sampling.
+  samplingRatio: "0.1"
+  # -- (extra) OTEL_SERVICE_NAME; default <fullname> so each API version is a separate APM service.
+  serviceName: ""
+  metricsExporter: otlp
+  # -- Logs go to stdout -> Fluent Bit; set "otlp" to also export them via OTLP.
+  logsExporter: none
+  # -- (extra) Inject an OTel auto-instrumentation agent per language (copied from the image by an init container).
+  agentInjection:
+    java: true
+    dotnet: true
+    # -- Python wheels must match the app's interpreter/libc; enable only for CPython 3.x glibc images.
+    python: false
+  agentImages:
+    java:
+      repository: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java
+      tag: "2.20.1"
+    dotnet:
+      repository: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-dotnet
+      tag: "1.12.0"
+    python:
+      repository: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python
+      tag: "0.58b0"
+  # -- (extra) linux-x64 (glibc) or linux-musl-x64 (alpine) for the .NET profiler.
+  dotnetRuntimeIdentifier: linux-x64
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector:
+  workload-tier: apps
+
+tolerations: []
+
+# -- Replaces the default preferred pod anti-affinity when non-empty.
+affinity: {}
+
+# -- (extra) Pod priority class.
+priorityClassName: ""
+
+# -- (extra) Helm test hook.
+tests:
+  enabled: true

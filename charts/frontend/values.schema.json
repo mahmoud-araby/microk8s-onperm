@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "charts/frontend values (docs/chart-interfaces.md)",
+  "type": "object",
+  "required": ["name", "image", "hosts"],
+  "properties": {
+    "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 40},
+    "tenant": {"type": "string", "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"},
+    "environment": {"type": "string"},
+    "version": {"type": "string"},
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "registry": {"type": "string"},
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$"},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "replicaCount": {"type": "integer", "minimum": 0},
+    "runtimeConfig": {"type": "object"},
+    "hosts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "kong": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "rateLimit": {
+          "type": "object",
+          "properties": {
+            "minute": {"type": "integer", "minimum": 1},
+            "enabled": {"type": "boolean"},
+            "policy": {"type": "string", "enum": ["local", "cluster", "redis"]}
+          }
+        },
+        "plugins": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "tls": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "issuer": {"type": "string"}, "certManager": {"type": "boolean"}}},
+    "cache": {
+      "type": "object",
+      "properties": {
+        "htmlMaxAge": {"type": "integer", "minimum": 0},
+        "assetsMaxAge": {"type": "integer", "minimum": 0},
+        "staticMaxAge": {"type": "integer", "minimum": 0}
+      }
+    },
+    "securityHeaders": {"type": "object", "properties": {"csp": {"type": "string", "minLength": 1}}},
+    "rollout": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "assetFallback": {"type": "boolean"}}},
+    "istio": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
+    "autoscaling": {"type": "object"},
+    "pdb": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "minAvailable": {"type": ["integer", "string"]}}},
+    "serviceMonitor": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
+    "networkPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
+    "resources": {"type": "object"},
+    "nodeSelector": {"type": "object"},
+    "lifecycle": {"type": "object", "properties": {"preStopMode": {"type": "string", "enum": ["sleep", "exec"]}}}
+  }
+}

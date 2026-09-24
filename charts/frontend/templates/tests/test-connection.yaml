@@ -1,0 +1,49 @@
+{{- if .Values.tests.enabled }}
+{{- $f := include "frontend.fullname" . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $f }}-test-connection
+  labels:
+    app.kubernetes.io/name: {{ include "frontend.name" . }}-test
+    app.kubernetes.io/instance: {{ $f }}-test
+    app.kubernetes.io/component: test
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    platform.example.com/tenant: {{ include "frontend.tenant" . }}
+    platform.example.com/language: static
+    sidecar.istio.io/inject: {{ .Values.istio.enabled | quote }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if .Values.istio.enabled }}
+    proxy.istio.io/config: |
+      holdApplicationUntilProxyStarts: true
+    {{- end }}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: wget
+      image: harbor.ops.example.local/dockerhub/library/busybox:1.36.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          rc=0
+          wget -q -O- -T 5 http://{{ $f }}/healthz || rc=1
+          wget -q -O- -T 5 http://{{ $f }}/config.js | grep -q "window.__CONFIG__" || rc=1
+          wget -q -S -O /dev/null -T 5 http://{{ $f }}/some/spa/route 2>&1 | grep -q "200 OK" || rc=1
+          {{- if .Values.istio.enabled }}
+          wget -q -O- --post-data '' http://127.0.0.1:15020/quitquitquit >/dev/null 2>&1 || true
+          {{- end }}
+          exit $rc
+      securityContext:
+        {{- include "frontend.containerSecurityContext" . | nindent 8 }}
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 32Mi}
+{{- end }}

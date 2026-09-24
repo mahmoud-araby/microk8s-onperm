@@ -1,0 +1,26 @@
+# Python (gunicorn + uvicorn workers) catalog service, Redis cache, OTel python auto-instrumentation.
+service:
+  name: catalog
+  version: v1
+language: python
+image:
+  repository: platform/catalog
+  tag: "3.2.0"
+dependencies:
+  redis: {enabled: true, db: 3, keyPrefix: "catalog:"}
+  postgres: {enabled: true, database: catalog}
+resources:
+  requests: {cpu: "1500m", memory: 512Mi}
+  limits: {memory: 1Gi}
+apm:
+  enabled: true
+  agentInjection: {java: true, dotnet: true, python: true}
+autoscaling:
+  hpa: {enabled: true, minReplicas: 8, maxReplicas: 80, cpu: 70, memory: 0}
+serviceMonitor:
+  istioMtls: true
+prometheusRule:
+  runbookBaseUrl: https://github.com/mahmoud-araby/microk8s-onperm/blob/main/docs/runbooks
+kong:
+  auth: none
+  rateLimit: {enabled: true, minute: 6000, policy: redis}

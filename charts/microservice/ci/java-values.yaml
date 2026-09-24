@@ -1,0 +1,66 @@
+# Java 21 (Spring Boot) payments service for a dedicated tenant, Kafka + Postgres, OTel java agent.
+service:
+  name: payments
+  version: v2
+language: java
+tenant: acme
+image:
+  repository: platform/payments
+  tag: "2.0.1"
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+config:
+  SPRING_PROFILES_ACTIVE: prod
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,prometheus
+dependencies:
+  postgres: {enabled: true, pooler: false}
+  kafka: {enabled: true, tls: true}
+probes:
+  startup: {path: /health/startup, failureThreshold: 60, periodSeconds: 5}
+resources:
+  requests: {cpu: "1", memory: 1Gi}
+  limits: {memory: 2Gi}
+tuning:
+  java:
+    maxRAMPercentage: 70
+    extraOptions: "-XX:+UseStringDeduplication"
+kong:
+  host: acme.api.example.com
+  rateLimit: {enabled: true, minute: 3000, policy: redis, limitBy: header, headerName: X-Tenant-ID,
+              redis: {host: redis.data-redis.svc.cluster.local, port: 6379, database: 2, timeout: 2000,
+                      passwordSecret: {name: kong-redis, key: password}}}
+rollout:
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: {duration: 5m}
+      - setWeight: 50
+      - pause: {}
+      - setWeight: 100
+    analysis: {enabled: true, successRate: 0.995, p95LatencyMs: 300, interval: 1m, failureLimit: 1}
+externalSecret:
+  vaultPath: tenants/acme/payments
+  data:
+    - secretKey: KAFKA_TRUSTSTORE_PASSWORD
+      remoteRef: {key: platform/kafka, property: truststore-password}
+extraVolumes:
+  - name: kafka-ca
+    secret: {secretName: kafka-cluster-ca-cert}
+extraVolumeMounts:
+  - name: kafka-ca
+    mountPath: /etc/kafka-ca
+    readOnly: true
+sidecars:
+  - name: cloudsql-like-adapter
+    image: harbor.ops.example.local/platform/db-adapter:1.0.0
+    ports: [{name: adapter, containerPort: 9001}]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, capabilities: {drop: [ALL]}}
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 64Mi}}
+initContainers:
+  - name: fetch-certs
+    image: '{{ include "microservice.startupImage" . }}'
+    command: ["sh", "-c", "echo preparing certificates for {{ .Values.tenant }}"]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, runAsNonRoot: true, capabilities: {drop: [ALL]}}
+tolerations: []
+topologySpread:
+  enabled: true
+  hostnameWhenUnsatisfiable: DoNotSchedule

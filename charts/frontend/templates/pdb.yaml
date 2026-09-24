@@ -1,0 +1,16 @@
+{{- $min := int .Values.replicaCount }}
+{{- if .Values.autoscaling.keda.enabled }}{{ $min = int .Values.autoscaling.keda.minReplicas }}{{ else if .Values.autoscaling.hpa.enabled }}{{ $min = int .Values.autoscaling.hpa.minReplicas }}{{ end }}
+{{- if and .Values.pdb.enabled (gt $min 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "frontend.fullname" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "frontend.selectorLabels" . | nindent 6 }}
+{{- end }}

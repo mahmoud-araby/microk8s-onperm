@@ -1,0 +1,128 @@
+{{- if .Values.kong.enabled }}
+{{- $fullname := include "microservice.fullname" . }}
+{{- $k := .Values.kong }}
+{{- if $k.correlationId.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-correlation-id
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: correlation-id
+config:
+  header_name: {{ $k.correlationId.headerName | default "X-Correlation-ID" }}
+  generator: uuid#counter
+  echo_downstream: true
+{{- end }}
+{{- if eq $k.auth "jwt" }}
+---
+# JWT validation against Keycloak realm keys (Kong consumers + jwt credentials are managed by the Kong component).
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-jwt
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: jwt
+config:
+  key_claim_name: {{ $k.jwt.keyClaimName | default "iss" }}
+  claims_to_verify: {{ toJson ($k.jwt.claimsToVerify | default (list "exp")) }}
+  run_on_preflight: {{ $k.jwt.runOnPreflight | default false }}
+  header_names: ["authorization"]
+  secret_is_base64: false
+{{- end }}
+{{- if $k.rateLimit.enabled }}
+{{- $rl := $k.rateLimit }}
+{{- $limitBy := $rl.limitBy | default (ternary "consumer" "ip" (eq $k.auth "jwt")) }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-rate-limit
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: rate-limiting
+config:
+  minute: {{ int $rl.minute }}
+  policy: {{ $rl.policy | default "redis" }}
+  limit_by: {{ $limitBy }}
+  {{- if eq $limitBy "header" }}
+  header_name: {{ $rl.headerName | default "X-Tenant-ID" }}
+  {{- end }}
+  fault_tolerant: true
+  hide_client_headers: false
+  {{- if eq ($rl.policy | default "redis") "redis" }}
+  redis:
+    host: {{ $rl.redis.host }}
+    port: {{ int $rl.redis.port }}
+    database: {{ int $rl.redis.database }}
+    timeout: {{ int $rl.redis.timeout }}
+  {{- end }}
+{{- if and (eq ($rl.policy | default "redis") "redis") $rl.redis.passwordSecret.name }}
+configPatches:
+  - path: /redis/password
+    valueFrom:
+      secretKeyRef:
+        name: {{ $rl.redis.passwordSecret.name }}
+        key: {{ $rl.redis.passwordSecret.key | default "password" }}
+{{- end }}
+{{- end }}
+{{- if .Values.tenant }}
+---
+# Dedicated tenant: overwrite any client supplied X-Tenant-ID (anti-spoofing) with the release's tenant.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-tenant-header
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: request-transformer
+config:
+  remove:
+    headers: ["X-Tenant-ID"]
+  add:
+    headers: [{{ printf "X-Tenant-ID:%s" .Values.tenant | quote }}]
+{{- end }}
+{{- if $k.responseTransformer.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-response-headers
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: response-transformer
+config:
+  remove:
+    headers: {{ toJson ($k.responseTransformer.removeHeaders | default list) }}
+{{- end }}
+{{- if $k.prometheus.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-prometheus
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: prometheus
+config:
+  per_consumer: false
+  status_code_metrics: true
+  latency_metrics: true
+  bandwidth_metrics: true
+  upstream_health_metrics: true
+{{- end }}
+{{- if $k.opentelemetry.enabled }}
+---
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: {{ $fullname }}-otel
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+plugin: opentelemetry
+config:
+  {{- toYaml $k.opentelemetry.config | nindent 2 }}
+{{- end }}
+{{- end }}

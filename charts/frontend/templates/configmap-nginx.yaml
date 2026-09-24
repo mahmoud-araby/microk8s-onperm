@@ -1,0 +1,225 @@
+{{- $v := .Values }}
+{{- $f := include "frontend.fullname" . }}
+{{- $htmlCache := ternary "no-cache" (printf "public, max-age=%d, must-revalidate" (int $v.cache.htmlMaxAge)) (eq (int $v.cache.htmlMaxAge) 0) }}
+{{- $assetCache := printf "public, max-age=%d, immutable" (int $v.cache.assetsMaxAge) }}
+{{- $staticCache := printf "public, max-age=%d" (int ($v.cache.staticMaxAge | default 3600)) }}
+{{- $sh := $v.securityHeaders }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $f }}-nginx
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+data:
+  security-headers.conf: |
+    # Included in every location: add_header in a location discards headers inherited from server level.
+    add_header Content-Security-Policy {{ tpl $sh.csp . | replace "\n" " " | trim | quote }} always;
+    {{- with $sh.hsts }}
+    add_header Strict-Transport-Security {{ . | quote }} always;
+    {{- end }}
+    add_header X-Frame-Options {{ $sh.frameOptions | default "DENY" | quote }} always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy {{ $sh.referrerPolicy | default "strict-origin-when-cross-origin" | quote }} always;
+    {{- with $sh.permissionsPolicy }}
+    add_header Permissions-Policy {{ . | quote }} always;
+    {{- end }}
+    {{- with $sh.crossOriginOpenerPolicy }}
+    add_header Cross-Origin-Opener-Policy {{ . | quote }} always;
+    {{- end }}
+    add_header X-Correlation-ID $correlation_id always;
+  nginx.conf: |
+    {{- if $v.nginx.brotli }}
+    load_module modules/ngx_http_brotli_filter_module.so;
+    load_module modules/ngx_http_brotli_static_module.so;
+    {{- end }}
+    # explicit worker count: "auto" would use every node CPU (no CPU limit is set)
+    worker_processes {{ int ($v.nginx.workerProcesses | default 2) }};
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+
+    events {
+      worker_connections {{ int $v.nginx.workerConnections }};
+      multi_accept on;
+    }
+
+    http {
+      include /etc/nginx/mime.types;
+      types {
+        application/javascript mjs;
+        application/manifest+json webmanifest;
+      }
+      default_type application/octet-stream;
+
+      # read-only root filesystem: every temp path lives on the /tmp emptyDir
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+
+      {{- if include "frontend.assetFallback" . }}
+      # canary asset fallback: requests that already are a fallback never fan out again (loop guard)
+      map $http_x_asset_fallback $asset_fallback {
+        default @asset_from_canary;
+        "~."    @asset_missing;
+      }
+      {{- end }}
+
+      map $http_x_correlation_id $correlation_id {
+        default $http_x_correlation_id;
+        ""      $request_id;
+      }
+
+      # JSON access logs on stdout (Fluent Bit -> Elasticsearch logs-<namespace>)
+      log_format json escape=json '{"time":"$time_iso8601","remote_addr":"$remote_addr",'
+        '"x_forwarded_for":"$http_x_forwarded_for","method":"$request_method","uri":"$request_uri",'
+        '"status":$status,"bytes":$body_bytes_sent,"duration":$request_time,"referer":"$http_referer",'
+        '"user_agent":"$http_user_agent","correlation_id":"$correlation_id","traceparent":"$http_traceparent",'
+        '"tenant_id":"{{ $v.tenant }}","service":"{{ $f }}"}';
+      access_log /dev/stdout json;
+
+      server_tokens off;
+      sendfile on;
+      tcp_nopush on;
+      tcp_nodelay on;
+      keepalive_timeout 65;
+      keepalive_requests 1000;
+      client_max_body_size 1m;
+      open_file_cache max=10000 inactive=60s;
+      open_file_cache_valid 120s;
+      etag on;
+
+      # Behind Kong + Istio: trust the forwarded client address from the mesh only
+      real_ip_header X-Forwarded-For;
+      set_real_ip_from 127.0.0.6;
+      set_real_ip_from 10.0.0.0/8;
+      set_real_ip_from 172.16.0.0/12;
+      set_real_ip_from 192.168.0.0/16;
+      real_ip_recursive on;
+
+      gzip on;
+      gzip_vary on;
+      gzip_proxied any;
+      gzip_comp_level 5;
+      gzip_min_length 1024;
+      gzip_types text/plain text/css text/xml application/json application/javascript application/xml
+                 application/xml+rss application/manifest+json image/svg+xml font/ttf font/otf application/wasm;
+      {{- if $v.nginx.gzipStatic }}
+      gzip_static on;
+      {{- end }}
+      {{- if $v.nginx.brotli }}
+      brotli on;
+      brotli_static on;
+      brotli_comp_level 5;
+      brotli_types text/plain text/css text/xml application/json application/javascript application/xml
+                   application/manifest+json image/svg+xml font/ttf font/otf application/wasm;
+      {{- end }}
+
+      server {
+        listen {{ int $v.nginx.port }} default_server;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+        absolute_redirect off;
+        {{- if include "frontend.assetFallback" . }}
+        recursive_error_pages on;
+        {{- end }}
+
+        include /etc/nginx/snippets/security-headers.conf;
+
+        location = /healthz {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
+
+        # runtime configuration (ConfigMap) - never cached
+        location = /config.js {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control "no-store, max-age=0" always;
+          expires off;
+        }
+
+        location = /index.html {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control {{ $htmlCache | quote }} always;
+        }
+
+        # fingerprinted build output -> cache forever
+        location ~* "{{ $v.cache.immutablePathRegex }}" {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control {{ $assetCache | quote }};
+          access_log off;
+          {{- if include "frontend.assetFallback" . }}
+          try_files $uri $asset_fallback;
+          {{- else }}
+          try_files $uri =404;
+          {{- end }}
+        }
+
+        # other static files (favicon, robots.txt, manifest, images without hash)
+        location ~* \.(?:ico|png|jpe?g|gif|svg|webp|avif|txt|xml|json|webmanifest|woff2?|ttf|otf)$ {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control {{ $staticCache | quote }};
+          try_files $uri =404;
+        }
+
+        {{- if include "frontend.assetFallback" . }}
+
+        # Canary asset fallback: index.html from one version may reference hashed assets that only the other
+        # version ships. Ask the canary pods, then the stable pods (header guard prevents loops).
+        location @asset_from_canary {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control {{ $assetCache | quote }};
+          proxy_set_header X-Asset-Fallback "1";
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_connect_timeout 2s;
+          proxy_read_timeout 5s;
+          proxy_intercept_errors on;
+          error_page 404 502 503 504 = @asset_from_stable;
+          proxy_pass http://{{ include "frontend.canaryName" . }}.{{ .Release.Namespace }}.svc.cluster.local;
+        }
+
+        location @asset_from_stable {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control {{ $assetCache | quote }};
+          proxy_set_header X-Asset-Fallback "1";
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_connect_timeout 2s;
+          proxy_read_timeout 5s;
+          proxy_intercept_errors on;
+          error_page 502 503 504 = @asset_missing;
+          proxy_pass http://{{ include "frontend.stableDirectName" . }}.{{ .Release.Namespace }}.svc.cluster.local;
+        }
+
+        location @asset_missing {
+          return 404;
+        }
+        {{- end }}
+
+        # SPA routes -> index.html (client-side router)
+        location / {
+          include /etc/nginx/snippets/security-headers.conf;
+          add_header Cache-Control {{ $htmlCache | quote }} always;
+          try_files $uri $uri/ /index.html;
+        }
+        {{- with $v.nginx.extraServerConfig }}
+        # extraServerConfig
+        {{- tpl . $ | trim | nindent 8 }}
+        {{- end }}
+      }
+
+      # stub_status for the nginx-prometheus-exporter sidecar (loopback only, never exposed)
+      server {
+        listen 127.0.0.1:{{ int $v.nginx.statusPort }};
+        server_name localhost;
+        access_log off;
+        location = /stub_status {
+          stub_status;
+          allow 127.0.0.1;
+          deny all;
+        }
+      }
+    }

@@ -1,0 +1,54 @@
+{{- if .Values.kong.enabled }}
+{{- $fullname := include "microservice.fullname" . }}
+{{- $k := .Values.kong }}
+{{- $tlsSecret := $k.tls.secretName | default (printf "%s-tls" $fullname) }}
+{{- $routes := list (dict "name" $fullname "path" (include "microservice.kongPath" .) "header" false) }}
+{{- if $k.versionHeaderRoute.enabled }}
+{{- $routes = append $routes (dict "name" (printf "%s-by-header" $fullname) "path" (printf "/%s" (include "microservice.name" .)) "header" true) }}
+{{- end }}
+{{- range $r := $routes }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $r.name }}
+  labels:
+    {{- include "microservice.labels" $ | nindent 4 }}
+  annotations:
+    konghq.com/strip-path: {{ $k.stripPath | quote }}
+    konghq.com/protocols: https
+    konghq.com/https-redirect-status-code: "308"
+    # send the upstream Host (konghq.com/host-header on the Service) so Istio applies the VirtualService
+    konghq.com/preserve-host: "false"
+    konghq.com/plugins: {{ include "microservice.kongPlugins" $ | quote }}
+    {{- if $r.header }}
+    konghq.com/headers.{{ $k.versionHeaderRoute.header | lower }}: {{ $.Values.service.version | quote }}
+    {{- end }}
+    {{- if and $k.tls.enabled $k.tls.certManager (not $r.header) }}
+    {{- /* only the primary Ingress owns the Certificate; the header route reuses its secret */}}
+    cert-manager.io/cluster-issuer: {{ $k.tls.clusterIssuer | default "letsencrypt-prod" }}
+    {{- end }}
+    {{- with $k.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $k.ingressClassName | default "kong" }}
+  {{- if $k.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $k.host | quote }}
+      secretName: {{ $tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ $k.host | quote }}
+      http:
+        paths:
+          - path: {{ $r.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

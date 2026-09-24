@@ -1,0 +1,25 @@
+{{- $f := include "microservice.fullname" . }}
+{{ $f }} ({{ .Values.language }}, image {{ include "microservice.image" . }}) deployed to namespace {{ .Release.Namespace }}.
+
+Workload : {{ include "microservice.workloadKind" . }}/{{ $f }}{{ if .Values.rollout.enabled }} (Argo Rollouts canary via Istio VirtualService {{ $f }}, route "primary"){{ end }}
+In-mesh  : http://{{ $f }}.{{ .Release.Namespace }}.svc.cluster.local{{ if ne (int .Values.service.port) 80 }}:{{ .Values.service.port }}{{ end }}
+{{- if .Values.kong.enabled }}
+Public   : https://{{ .Values.kong.host }}{{ include "microservice.kongPath" . }}/  (Kong, auth={{ .Values.kong.auth }}{{ if .Values.kong.rateLimit.enabled }}, {{ .Values.kong.rateLimit.minute }} req/min{{ end }})
+{{- end }}
+{{- if .Values.istio.internalGateway.enabled }}
+Internal : https://{{ .Values.istio.internalGateway.host | default (printf "%s.%s.internal.example.local" $f (include "microservice.tenant" .)) }}  (istio-internal gateway)
+{{- end }}
+Secrets  : {{ if .Values.externalSecret.enabled }}Vault secret/{{ include "microservice.vaultPath" . }} -> Secret {{ include "microservice.secretName" . }}{{ else }}disabled{{ end }}
+
+Useful commands:
+{{- if .Values.rollout.enabled }}
+  kubectl argo rollouts get rollout {{ $f }} -n {{ .Release.Namespace }} --watch
+  kubectl argo rollouts promote {{ $f }} -n {{ .Release.Namespace }}      # skip the current pause
+  kubectl argo rollouts abort {{ $f }} -n {{ .Release.Namespace }}        # shift traffic back to stable
+{{- else }}
+  kubectl rollout status deployment/{{ $f }} -n {{ .Release.Namespace }}
+{{- end }}
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ $f }} -c {{ include "microservice.name" . }} -f
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+GitOps: add ignoreDifferences for VirtualService route weights in the Argo CD Application (see chart README).

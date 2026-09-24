@@ -1,0 +1,9 @@
+# Shared SPA on app.example.com with canary + asset fallback.
+name: web
+image: {registry: harbor.ops.example.local, repository: platform/web, tag: "1.8.0"}
+hosts: [app.example.com]
+runtimeConfig:
+  apiBaseUrl: https://api.example.com
+  authUrl: https://keycloak.example.com/realms/platform
+  tenantId: ""
+  features: {newDashboard: true, maxUploadMb: 20}

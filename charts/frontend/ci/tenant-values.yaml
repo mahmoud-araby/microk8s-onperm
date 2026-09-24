@@ -1,0 +1,33 @@
+# Tenant-branded SPA (web-acme) on acme.app.example.com, internal gateway, brotli image, KEDA on RPS.
+name: web
+tenant: acme
+image: {registry: harbor.ops.example.local, repository: platform/web, tag: "1.8.0"}
+hosts: [acme.app.example.com]
+runtimeConfig:
+  apiBaseUrl: https://acme.api.example.com
+  authUrl: 'https://keycloak.example.com/realms/{{ .Values.tenant }}'
+  tenantId: ""
+  theme: acme
+kong:
+  enabled: true
+  rateLimit: {minute: 3000, redis: {host: redis.data-redis.svc.cluster.local, port: 6379, database: 0, timeout: 2000, passwordSecret: {name: kong-redis, key: password}}}
+  plugins: [bot-detection]
+tls: {enabled: true, issuer: letsencrypt-prod}
+cache: {htmlMaxAge: 60, assetsMaxAge: 31536000}
+nginx:
+  brotli: true
+  extraServerConfig: |
+    location = /robots.txt { add_header Cache-Control "public, max-age=86400"; return 200 "User-agent: *\nDisallow: /\n"; }
+istio:
+  internalGateway: {enabled: true, host: acme-web.internal.example.local}
+autoscaling:
+  keda:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 30
+    triggers:
+      - type: prometheus
+        metadata:
+          serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+          query: 'sum(rate(istio_requests_total{reporter="destination",destination_service_name="{{ include "frontend.fullname" . }}"}[1m]))'
+          threshold: "500"

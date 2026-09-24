@@ -1,0 +1,14 @@
+{{- $f := include "frontend.fullname" . }}
+{{ $f }} (image {{ include "frontend.image" . }}) deployed to {{ .Release.Namespace }} as {{ include "frontend.workloadKind" . }}/{{ $f }}.
+{{- if .Values.kong.enabled }}
+URLs (Kong):
+{{- range .Values.hosts }}
+  https://{{ . }}/
+{{- end }}
+{{- end }}
+Runtime config: https://<host>/config.js -> window.__CONFIG__ = {{ include "frontend.runtimeConfig" . }}
+{{- if .Values.rollout.enabled }}
+
+Canary: kubectl argo rollouts get rollout {{ $f }} -n {{ .Release.Namespace }} --watch
+{{- end }}
+Test:   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

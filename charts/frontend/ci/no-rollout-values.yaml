@@ -1,0 +1,9 @@
+# Plain Deployment, no mesh, no Kong (e.g. an internal admin UI behind another gateway).
+name: admin-ui
+rollout: {enabled: false}
+istio: {enabled: false}
+kong: {enabled: false}
+autoscaling: {hpa: {enabled: false}}
+replicaCount: 2
+serviceMonitor: {enabled: true, istioMtls: false}
+lifecycle: {preStopMode: exec}

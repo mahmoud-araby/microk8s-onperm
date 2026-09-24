@@ -1,0 +1,91 @@
+{{- $f := include "frontend.fullname" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $f }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+  {{- if .Values.kong.enabled }}
+  annotations:
+    # Kong -> ClusterIP through its Istio sidecar, so the VirtualService (canary weights) applies
+    ingress.kubernetes.io/service-upstream: "true"
+    konghq.com/protocol: http
+    konghq.com/host-header: {{ printf "%s.%s.svc.cluster.local" $f .Release.Namespace }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "frontend.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+{{- if .Values.rollout.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "frontend.canaryName" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+    role: canary
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "frontend.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+{{- end }}
+{{- if include "frontend.assetFallback" . }}
+---
+# Stable pods only (role=stable is set by the Rollout's stableMetadata). No VirtualService is bound to this
+# host, so the asset fallback reaches the stable version deterministically during a canary.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "frontend.stableDirectName" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+  annotations:
+    networking.istio.io/exportTo: "."
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "frontend.selectorLabels" . | nindent 4 }}
+    role: stable
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+{{- end }}
+{{- if .Values.serviceMonitor.enabled }}
+---
+# headless: every pod (stable + canary) scraped once via the exporter sidecar
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $f }}-metrics
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+    platform.example.com/metrics: "true"
+  annotations:
+    networking.istio.io/exportTo: "."
+spec:
+  clusterIP: None
+  selector:
+    {{- include "frontend.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.serviceMonitor.exporter.port }}
+      targetPort: metrics
+      protocol: TCP
+      appProtocol: http
+{{- end }}

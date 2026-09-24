@@ -1,0 +1,44 @@
+{{- if .Values.tests.enabled }}
+{{- $f := include "microservice.fullname" . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $f }}-test-connection
+  labels:
+    # deliberately NOT the selector labels: the test pod must not become a Service endpoint
+    app.kubernetes.io/name: {{ include "microservice.name" . }}-test
+    app.kubernetes.io/instance: {{ $f }}-test
+    app.kubernetes.io/component: test
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    platform.example.com/tenant: {{ include "microservice.tenant" . }}
+    platform.example.com/language: {{ .Values.language }}
+    sidecar.istio.io/inject: {{ .Values.istio.enabled | quote }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- if .Values.istio.enabled }}
+    proxy.istio.io/config: |
+      holdApplicationUntilProxyStarts: true
+    {{- end }}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- include "microservice.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: wget
+      image: {{ include "microservice.startupImage" . }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          wget -q -O- -T 5 http://{{ $f }}:{{ .Values.service.port }}{{ .Values.probes.readiness.path | default "/health/ready" }}; rc=$?
+          {{- if .Values.istio.enabled }}
+          wget -q -O- --post-data '' http://127.0.0.1:15020/quitquitquit >/dev/null 2>&1 || true
+          {{- end }}
+          exit $rc
+      securityContext:
+        {{- include "microservice.containerSecurityContext" (dict "uid" 10001) | nindent 8 }}
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {memory: 32Mi}
+{{- end }}

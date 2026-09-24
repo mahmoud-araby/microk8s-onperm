@@ -1,0 +1,37 @@
+{{- $keda := .Values.autoscaling.keda }}
+{{- if $keda.enabled }}
+{{- if and (not $keda.triggers) (not $keda.cpu) }}
+{{- fail "autoscaling.keda.enabled requires autoscaling.keda.triggers (or autoscaling.keda.cpu)" }}
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "frontend.fullname" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: {{ include "frontend.workloadApiVersion" . }}
+    kind: {{ include "frontend.workloadKind" . }}
+    name: {{ include "frontend.fullname" . }}
+  minReplicaCount: {{ $keda.minReplicas }}
+  maxReplicaCount: {{ $keda.maxReplicas }}
+  pollingInterval: {{ $keda.pollingInterval | default 15 }}
+  cooldownPeriod: {{ $keda.cooldownPeriod | default 300 }}
+  {{- with .Values.autoscaling.hpa.behavior }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        {{- toYaml . | nindent 8 }}
+  {{- end }}
+  triggers:
+    {{- if $keda.cpu }}
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ $keda.cpu | quote }}
+    {{- end }}
+    {{- with $keda.triggers }}
+    {{- tpl (toYaml .) $ | nindent 4 }}
+    {{- end }}
+{{- end }}
