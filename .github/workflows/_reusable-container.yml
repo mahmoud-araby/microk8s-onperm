@@ -131,13 +131,13 @@ jobs:
 
       - name: Upload Trivy SARIF
         if: ${{ !cancelled() && hashFiles('trivy-image.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image-${{ inputs.service }}
 
       - name: SBOM (syft, SPDX)
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
           format: spdx-json
