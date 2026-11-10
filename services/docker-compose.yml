@@ -71,7 +71,7 @@ services:
       retries: 20
 
   kafka:
-    image: apache/kafka:3.9.1
+    image: apache/kafka:4.3.1
     ports: ["29092:29092"]
     environment:
       KAFKA_NODE_ID: 1
